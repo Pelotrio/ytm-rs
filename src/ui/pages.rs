@@ -800,7 +800,7 @@ fn settings_card(ui: &mut Ui, body: impl FnOnce(&mut Ui)) {
 }
 
 /// A settings row: title and description on the left, the control on the right.
-fn setting_row(ui: &mut Ui, _first: bool, title: &str, desc: Option<&str>, control: impl FnOnce(&mut Ui)) {
+pub(super) fn setting_row(ui: &mut Ui, _first: bool, title: &str, desc: Option<&str>, control: impl FnOnce(&mut Ui)) {
     let w = ui.available_width();
     let text_w = (w - 230.0).max(200.0);
     let title_g = widgets::galley(ui, title, theme::semibold(14.5), theme::TEXT, text_w);
@@ -825,7 +825,7 @@ fn divider(ui: &mut Ui) {
 }
 
 /// On/off switch tinted with the accent.
-fn toggle(ui: &mut Ui, on: &mut bool, name: &str) -> egui::Response {
+pub(super) fn toggle(ui: &mut Ui, on: &mut bool, name: &str) -> egui::Response {
     let (rect, mut resp) = ui.allocate_exact_size(vec2(44.0, 26.0), Sense::click());
     if resp.clicked() {
         *on = !*on;

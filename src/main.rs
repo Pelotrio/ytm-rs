@@ -15,6 +15,7 @@ mod preset;
 mod shader;
 mod stream;
 mod theme;
+mod translate;
 mod turnstile;
 mod ui;
 mod update;

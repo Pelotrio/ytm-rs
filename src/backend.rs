@@ -156,6 +156,8 @@ pub enum Resp {
     Library(Library),
     History(Vec<Track>),
     Lyrics { video_id: String, lyrics: Option<Lyrics> },
+    /// Romanization/translation for the lyrics, arriving after them.
+    LyricsExtras { video_id: String, extras: crate::translate::Extras },
     Art { key: String, art: Art },
     Radio { seed: String, tracks: Vec<Track> },
     PlayQueue { tracks: Vec<Track> },
@@ -178,6 +180,7 @@ pub struct Backend {
     wake: Arc<dyn Fn() + Send + Sync>,
     data_dir: PathBuf,
     lyrics: Arc<lyrics::Client>,
+    translate: Arc<crate::translate::Client>,
     /// The upcoming track, resolved and downloading ahead of time.
     prefetched: Arc<std::sync::Mutex<Option<(String, Arc<Shared>)>>>,
     jsc: Arc<jsc::Solver>,
@@ -206,8 +209,9 @@ impl Backend {
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36")
             .build()?;
         let lyrics = Arc::new(lyrics::Client::new(http.clone(), &data_dir));
+        let translate = Arc::new(crate::translate::Client::new(http.clone(), &data_dir));
         let jsc = Arc::new(jsc::Solver::new(&data_dir));
-        Ok(Self { rt: Arc::new(rt), rp, http, tx, audio, wake, prefetched: Default::default(), data_dir, lyrics, jsc, premium: Default::default() })
+        Ok(Self { rt: Arc::new(rt), rp, http, tx, audio, wake, prefetched: Default::default(), data_dir, lyrics, translate, jsc, premium: Default::default() })
     }
 
     pub fn http(&self) -> &reqwest::Client {
@@ -342,7 +346,14 @@ impl Backend {
                 }
                 Req::Lyrics(track) => {
                     let video_id = track.id.clone();
-                    Resp::Lyrics { lyrics: self.lyrics_for(&track).await, video_id }
+                    let lyrics = self.lyrics_for(&track).await;
+                    let texts: Option<Vec<String>> = lyrics.as_ref().map(|l| l.lines.iter().map(|l| l.text.clone()).collect());
+                    // Show the lyrics straight away; the extras follow.
+                    let _ = self.tx.send(Resp::Lyrics { lyrics, video_id: video_id.clone() });
+                    self.wake();
+                    let Some(texts) = texts else { return Ok(None) };
+                    let Some(extras) = self.translate.extras(&video_id, &texts).await else { return Ok(None) };
+                    Resp::LyricsExtras { video_id, extras }
                 }
                 Req::Art { key, url } => {
                     let bytes = self.http.get(&url).send().await?.error_for_status()?.bytes().await?;

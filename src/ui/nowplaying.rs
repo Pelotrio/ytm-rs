@@ -107,6 +107,19 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
         if widgets::chip(ui, "Lyrics", app.np_tab == NpTab::Lyrics).clicked() {
             app.np_tab = NpTab::Lyrics;
         }
+        if app.np_tab == NpTab::Lyrics {
+            ui.add_space(4.0);
+            let tr = widgets::chip(ui, "文A", app.show_roman || app.show_trans).on_hover_text("Romanization and translation");
+            egui::Popup::menu(&tr).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                ui.set_width(300.0);
+                super::pages::setting_row(ui, true, "Romanization", Some("Japanese, Korean, Chinese, Cyrillic and other scripts in Latin letters."), |ui| {
+                    super::pages::toggle(ui, &mut app.show_roman, "Romanization");
+                });
+                super::pages::setting_row(ui, false, "English translation", Some("Machine translated by Google. Skipped for English songs."), |ui| {
+                    super::pages::toggle(ui, &mut app.show_trans, "English translation");
+                });
+            });
+        }
     });
 
     let content = Rect::from_min_max(pos2(area.left(), header.bottom() + 12.0), area.max);
@@ -231,11 +244,22 @@ fn lyrics_panel(app: &mut App, ui: &mut Ui, rect: Rect, now: f64, centered: bool
         egui::ScrollArea::vertical().id_salt("plain-lyrics").auto_shrink(false).show(ui, |ui| {
             ui.label(egui::RichText::new("These lyrics aren't synced").font(theme::regular(13.0)).color(theme::TEXT_FAINT));
             ui.add_space(14.0);
-            for l in &lyrics.lines {
+            let extras = app.lyrics_extras.as_ref().map(|(_, e)| e);
+            fn get(on: bool, v: Option<&Vec<Option<String>>>, i: usize) -> Option<&str> {
+                v.filter(|_| on)?.get(i)?.as_deref()
+            }
+            for (i, l) in lyrics.lines.iter().enumerate() {
                 ui.label(egui::RichText::new(&l.text).font(theme::semibold(22.0)).color(theme::TEXT));
+                if let Some(r) = get(app.show_roman, extras.map(|e| &e.roman), i) {
+                    ui.label(egui::RichText::new(r).font(theme::semibold(14.0)).color(theme::text_dim()));
+                }
+                if let Some(t) = get(app.show_trans, extras.map(|e| &e.trans), i) {
+                    ui.label(egui::RichText::new(t).font(theme::regular(13.5)).color(theme::TEXT_FAINT));
+                }
             }
             ui.add_space(20.0);
-            ui.label(egui::RichText::new(format!("Lyrics from {}", lyrics.source)).font(theme::regular(12.0)).color(theme::TEXT_FAINT));
+            let shown = extras.is_some() && (app.show_roman || app.show_trans);
+            ui.label(egui::RichText::new(credit(&lyrics, shown)).font(theme::regular(12.0)).color(theme::TEXT_FAINT));
         });
         return;
     }
@@ -280,10 +304,28 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, nar
     };
     let active = items.iter().rposition(|it| started(it) <= pos_ms && !matches!(it, Item::Line(i) if lyrics.lines[*i].background));
 
+    // Romanization and translation, laid out under their line.
+    let extras = app.lyrics_extras.as_ref().map(|(_, e)| e.clone());
+    let (show_roman, show_trans) = (app.show_roman, app.show_trans);
+    let sub_gap = size * 0.08;
+    // Same font family as the lyrics: romanization a step lighter, translation regular.
+    let roman_weight = if style.weight == crate::preset::Weight::Bold { crate::preset::Weight::Semibold } else { style.weight };
+    let subs_for = |ui: &mut Ui, i: usize, bg: bool, scale: f32| -> [Option<std::sync::Arc<egui::Galley>>; 2] {
+        let s = if bg { size * 0.62 } else { size } * scale;
+        let get = |on: bool, v: Option<&Vec<Option<String>>>| v.filter(|_| on).and_then(|v| v.get(i).cloned().flatten());
+        let roman = get(show_roman, extras.as_ref().map(|e| &e.roman));
+        let trans = get(show_trans, extras.as_ref().map(|e| &e.trans));
+        [
+            roman.map(|t| ui.fonts_mut(|f| f.layout(t, theme::lyric_font(&style.font, roman_weight, s * 0.5), Color32::WHITE, width * scale))),
+            trans.map(|t| ui.fonts_mut(|f| f.layout(t, theme::lyric_font(&style.font, crate::preset::Weight::Regular, s * 0.46), Color32::WHITE, width * scale))),
+        ]
+    };
+
     // Layout pass.
     let gap = size * style.line_gap.clamp(0.1, 1.6);
     let mut ys = Vec::with_capacity(items.len());
     let mut galleys = Vec::with_capacity(items.len());
+    let mut subs = Vec::with_capacity(items.len());
     let mut y = 0.0;
     for it in &items {
         ys.push(y);
@@ -291,12 +333,16 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, nar
             Item::Line(i) => {
                 let l = &lyrics.lines[*i];
                 let g = ui.fonts_mut(|f| f.layout(display_text(l), font(size, l.background), Color32::WHITE, width));
-                y += g.size().y + if l.background { gap * 0.5 } else { gap };
+                let sg = subs_for(ui, *i, l.background, 1.0);
+                let sub_h: f32 = sg.iter().flatten().map(|s| s.size().y + sub_gap).sum();
+                y += g.size().y + sub_h + if l.background { gap * 0.5 } else { gap };
                 galleys.push(Some(g));
+                subs.push(sg);
             }
             Item::Gap { .. } => {
                 y += size * 1.3;
                 galleys.push(None);
+                subs.push([None, None]);
             }
         }
     }
@@ -320,6 +366,8 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, nar
     }
     ui.data_mut(|d| d.insert_temp(sid, scroll));
     let origin_y = anchor - scroll;
+    // Themes that hide sung lines show them again, blurred, while the user scrolls back.
+    let reveal = theme::anim_bool(ui.ctx(), "lyr-reveal", user_scrolling, 0.3);
 
     let painter = ui.painter_at(rect);
     let fade = |yy: f32| {
@@ -389,7 +437,7 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, nar
                 let base_alpha = if lit {
                     style.active_alpha
                 } else if past {
-                    style.past_alpha.unwrap_or(upcoming_alpha)
+                    egui::lerp(style.past_alpha.unwrap_or(upcoming_alpha)..=upcoming_alpha, reveal)
                 } else {
                     upcoming_alpha
                 };
@@ -397,7 +445,7 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, nar
                 let blur_on = match style.blur_scope {
                     BlurScope::All => true,
                     BlurScope::Past => past,
-                    BlurScope::Upcoming => !past,
+                    BlurScope::Upcoming => !past || reveal > 0.0,
                 };
                 let target_blur = if style.blur > 0.0 && blur_on && !lit { style.blur * (1.0 + 0.35 * (dist - 1.0).clamp(0.0, 3.0)) } else { 0.0 };
                 let target_blur = target_blur.min(9.0).min(size * 0.22);
@@ -427,63 +475,53 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, nar
                 } else {
                     0.0
                 };
-                let rows = split_rows(&g, pos, progress);
-                let soft = style.fill == Fill::Sweep;
-                // Unsung text: only the part the fill hasn't reached while the line is lit.
-                if a > 0.003 {
-                    if lit {
-                        for r in &rows {
-                            let from = if soft { r.edge - 6.0 } else { r.edge };
-                            if from < r.right {
-                                let clip = Rect::from_min_max(pos2(from.max(r.left), r.top), pos2(r.right, r.bottom));
-                                painter.with_clip_rect(clip.intersect(painter.clip_rect())).galley_with_override_text_color(pos, g.clone(), theme::with_alpha(Color32::WHITE, a));
-                            }
-                        }
+                let scale = g.size().x / base_g.size().x.max(1.0);
+                let look = Paint {
+                    a,
+                    lit,
+                    lit_amt,
+                    soft: style.fill == Fill::Sweep,
+                    radius,
+                    blur_mix,
+                    lift: vec2(0.0, -style.lift.clamp(0.0, 6.0) * lit_amt),
+                    sung: theme::with_alpha(sung_color, lit_amt * edge_fade),
+                    glow: (style.glow > 0.0).then(|| {
+                        (style.glow.clamp(0.0, 1.0), theme::with_alpha(glow_color, lit_amt * edge_fade * (0.2 + 0.5 * style.glow.clamp(0.0, 1.0))))
+                    }),
+                };
+                paint_text(&mut app.textfx, ui.ctx(), &painter, &g, pos, progress, size * scale, &look);
+
+                // Romanization and translation under the line, drawn the same way: same
+                // font, scale, lift, colours and glow. Romanization follows the fill in
+                // step with the line; the translation lights as a whole.
+                let mut ink = ink;
+                let sg = if scale > 1.001 { subs_for(ui, *i, l.background, scale) } else { subs[k].clone() };
+                let glyphs = |g: &egui::Galley| g.rows.iter().map(|r| r.row.glyphs.len()).sum::<usize>() as f32;
+                let frac = if progress.is_finite() { progress / glyphs(&g).max(1.0) } else { progress };
+                let mut sy = line_rect.bottom().max(ink.bottom()) + sub_gap * scale;
+                for (j, sg) in sg.iter().enumerate() {
+                    let Some(sg) = sg else { continue };
+                    let sx = if centered {
+                        rect.center().x - sg.size().x / 2.0
+                    } else if l.alt_singer {
+                        rect.right() - 20.0 - sg.size().x
                     } else {
-                        let blurred = if blur_mix > 0.01 && radius > 0.2 { app.textfx.get(ui.ctx(), &g, radius, 1.25) } else { None };
-                        match blurred {
-                            Some(b) => {
-                                if blur_mix < 0.99 {
-                                    painter.galley_with_override_text_color(pos, g.clone(), theme::with_alpha(Color32::WHITE, a * (1.0 - blur_mix)));
-                                }
-                                b.paint(&painter, pos, theme::with_alpha(Color32::WHITE, a * blur_mix));
-                            }
-                            None => painter.galley_with_override_text_color(pos, g.clone(), theme::with_alpha(Color32::WHITE, a)),
-                        }
-                    }
-                }
-                if lit_amt > 0.0 {
-                    let color = theme::with_alpha(sung_color, lit_amt * edge_fade);
-                    let lift = vec2(0.0, -style.lift.clamp(0.0, 6.0) * lit_amt);
-                    for r in &rows {
-                        let solid_end = if soft { r.edge - 6.0 } else { r.edge };
-                        if solid_end > r.left {
-                            let clip = Rect::from_min_max(pos2(r.left, r.top), pos2(solid_end, r.bottom));
-                            if style.glow > 0.0 {
-                                let gr = size * 0.2 * style.glow.clamp(0.0, 1.0) + 3.0;
-                                if let Some(b) = app.textfx.get(ui.ctx(), &g, gr, 1.8) {
-                                    let gclip = Rect::from_min_max(pos2(r.left - gr * 2.0, r.top - gr * 2.0), pos2(solid_end, r.bottom + gr * 2.0));
-                                    let tint = theme::with_alpha(glow_color, lit_amt * edge_fade * (0.45 + 0.55 * style.glow.clamp(0.0, 1.0)));
-                                    b.paint(&painter.with_clip_rect(gclip.intersect(painter.clip_rect())), pos + lift, tint);
-                                }
-                            }
-                            painter.with_clip_rect(clip.intersect(painter.clip_rect())).galley_with_override_text_color(pos + lift, g.clone(), color);
-                        }
-                        // Feather: a few thin bands with decreasing alpha (and lift) at the edge.
-                        if soft && r.edge > r.left && r.edge < r.right {
-                            for b in 0..4 {
-                                let x0 = r.edge - 6.0 + b as f32 * 3.0;
-                                let band = Rect::from_min_max(pos2(x0, r.top), pos2(x0 + 3.0, r.bottom));
-                                let t = 1.0 - (b as f32 + 0.5) / 4.0;
-                                painter
-                                    .with_clip_rect(band.intersect(painter.clip_rect()))
-                                    .galley_with_override_text_color(pos + lift * t, g.clone(), theme::with_alpha(color, t * color.a() as f32 / 255.0));
-                            }
-                        }
-                    }
+                        rect.left() + 20.0
+                    };
+                    let sp = pos2(sx, sy);
+                    sy += sg.size().y + sub_gap * scale;
+                    ink = ink.union(Rect::from_min_size(sp, sg.size()));
+                    let (dim, sub_size) = if j == 0 { (0.85, size * scale * 0.5) } else { (0.7, size * scale * 0.46) };
+                    let sub_progress = if j == 0 && frac.is_finite() { frac * glyphs(sg) } else if progress > 0.0 { f32::INFINITY } else { 0.0 };
+                    // Small text drowns in a glow sized for the line, so it gets half as much.
+                    let glow = look.glow.map(|(st, tint)| (st, theme::with_alpha(tint, 0.5)));
+                    let sub = Paint { a: a * dim, radius: radius * 0.6, sung: theme::with_alpha(look.sung, dim), glow, ..look };
+                    paint_text(&mut app.textfx, ui.ctx(), &painter, sg, sp, sub_progress, sub_size, &sub);
                 }
                 // Click a line to jump there.
-                let resp = ui.interact(ink, ui.id().with(("lyr", k)), Sense::click());
+                // Only inside the lyrics area: lines running past its edge mustn't take
+                // clicks meant for the player bar.
+                let resp = ui.interact(ink.intersect(rect), ui.id().with(("lyr", k)), Sense::click());
                 let resp = named(resp, &l.text);
                 if resp.hovered() {
                     painter.rect_filled(ink.expand2(vec2(10.0, 6.0)), 8.0, theme::glass(0.05));
@@ -497,10 +535,103 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, nar
     painter.text(
         rect.right_bottom() - vec2(6.0, 4.0),
         Align2::RIGHT_BOTTOM,
-        format!("Lyrics from {}", lyrics.source),
+        credit(lyrics, extras.is_some() && (show_roman || show_trans)),
         theme::regular(11.5),
         theme::TEXT_FAINT,
     );
+}
+
+/// How a lyric galley is drawn this frame.
+#[derive(Clone, Copy)]
+struct Paint {
+    /// Alpha of unsung text.
+    a: f32,
+    lit: bool,
+    lit_amt: f32,
+    /// Feathered sweep edge (vs. a hard one).
+    soft: bool,
+    /// Blur radius and how far blurred it is.
+    radius: f32,
+    blur_mix: f32,
+    lift: Vec2,
+    /// Sung colour, alpha included.
+    sung: Color32,
+    /// Glow strength (0..1) and tint.
+    glow: Option<(f32, Color32)>,
+}
+
+/// Draw one galley of a lyric line: unsung text (blurred while inactive), then the
+/// sung part up to `progress` characters, glowing, lifted and feathered at the edge.
+#[allow(clippy::too_many_arguments)]
+fn paint_text(
+    fx: &mut super::textfx::TextFx,
+    ctx: &egui::Context,
+    painter: &egui::Painter,
+    g: &std::sync::Arc<egui::Galley>,
+    pos: Pos2,
+    progress: f32,
+    font_size: f32,
+    p: &Paint,
+) {
+    let rows = split_rows(g, pos, progress);
+    if p.a > 0.003 {
+        if p.lit {
+            // Unsung text: only the part the fill hasn't reached.
+            for r in &rows {
+                // A finished row has no soft edge left to feather.
+                let from = if p.soft && r.edge < r.right { r.edge - 6.0 } else { r.edge };
+                if from < r.right {
+                    let clip = Rect::from_min_max(pos2(from.max(r.left), r.top), pos2(r.right, r.bottom));
+                    painter.with_clip_rect(clip.intersect(painter.clip_rect())).galley_with_override_text_color(pos, g.clone(), theme::with_alpha(Color32::WHITE, p.a));
+                }
+            }
+        } else {
+            let blurred = if p.blur_mix > 0.01 && p.radius > 0.2 { fx.get(ctx, g, p.radius, 1.25) } else { None };
+            match blurred {
+                Some(b) => {
+                    if p.blur_mix < 0.99 {
+                        painter.galley_with_override_text_color(pos, g.clone(), theme::with_alpha(Color32::WHITE, p.a * (1.0 - p.blur_mix)));
+                    }
+                    b.paint(painter, pos, theme::with_alpha(Color32::WHITE, p.a * p.blur_mix));
+                }
+                None => painter.galley_with_override_text_color(pos, g.clone(), theme::with_alpha(Color32::WHITE, p.a)),
+            }
+        }
+    }
+    if p.lit_amt <= 0.0 {
+        return;
+    }
+    for r in &rows {
+        let solid_end = if p.soft && r.edge < r.right { r.edge - 6.0 } else { r.edge };
+        if solid_end > r.left {
+            let clip = Rect::from_min_max(pos2(r.left, r.top), pos2(solid_end, r.bottom));
+            if let Some((strength, tint)) = p.glow {
+                // A soft halo that spreads with the theme's strength. A tight, bright one
+                // fills the gaps inside letters and makes the text itself look blurred.
+                let gr = (font_size * (0.12 + 0.25 * strength)).max(2.5);
+                if let Some(b) = fx.get(ctx, g, gr, 1.3) {
+                    let gclip = Rect::from_min_max(pos2(r.left - gr * 2.0, r.top - gr * 2.0), pos2(solid_end, r.bottom + gr * 2.0));
+                    b.paint(&painter.with_clip_rect(gclip.intersect(painter.clip_rect())), pos + p.lift, tint);
+                }
+            }
+            painter.with_clip_rect(clip.intersect(painter.clip_rect())).galley_with_override_text_color(pos + p.lift, g.clone(), p.sung);
+        }
+        // Feather: a few thin bands with decreasing alpha (and lift) at the edge.
+        if p.soft && r.edge > r.left && r.edge < r.right {
+            for b in 0..4 {
+                let x0 = r.edge - 6.0 + b as f32 * 3.0;
+                let band = Rect::from_min_max(pos2(x0, r.top), pos2(x0 + 3.0, r.bottom));
+                let t = 1.0 - (b as f32 + 0.5) / 4.0;
+                painter
+                    .with_clip_rect(band.intersect(painter.clip_rect()))
+                    .galley_with_override_text_color(pos + p.lift * t, g.clone(), theme::with_alpha(p.sung, t * p.sung.a() as f32 / 255.0));
+            }
+        }
+    }
+}
+
+fn credit(lyrics: &Lyrics, extras: bool) -> String {
+    if extras { format!("Lyrics from {} · Translated by Google", lyrics.source) } else { format!("Lyrics from {}", lyrics.source) }
 }
 
 fn display_text(l: &Line) -> String {

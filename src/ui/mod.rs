@@ -187,6 +187,10 @@ pub struct App {
     queue_open: bool,
     fullscreen: bool,
     lyrics: Option<(String, Option<Lyrics>)>,
+    /// Romanization/translation for `lyrics` (same video ID).
+    lyrics_extras: Option<(String, crate::translate::Extras)>,
+    show_roman: bool,
+    show_trans: bool,
     lyrics_user_scroll: f64,
     /// Rotation of a "record" cover (radians); advances only while playing.
     record_angle: f64,
@@ -299,6 +303,9 @@ impl App {
             queue_open: false,
             fullscreen: false,
             lyrics: None,
+            lyrics_extras: None,
+            show_roman: get("show_roman").is_none_or(|v| v == "1"),
+            show_trans: get("show_trans").is_none_or(|v| v == "1"),
             lyrics_user_scroll: -10.0,
             record_angle: 0.0,
             textfx: Default::default(),
@@ -587,6 +594,7 @@ impl App {
         // Background art and lyrics follow the track.
         self.request_art();
         self.lyrics = None;
+        self.lyrics_extras = None;
         self.backend.request(Req::Lyrics(track.clone()));
         // Keep the queue topped up so autoplay never stalls at the end.
         if self.autoplay && !self.radio_pending && self.index.is_some_and(|i| i + 1 >= self.queue.len()) {
@@ -967,6 +975,11 @@ impl App {
             Resp::Lyrics { video_id, lyrics } => {
                 if self.current_id() == Some(video_id.as_str()) {
                     self.lyrics = Some((video_id, lyrics));
+                }
+            }
+            Resp::LyricsExtras { video_id, extras } => {
+                if self.current_id() == Some(video_id.as_str()) {
+                    self.lyrics_extras = Some((video_id, extras));
                 }
             }
             Resp::Art { key, art } => {
@@ -1425,6 +1438,8 @@ impl eframe::App for App {
         }
         storage.set_string("anim_bg", b(self.anim_bg));
         storage.set_string("reactive_bg", b(self.reactive_bg));
+        storage.set_string("show_roman", b(self.show_roman));
+        storage.set_string("show_trans", b(self.show_trans));
         // Background test runs leave the user's real "last song" alone unless asked.
         let test_run = std::env::var_os("YTM_BACKGROUND").is_some() && std::env::var_os("YTM_SAVE_SESSION").is_none();
         if let Some(s) = self.session_json().filter(|_| !test_run) {
