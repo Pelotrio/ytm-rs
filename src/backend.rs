@@ -721,6 +721,10 @@ impl Backend {
         self.wake();
     }
 
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+
     pub fn is_logged_in(&self) -> bool {
         self.rp.query().auth_enabled(rustypipe::client::ClientType::Desktop)
     }

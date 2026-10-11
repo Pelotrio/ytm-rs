@@ -171,9 +171,28 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
             }
         });
     });
+    let ready = app.updater.as_ref().and_then(|u| match u.state() {
+        crate::update::State::Ready { version, .. } => Some(version),
+        _ => None,
+    });
+    let mut restart = false;
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
         nav(ui, icon::SETTINGS, "Settings", Page::Settings, p == Page::Settings);
+        if let Some(v) = &ready {
+            ui.add_space(6.0);
+            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());
+            let resp = named(resp, "Restart to update").on_hover_cursor(egui::CursorIcon::PointingHand);
+            let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
+            ui.painter().rect_filled(rect, 12.0, theme::with_alpha(accent, 0.22 + 0.12 * h));
+            icon_at(ui, pos2(rect.left() + 22.0, rect.center().y), icon::SPARKLES, 18.0, Color32::WHITE);
+            ui.painter().text(pos2(rect.left() + 44.0, rect.top() + 17.0), Align2::LEFT_CENTER, "Restart to update", theme::semibold(13.5), Color32::WHITE);
+            ui.painter().text(pos2(rect.left() + 44.0, rect.top() + 35.0), Align2::LEFT_CENTER, format!("ytm-rs {v}"), theme::regular(12.0), theme::with_alpha(Color32::WHITE, 0.75));
+            restart = resp.clicked();
+        }
     });
+    if restart {
+        app.restart_to_update(ui.ctx());
+    }
     if let Some(page) = go_to {
         app.actions.push(Action::Go(page));
     }

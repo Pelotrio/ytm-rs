@@ -198,6 +198,15 @@ pub struct App {
     signing_in: Arc<AtomicBool>,
     cookie_input: String,
     toast: Option<(String, f64)>,
+
+    // updates
+    updater: Option<crate::update::Updater>,
+    auto_update: bool,
+    /// When the last automatic update check ran (app time, s).
+    update_checked: Option<f64>,
+    update_announced: bool,
+    /// The user picked "Restart to update": install on exit, then relaunch.
+    restart_for_update: bool,
     actions: Vec<Action>,
     dialog: Option<Dialog>,
     share_pending: Option<String>,
@@ -263,6 +272,11 @@ impl App {
             },
             autoplay: get("autoplay").is_none_or(|v| v == "1"),
             normalize: get("normalize").is_none_or(|v| v == "1"),
+            updater: None,
+            auto_update: get("auto_update").is_none_or(|v| v == "1"),
+            update_checked: None,
+            update_announced: false,
+            restart_for_update: false,
             radio_pending: false,
             seek_drag: None,
             art_key: None,
@@ -635,6 +649,41 @@ impl App {
             self.toast("Shuffled up next");
             self.prefetch_next();
         }
+    }
+
+    /// Automatic update checks: shortly after launch, then every six hours.
+    fn tick_updates(&mut self, ctx: &egui::Context, now: f64) {
+        use crate::update::{State, Updater, installed};
+        if self.updater.is_none() {
+            let c = ctx.clone();
+            self.updater = Some(Updater::new(self.backend.data_dir(), move || c.request_repaint()));
+        }
+        let Some(u) = self.updater.clone() else { return };
+        let due = match self.update_checked {
+            None => now > 8.0,
+            Some(t) => now - t > 6.0 * 3600.0 && !matches!(u.state(), State::Ready { .. }),
+        };
+        let enabled = self.auto_update && installed() && std::env::var_os("YTM_BACKGROUND").is_none_or(|_| std::env::var_os("YTM_UPDATE_FORCE").is_some());
+        if enabled && due {
+            self.update_checked = Some(now);
+            u.check();
+        } else if enabled {
+            // An idle app doesn't repaint on its own: wake up when the next check is due.
+            let next = self.update_checked.map_or(8.0, |t| t + 6.0 * 3600.0);
+            ctx.request_repaint_after(Duration::from_secs_f64((next - now).max(0.5) + 0.1));
+        }
+        if let State::Ready { version, .. } = u.state()
+            && !self.update_announced
+        {
+            self.update_announced = true;
+            self.toast(format!("ytm-rs {version} is ready. It installs when you close the app."));
+        }
+    }
+
+    /// Close the app so the downloaded update installs, then relaunch it.
+    fn restart_to_update(&mut self, ctx: &egui::Context) {
+        self.restart_for_update = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     fn toast(&mut self, msg: impl Into<String>) {
@@ -1195,6 +1244,7 @@ impl eframe::App for App {
         }
         fit_window_to_monitor(ctx);
         self.sync_discord();
+        self.tick_updates(ctx, now);
         let np = widgets::NowPlaying {
             song: self.current_id().map(str::to_owned),
             source: self.queue_source.clone(),
@@ -1363,6 +1413,7 @@ impl eframe::App for App {
         let b = |v: bool| if v { "1" } else { "0" }.to_owned();
         storage.set_string("autoplay", b(self.autoplay));
         storage.set_string("normalize", b(self.normalize));
+        storage.set_string("auto_update", b(self.auto_update));
         storage.set_string("discord_enabled", b(self.discord_enabled));
         storage.set_string("default_theme", b(self.default_theme));
         if std::env::var_os("YTM_THEME").is_none() {
@@ -1380,6 +1431,13 @@ impl eframe::App for App {
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
         if let (Some(bg), Some(gl)) = (&self.bg, gl) {
             bg.destroy(gl);
+        }
+        // A downloaded update installs as the app closes (and relaunches it when the
+        // user asked to restart).
+        if let Some(u) = &self.updater
+            && (self.restart_for_update || self.auto_update)
+        {
+            u.install(self.restart_for_update);
         }
     }
 }

@@ -687,6 +687,49 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
         app.set_discord_enabled(discord_enabled);
     }
 
+    // ---- updates
+    section_label(ui, "Updates", None);
+    let state = app.updater.as_ref().map(|u| u.state());
+    let installed = crate::update::installed();
+    let (mut check, mut restart) = (false, false);
+    settings_card(ui, |ui| {
+        use crate::update::State;
+        let status = if !installed {
+            "Updates only work in the installed app (this is a development build).".to_owned()
+        } else {
+            match &state {
+                Some(State::Checking) => "Checking for updates…".to_owned(),
+                Some(State::UpToDate) => format!("You're on the latest version ({}).", crate::update::current_version()),
+                Some(State::Downloading { version, percent }) => format!("Downloading {version}… {percent}%"),
+                Some(State::Ready { version, .. }) => format!("Version {version} is ready. It installs when you close ytm-rs."),
+                Some(State::Failed(e)) => format!("Couldn't check for updates: {e}"),
+                _ => format!("Version {}.", crate::update::current_version()),
+            }
+        };
+        setting_row(ui, true, "Automatic updates", Some("Download new versions in the background and install them when you close the app."), |ui| {
+            ui.add_enabled_ui(installed, |ui| toggle(ui, &mut app.auto_update, "Automatic updates"));
+        });
+        divider(ui);
+        setting_row(ui, false, "Status", Some(&status), |ui| {
+            if !installed {
+                return;
+            }
+            match &state {
+                Some(State::Ready { .. }) => restart = pill(ui, "Restart to update", Some(icon::SPARKLES), true).clicked(),
+                Some(State::Checking | State::Downloading { .. }) => {
+                    ui.spinner();
+                }
+                _ => check = pill(ui, "Check now", None, false).clicked(),
+            }
+        });
+    });
+    if check && let Some(u) = &app.updater {
+        u.check();
+    }
+    if restart {
+        app.restart_to_update(ui.ctx());
+    }
+
     // ---- shortcuts
     section_label(ui, "Keyboard shortcuts", None);
     settings_card(ui, |ui| {

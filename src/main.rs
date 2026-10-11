@@ -17,6 +17,7 @@ mod stream;
 mod theme;
 mod turnstile;
 mod ui;
+mod update;
 mod webmusic;
 mod ytdlp;
 mod ytm;
