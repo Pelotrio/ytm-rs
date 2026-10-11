@@ -23,22 +23,31 @@ pub fn vgradient(ui: &Ui, rect: Rect, top: Color32, bottom: Color32) {
 }
 
 pub fn background(app: &mut App, ui: &mut Ui, screen: Rect, now: f64) {
-    use crate::preset::BgMode;
+    use crate::preset::{BgMode, PageBg};
     let dt = (now - app.last_frame).clamp(0.0, 0.1);
     app.last_frame = now;
     let look = app.look();
     let b = &look.background;
+    // Browse pages: the theme's own choice, else whatever now playing uses.
+    let mode = match look.app.page_bg {
+        PageBg::Same => b.mode,
+        PageBg::Static => BgMode::CoverStatic,
+        PageBg::Accent => BgMode::AccentGradient,
+        PageBg::Solid => BgMode::Solid,
+    };
+    let dim = look.app.page_dim.unwrap_or(b.page_dim).clamp(0.02, 1.0);
+    // Now playing animates the shader itself, so keep the clock running for it too.
     let animated = matches!(b.mode, BgMode::Kawarp | BgMode::CoverFullbleed) && b.speed > 0.0;
     let moving = !app.default_theme && app.anim_bg && animated && app.playing();
     if moving {
         app.bg_time += dt * b.speed as f64;
     }
     ui.painter().rect_filled(screen, 0.0, if app.default_theme { theme::BG } else { look.solid() });
-    let art = matches!(b.mode, BgMode::Kawarp | BgMode::CoverStatic | BgMode::CoverFullbleed);
+    let art = matches!(mode, BgMode::Kawarp | BgMode::CoverStatic | BgMode::CoverFullbleed);
     if let Some(bg) = app.bg.as_ref().filter(|_| !app.default_theme && art) {
         let blend = theme::ease_in_out(((now - app.art_changed) / 1.4) as f32);
         let level = if app.reactive_bg && app.playing() { app.audio.status.level() * b.reactive } else { 0.0 };
-        let still = b.mode == BgMode::CoverStatic;
+        let still = mode == BgMode::CoverStatic;
         bg.paint(
             ui.painter(),
             screen,
@@ -47,17 +56,19 @@ pub fn background(app: &mut App, ui: &mut Ui, screen: Rect, now: f64) {
                 blend,
                 intensity: if still { 0.0 } else { b.intensity * 0.9 },
                 saturation: b.saturation * 0.9,
-                dim: b.page_dim,
-                scale: (b.scale - 0.08).max(1.0) + level.min(0.5) * 0.08,
+                dim,
+                scale: (b.scale - 0.08).max(1.0) + if still { 0.0 } else { level.min(0.5) * 0.08 },
             },
         );
-    } else if !app.default_theme && b.mode == BgMode::Solid {
+    } else if !app.default_theme && mode == BgMode::Solid {
         // Plain colour: nothing over it.
     } else {
-        vgradient(ui, screen, theme::with_alpha(app.accent_color(), 0.18), theme::BG);
+        vgradient(ui, screen, theme::with_alpha(app.accent_color(), 0.18 * if app.default_theme { 1.0 } else { dim / 0.5 }), if app.default_theme { theme::BG } else { look.solid() });
     }
     // Keep text readable: darken toward the bottom and under the sidebar.
-    vgradient(ui, screen, theme::shade(0.12), theme::shade(0.55));
+    if app.default_theme || mode != BgMode::Solid {
+        vgradient(ui, screen, theme::shade(0.12), theme::shade(0.55));
+    }
 }
 
 // ------------------------------------------------------------------ sidebar
@@ -79,14 +90,33 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     ui.add_space(22.0);
 
     let mut go_to: Option<Page> = None;
+    let nav_style = app.look().app.nav;
+    let nav_r = (app.look().chrome.radius * 0.6).clamp(4.0, 16.0);
+    let accent = app.accent_color();
     let mut nav = |ui: &mut Ui, glyph: char, label: &str, page: Page, selected: bool| {
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 42.0), Sense::click());
         let resp = named(resp, label);
         let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
         let s = theme::anim_bool(ui.ctx(), resp.id.with("s"), selected, 0.2);
-        ui.painter().rect_filled(rect, 10.0, theme::glass(0.05 * h + 0.10 * s));
-        let fg = theme::lerp_color(theme::TEXT_DIM, theme::TEXT, (h + s).min(1.0));
-        icon_at(ui, pos2(rect.left() + 22.0, rect.center().y), glyph, 19.0, fg);
+        use crate::preset::NavStyle;
+        let mut icon_fg = theme::lerp_color(theme::text_dim(), theme::TEXT, (h + s).min(1.0));
+        match nav_style {
+            NavStyle::Pill => {
+                ui.painter().rect_filled(rect, nav_r, theme::glass(0.05 * h + 0.10 * s));
+            }
+            NavStyle::Accent => {
+                ui.painter().rect_filled(rect, nav_r, theme::glass(0.05 * h));
+                ui.painter().rect_filled(rect, nav_r, theme::with_alpha(accent, 0.22 * s));
+                icon_fg = theme::lerp_color(icon_fg, accent, s);
+            }
+            NavStyle::Bar => {
+                ui.painter().rect_filled(rect, nav_r, theme::glass(0.05 * h));
+                let bar = Rect::from_center_size(pos2(rect.left() + 2.0, rect.center().y), vec2(3.0, 20.0 * s));
+                ui.painter().rect_filled(bar, 2.0, accent);
+            }
+        }
+        let fg = theme::lerp_color(theme::text_dim(), theme::TEXT, (h + s).min(1.0));
+        icon_at(ui, pos2(rect.left() + 22.0, rect.center().y), glyph, 19.0, icon_fg);
         let font = if selected { theme::semibold(15.0) } else { theme::regular(15.0) };
         ui.painter().text(pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, label, font, fg);
         if resp.clicked() {
@@ -107,7 +137,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     let list_h = (ui.available_height() - bottom_h).max(0.0);
     ui.allocate_ui(vec2(ui.available_width(), list_h), |ui| {
         if !app.logged_in {
-            ui.label(egui::RichText::new("Sign in to see your playlists").color(theme::TEXT_DIM));
+            ui.label(egui::RichText::new("Sign in to see your playlists").color(theme::text_dim()));
             ui.add_space(8.0);
             if widgets::pill(ui, "Sign in", Some(icon::CIRCLE_USER), false).clicked() {
                 app.actions.push(Action::Go(Page::Settings));
@@ -131,10 +161,10 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 let selected = matches!(&c.target, Target::Playlist(id) if app.page == Page::Playlist(id.clone()));
                 ui.painter().rect_filled(rect, 8.0, theme::glass(0.05 * h + if selected { 0.08 } else { 0.0 }));
                 let img = Rect::from_min_size(rect.min + vec2(6.0, 6.0), Vec2::splat(36.0));
-                paint_cover(ui, img, &c.thumbs, 5.0, 1.0);
+                paint_cover(ui, img, &c.thumbs, theme::thumb_radius(), 1.0);
                 let w = rect.width() - 58.0;
                 text_at(ui, pos2(img.right() + 10.0, rect.top() + 7.0), &c.title, theme::semibold(13.5), theme::TEXT, w);
-                text_at(ui, pos2(img.right() + 10.0, rect.top() + 26.0), &c.subtitle, theme::regular(12.0), theme::TEXT_DIM, w);
+                text_at(ui, pos2(img.right() + 10.0, rect.top() + 26.0), &c.subtitle, theme::regular(12.0), theme::text_dim(), w);
                 if resp.clicked() {
                     app.actions.push(Action::Open(c.target.clone()));
                 }
@@ -169,7 +199,7 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
         if focus > 0.0 {
             ui.painter().rect_stroke(rect, 21.0, egui::Stroke::new(1.0, theme::glass(0.25 * focus)), egui::StrokeKind::Inside);
         }
-        icon_at(ui, pos2(rect.left() + 22.0, rect.center().y), icon::SEARCH, 17.0, theme::TEXT_DIM);
+        icon_at(ui, pos2(rect.left() + 22.0, rect.center().y), icon::SEARCH, 17.0, theme::text_dim());
         let inner = Rect::from_min_max(pos2(rect.left() + 42.0, rect.top() + 4.0), pos2(rect.right() - 16.0, rect.bottom() - 4.0));
         let edit = ui.put(
             inner,
@@ -214,7 +244,7 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
                 }
             } else {
                 ui.painter().circle_filled(r.center(), 18.0, theme::glass(0.12));
-                icon_at(ui, r.center(), icon::USER, 18.0, theme::TEXT_DIM);
+                icon_at(ui, r.center(), icon::USER, 18.0, theme::text_dim());
             }
             if resp.clicked() {
                 app.actions.push(Action::Go(Page::Settings));
@@ -252,7 +282,7 @@ pub fn suggestions(app: &mut App, ctx: &egui::Context) {
                         let resp = named(resp, &term);
                         let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.1);
                         ui.painter().rect_filled(r, 8.0, theme::glass(0.08 * h));
-                        icon_at(ui, pos2(r.left() + 20.0, r.center().y), icon::SEARCH, 15.0, theme::TEXT_DIM);
+                        icon_at(ui, pos2(r.left() + 20.0, r.center().y), icon::SEARCH, 15.0, theme::text_dim());
                         text_at(ui, pos2(r.left() + 42.0, r.center().y - 9.0), &term, theme::regular(15.0), theme::TEXT, r.width() - 52.0);
                         // Pointer-down, not click: the text box loses focus (hiding this) first.
                         if resp.is_pointer_button_down_on() || resp.clicked() {
@@ -327,9 +357,9 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
         let ar = ui.interact(art, ui.id().with("np-art"), Sense::click());
         let ar = named(ar, "Open now playing");
         let ah = theme::anim_bool(ui.ctx(), ar.id.with("h"), ar.hovered(), 0.15);
-        paint_cover(ui, art, &t.thumbs, 6.0, 1.0);
+        paint_cover(ui, art, &t.thumbs, theme::thumb_radius() + 1.0, 1.0);
         if ah > 0.0 {
-            ui.painter().rect_filled(art, 6.0, theme::shade(0.45 * ah));
+            ui.painter().rect_filled(art, theme::thumb_radius() + 1.0, theme::shade(0.45 * ah));
             icon_at(ui, art.center(), icon::CHEVRON_UP, 22.0, theme::with_alpha(Color32::WHITE, ah));
         }
         if ar.clicked() {
@@ -345,12 +375,12 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
         let mut ax = x;
         for (i, a) in t.artists.iter().enumerate() {
             let s = if i + 1 < t.artists.len() { format!("{}, ", a.name) } else { a.name.clone() };
-            let r = text_at(ui, pos2(ax, cy + 2.0), &s, theme::regular(13.5), theme::TEXT_DIM, (x + w - ax).max(10.0));
+            let r = text_at(ui, pos2(ax, cy + 2.0), &s, theme::regular(13.5), theme::text_dim(), (x + w - ax).max(10.0));
             if let Some(id) = &a.id {
                 let resp = ui.interact(r, ui.id().with(("artist", i)), Sense::click());
                 let resp = named(resp, &a.name).on_hover_cursor(egui::CursorIcon::PointingHand);
                 if resp.hovered() {
-                    ui.painter().hline(r.x_range(), r.bottom(), egui::Stroke::new(1.0, theme::TEXT_DIM));
+                    ui.painter().hline(r.x_range(), r.bottom(), egui::Stroke::new(1.0, theme::text_dim()));
                 }
                 if resp.clicked() {
                     app.actions.push(Action::Open(Target::Artist(id.clone())));
@@ -372,7 +402,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
         let pop = theme::anim_bool(ui.ctx(), ("liked", &t.id), liked, 0.3);
         ui.painter().circle_filled(lpos, 18.0, theme::glass(0.1 * lh));
         let size = 19.0 * (1.0 + 0.25 * (pop * std::f32::consts::PI).sin());
-        let idle = theme::lerp_color(theme::TEXT_DIM, theme::TEXT, lh);
+        let idle = theme::lerp_color(theme::text_dim(), theme::TEXT, lh);
         let outline = theme::lerp_color(idle, theme::RED, pop);
         widgets::heart(ui, lpos, size, pop, outline, theme::RED);
         if lresp.clicked() {
@@ -477,7 +507,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
     let track_r = Rect::from_center_size(slider.center(), vec2(slider.width(), 4.0));
     ui.painter().rect_filled(track_r, 2.0, theme::glass(0.15));
     let fill = Rect::from_min_size(track_r.min, vec2(track_r.width() * vol, 4.0));
-    ui.painter().rect_filled(fill, 2.0, theme::lerp_color(theme::TEXT_DIM, Color32::WHITE, vh));
+    ui.painter().rect_filled(fill, 2.0, theme::lerp_color(theme::text_dim(), Color32::WHITE, vh));
     ui.painter().circle_filled(pos2(fill.right(), track_r.center().y), 2.0 + 4.5 * vh, Color32::WHITE);
     if let Some(p) = vresp.interact_pointer_pos() {
         if vresp.dragged() || vresp.clicked() {
@@ -493,7 +523,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
     let vglyph = if vol == 0.0 { icon::VOLUME_X } else if vol < 0.5 { icon::VOLUME_1 } else { icon::VOLUME_2 };
     let vi = Rect::from_center_size(pos2(slider.left() - 18.0, cy), Vec2::splat(32.0));
     let mresp = named(ui.interact(vi, ui.id().with("mute"), Sense::click()), "Mute");
-    icon_at(ui, vi.center(), vglyph, 18.0, if mresp.hovered() { theme::TEXT } else { theme::TEXT_DIM });
+    icon_at(ui, vi.center(), vglyph, 18.0, if mresp.hovered() { theme::TEXT } else { theme::text_dim() });
     if mresp.clicked() {
         let stash = ui.id().with("unmute");
         if vol > 0.0 {
@@ -506,7 +536,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
     }
     if total > 0.0 {
         let txt = format!("{} / {}", fmt_time(pos as u32), fmt_time(total as u32));
-        ui.painter().text(pos2(vi.left() - 10.0, cy), Align2::RIGHT_CENTER, txt, theme::regular(13.0), theme::TEXT_DIM);
+        ui.painter().text(pos2(vi.left() - 10.0, cy), Align2::RIGHT_CENTER, txt, theme::regular(13.0), theme::text_dim());
     }
 }
 
@@ -533,11 +563,11 @@ pub fn queue_list(app: &mut App, ui: &mut Ui, salt: &str) {
     let accent = app.accent_color();
     egui::ScrollArea::vertical().id_salt(("queue", salt)).auto_shrink(false).show(ui, |ui| {
         if app.queue.is_empty() {
-            ui.label(egui::RichText::new("Nothing queued yet").color(theme::TEXT_DIM));
+            ui.label(egui::RichText::new("Nothing queued yet").color(theme::text_dim()));
             return;
         }
         let start = app.index.unwrap_or(0);
-        ui.checkbox(&mut app.autoplay, egui::RichText::new("Autoplay similar songs").color(theme::TEXT_DIM));
+        ui.checkbox(&mut app.autoplay, egui::RichText::new("Autoplay similar songs").color(theme::text_dim()));
         ui.add_space(6.0);
         for i in start..app.queue.len() {
             let t = app.queue[i].clone();

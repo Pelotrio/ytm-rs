@@ -221,6 +221,93 @@ impl Default for Chrome {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageBg {
+    /// Whatever the background mode shows in now playing.
+    #[default]
+    Same,
+    /// Blurred cover, no motion.
+    Static,
+    /// Dark with a soft gradient in the cover's colour.
+    Accent,
+    /// The preset's solid colour.
+    Solid,
+}
+
+#[derive(Clone, Copy, PartialEq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarStyle {
+    #[default]
+    Glass,
+    Transparent,
+    Solid,
+    /// A rounded glass card inset from the window edges.
+    Floating,
+}
+
+#[derive(Clone, Copy, PartialEq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NavStyle {
+    /// Light translucent pill.
+    #[default]
+    Pill,
+    /// Pill tinted with the accent, accent icon.
+    Accent,
+    /// Accent bar at the left edge, no fill.
+    Bar,
+}
+
+#[derive(Clone, Copy, PartialEq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChipStyle {
+    #[default]
+    Pill,
+    Outline,
+    Accent,
+}
+
+/// How the rest of the app (outside now playing) looks.
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+pub struct AppStyle {
+    pub font: String,
+    pub page_bg: PageBg,
+    pub page_dim: Option<f32>,
+    pub sidebar: SidebarStyle,
+    pub sidebar_alpha: f32,
+    pub bar_alpha: f32,
+    pub bar_border: bool,
+    pub nav: NavStyle,
+    pub chip: ChipStyle,
+    pub card_radius: f32,
+    pub thumb_radius: f32,
+    pub panel_radius: f32,
+    pub hover: f32,
+    pub text_dim: String,
+}
+
+impl Default for AppStyle {
+    fn default() -> Self {
+        Self {
+            font: "inter".into(),
+            page_bg: PageBg::Same,
+            page_dim: None,
+            sidebar: SidebarStyle::Glass,
+            sidebar_alpha: 0.28,
+            bar_alpha: 0.55,
+            bar_border: false,
+            nav: NavStyle::Pill,
+            chip: ChipStyle::Pill,
+            card_radius: 8.0,
+            thumb_radius: 5.0,
+            panel_radius: 14.0,
+            hover: 1.0,
+            text_dim: "#b2acba".into(),
+        }
+    }
+}
+
 #[derive(Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Preset {
@@ -234,6 +321,7 @@ pub struct Preset {
     pub lyrics: LyricStyle,
     pub cover: CoverStyle,
     pub chrome: Chrome,
+    pub app: AppStyle,
 }
 
 impl Preset {
@@ -290,6 +378,22 @@ pub fn all() -> &'static [Preset] {
 
 pub fn get(id: &str) -> &'static Preset {
     all().iter().find(|p| p.id == id).unwrap_or(&all()[0])
+}
+
+static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Make `id` the preset that widgets without access to the app read from.
+pub fn set_active(id: &str) {
+    let i = all().iter().position(|p| p.id == id).unwrap_or(0);
+    ACTIVE.store(i, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn active() -> &'static Preset {
+    &all()[ACTIVE.load(std::sync::atomic::Ordering::Relaxed).min(all().len() - 1)]
+}
+
+pub fn parse_hex(s: &str) -> Option<Color32> {
+    hex(s)
 }
 
 /// The preset's cover thumbnail (JPEG), if it has one.

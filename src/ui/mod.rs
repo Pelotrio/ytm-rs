@@ -6,6 +6,7 @@
 mod nowplaying;
 mod pages;
 mod shell;
+mod textfx;
 mod widgets;
 
 use std::collections::HashSet;
@@ -187,6 +188,8 @@ pub struct App {
     lyrics_user_scroll: f64,
     /// Rotation of a "record" cover (radians); advances only while playing.
     record_angle: f64,
+    /// Cached blurred/glowing lyric lines.
+    textfx: textfx::TextFx,
 
     // account / misc
     logged_in: bool,
@@ -281,6 +284,7 @@ impl App {
             lyrics: None,
             lyrics_user_scroll: -10.0,
             record_angle: 0.0,
+            textfx: Default::default(),
             logged_in,
             signing_in: Default::default(),
             cookie_input: String::new(),
@@ -1220,17 +1224,26 @@ impl eframe::App for App {
         let screen = ctx.content_rect();
 
         let look = self.look();
+        crate::preset::set_active(&look.id);
+        let accent = self.accent_color();
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("accent"), accent));
         if self.chrome_applied.as_deref() != Some(look.id.as_str()) {
-            theme::apply_chrome(&ctx, look.chrome.glass, look.chrome.radius);
+            theme::apply_chrome(&ctx, look);
             self.chrome_applied = Some(look.id.clone());
         }
+        let app_style = &look.app;
         shell::background(self, ui, screen, now);
         if !self.fullscreen {
             let floating = look.chrome.player_bar == crate::preset::PlayerBar::Floating;
+            let bar_alpha = app_style.bar_alpha.clamp(0.0, 1.0);
             let frame = if floating {
                 egui::Frame::new().inner_margin(egui::Margin { left: 14, right: 14, top: 0, bottom: 14 })
             } else {
-                egui::Frame::new().fill(theme::shade(0.55))
+                let mut f = egui::Frame::new().fill(theme::shade(bar_alpha));
+                if app_style.bar_border {
+                    f = f.stroke(egui::Stroke::new(1.0, theme::glass(0.1)));
+                }
+                f
             };
             egui::Panel::bottom("player")
                 .exact_size(self.bar_height())
@@ -1241,15 +1254,29 @@ impl eframe::App for App {
                         let r = ui.max_rect();
                         let radius = look.chrome.radius.clamp(10.0, 26.0);
                         widgets::soft_shadow(ui, r, radius, 24.0, 0.45);
-                        ui.painter().rect_filled(r, radius, theme::shade(0.62));
-                        ui.painter().rect_stroke(r, radius, egui::Stroke::new(1.0, theme::glass(0.08)), egui::StrokeKind::Inside);
+                        ui.painter().rect_filled(r, radius, theme::shade((bar_alpha + 0.07).min(1.0)));
+                        let edge = if app_style.bar_border { 0.14 } else { 0.08 };
+                        ui.painter().rect_stroke(r, radius, egui::Stroke::new(1.0, theme::glass(edge)), egui::StrokeKind::Inside);
                         ui.set_clip_rect(r);
                     }
                     shell::player_bar(self, ui, now)
                 });
+            use crate::preset::SidebarStyle;
+            let side_alpha = app_style.sidebar_alpha.clamp(0.0, 1.0);
+            let side_frame = match app_style.sidebar {
+                SidebarStyle::Glass => egui::Frame::new().fill(theme::shade(side_alpha)).inner_margin(egui::Margin::symmetric(14, 16)),
+                SidebarStyle::Transparent => egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 16)),
+                SidebarStyle::Solid => egui::Frame::new().fill(look.solid()).inner_margin(egui::Margin::symmetric(14, 16)),
+                SidebarStyle::Floating => egui::Frame::new()
+                    .fill(theme::shade(side_alpha.max(0.3)))
+                    .stroke(egui::Stroke::new(1.0, theme::glass(0.08)))
+                    .corner_radius(egui::CornerRadius::same(theme::panel_radius().max(12)))
+                    .outer_margin(egui::Margin { left: 10, right: 4, top: 10, bottom: 10 })
+                    .inner_margin(egui::Margin::symmetric(12, 14)),
+            };
             egui::Panel::left("nav")
                 .exact_size(236.0)
-                .frame(egui::Frame::new().fill(theme::shade(0.28)).inner_margin(egui::Margin::symmetric(14, 16)))
+                .frame(side_frame)
                 .show_separator_line(false)
                 .show(ui, |ui| shell::sidebar(self, ui));
             let q = theme::anim_bool(&ctx, "queue-drawer", self.queue_open && !self.np_open, 0.25);

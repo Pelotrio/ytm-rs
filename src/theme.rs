@@ -23,6 +23,31 @@ pub fn glass(a: f32) -> Color32 {
     Color32::from_white_alpha(((a * k).min(1.0) * 255.0) as u8)
 }
 
+/// Secondary text colour (themes may tint it).
+pub fn text_dim() -> Color32 {
+    crate::preset::parse_hex(&crate::preset::active().app.text_dim).unwrap_or(TEXT_DIM)
+}
+
+/// Corner radius of album/playlist art in cards.
+pub fn card_radius() -> f32 {
+    crate::preset::active().app.card_radius.clamp(0.0, 40.0)
+}
+
+/// Corner radius of small song-row thumbnails.
+pub fn thumb_radius() -> f32 {
+    crate::preset::active().app.thumb_radius.clamp(0.0, 20.0)
+}
+
+/// Corner radius of panels (settings sections, menus, dialogs).
+pub fn panel_radius() -> u8 {
+    crate::preset::active().app.panel_radius.clamp(0.0, 32.0) as u8
+}
+
+/// Strength of card hover zoom/lift.
+pub fn hover_k() -> f32 {
+    crate::preset::active().app.hover.clamp(0.0, 2.5)
+}
+
 pub fn shade(a: f32) -> Color32 {
     Color32::from_black_alpha((a * 255.0) as u8)
 }
@@ -157,21 +182,22 @@ const LYRIC_FONTS: &[(&str, [&[u8]; 3])] = &[
 
 /// Lyric font for a preset's font name and weight. Fonts that can't be bundled
 /// (SF Pro, Spotify's) map to the closest open one; unknown names use Inter.
-pub fn lyric_font(name: &str, weight: crate::preset::Weight, size: f32) -> FontId {
-    use crate::preset::Weight;
-    let key = match name.to_ascii_lowercase().replace(' ', "").as_str() {
+/// The bundled font a preset font name refers to. Fonts that can't be bundled (SF Pro,
+/// Spotify's) map to the closest open one; unknown names to Inter.
+fn lyric_key(name: &str) -> Option<&'static str> {
+    Some(match name.to_ascii_lowercase().replace(' ', "").as_str() {
         "dmsans" => "dmsans",
         "googlesansflex" | "googlesans" => "googlesansflex",
         "figtree" | "spotifymixuititle" | "spotifymix" | "circular" => "figtree",
         "switzer" | "instrumentsans" => "instrumentsans",
-        _ => {
-            return match weight {
-                Weight::Regular => regular(size),
-                Weight::Semibold => semibold(size),
-                Weight::Bold => bold(size),
-            };
-        }
-    };
+        _ => return None,
+    })
+}
+
+/// Lyric font for a preset's font name and weight.
+pub fn lyric_font(name: &str, weight: crate::preset::Weight, size: f32) -> FontId {
+    use crate::preset::Weight;
+    let key = lyric_key(name).unwrap_or("inter");
     let w = match weight {
         Weight::Regular => 0,
         Weight::Semibold => 1,
@@ -217,45 +243,67 @@ const CANDIDATES: &[(&str, u32)] = &[
     ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 0),
 ];
 
-pub fn install_fonts(ctx: &egui::Context) {
-    let mut defs = FontDefinitions::default();
-    let mut add = |name: &str, data: FontData| {
-        defs.font_data.insert(name.to_owned(), Arc::new(data));
-    };
-    add("inter", FontData::from_static(INTER_REGULAR));
-    add("inter-semibold", FontData::from_static(INTER_SEMIBOLD));
-    add("inter-bold", FontData::from_static(INTER_BOLD));
-    add("lucide", FontData::from_static(LUCIDE).tweak(egui::FontTweak { y_offset_factor: 0.0, ..Default::default() }));
+/// Ascent and line height in em, as egui lays text out (skrifa's metrics: OS/2 typo
+/// values when the font asks for them, else hhea).
+fn em_metrics(bytes: &[u8], index: u32) -> Option<(f32, f32)> {
+    use skrifa::MetadataProvider;
+    let font = skrifa::FontRef::from_index(bytes, index).ok()?;
+    let m = font.metrics(skrifa::instance::Size::unscaled(), skrifa::instance::LocationRef::default());
+    let upem = m.units_per_em.max(1) as f32;
+    Some((m.ascent / upem, (m.ascent - m.descent + m.leading) / upem))
+}
 
-    let mut fallbacks = Vec::new();
-    for &(path, index) in CANDIDATES {
-        if let Some(bytes) = map(path) {
-            let name = format!("sys:{path}");
-            add(&name, FontData { index, ..FontData::from_static(bytes) });
+/// Install fonts. `ui_font` is a preset font name for all interface text ("inter" or
+/// one of the bundled lyric fonts).
+///
+/// egui places a fallback font's glyphs by centring its line height on the primary
+/// font's, not by sharing a baseline, so CJK glyphs (Yu Gothic, Microsoft YaHei, …)
+/// sit visibly higher than Latin ones in the same line. Each fallback therefore gets a
+/// y offset computed from both fonts' metrics, once per primary font it backs.
+pub fn install_fonts(ctx: &egui::Context, ui_font: &str) {
+    let mut defs = FontDefinitions::default();
+    let egui_default = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    defs.font_data.insert("lucide".into(), Arc::new(FontData::from_static(LUCIDE).tweak(egui::FontTweak { y_offset_factor: 0.0, ..Default::default() })));
+    defs.families.insert(FontFamily::Name("icons".into()), vec!["lucide".to_owned()]);
+
+    let system: Vec<(&str, &'static [u8], u32)> = CANDIDATES.iter().filter_map(|&(path, index)| map(path).map(|b| (path, b, index))).collect();
+    // Primary font groups that share metrics: Inter's weights, then each lyric font.
+    let mut groups: Vec<(&str, [&'static [u8]; 3])> = vec![("inter", [INTER_REGULAR, INTER_SEMIBOLD, INTER_BOLD])];
+    groups.extend(LYRIC_FONTS.iter().map(|(k, w)| (*k, *w)));
+    let ui_key = lyric_key(ui_font).unwrap_or("inter");
+    for (key, weights) in &groups {
+        let (asc_p, h_p) = em_metrics(weights[0], 0).unwrap_or((0.97, 1.21));
+        let mut fallbacks = Vec::new();
+        for &(path, bytes, index) in &system {
+            let Some((asc_f, h_f)) = em_metrics(bytes, index) else { continue };
+            let shift = asc_p - (asc_f + 0.5 * (h_p - h_f));
+            let name = format!("sys:{path}@{key}");
+            let tweak = egui::FontTweak { y_offset_factor: shift, ..Default::default() };
+            defs.font_data.insert(name.clone(), Arc::new(FontData { index, ..FontData::from_static(bytes) }.tweak(tweak)));
             fallbacks.push(name);
         }
-    }
-    // egui's bundled emoji/icon font stays as a last resort.
-    let egui_default = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    let chain = |primary: &str| {
-        let mut v = vec![primary.to_owned()];
-        v.extend(fallbacks.iter().cloned());
-        v.extend(egui_default.iter().filter(|n| n.as_str() != "Ubuntu-Light").cloned());
-        v
-    };
-    defs.families.insert(FontFamily::Proportional, chain("inter"));
-    defs.families.insert(FontFamily::Name("semibold".into()), chain("inter-semibold"));
-    defs.families.insert(FontFamily::Name("bold".into()), chain("inter-bold"));
-    defs.families.insert(FontFamily::Name("icons".into()), vec!["lucide".to_owned()]);
-    for (key, weights) in LYRIC_FONTS {
         for (w, bytes) in weights.iter().enumerate() {
             let name = format!("{key}-{w}");
             defs.font_data.insert(name.clone(), Arc::new(FontData::from_static(bytes)));
-            defs.families.insert(FontFamily::Name(name.clone().into()), chain(&name));
+            let mut chain = vec![name.clone()];
+            chain.extend(fallbacks.iter().cloned());
+            // egui's bundled emoji/icon font stays as a last resort.
+            chain.extend(egui_default.iter().filter(|n| n.as_str() != "Ubuntu-Light").cloned());
+            defs.families.insert(FontFamily::Name(name.clone().into()), chain.clone());
+            if *key == ui_key {
+                let family = match w {
+                    0 => FontFamily::Proportional,
+                    1 => FontFamily::Name("semibold".into()),
+                    _ => FontFamily::Name("bold".into()),
+                };
+                defs.families.insert(family, chain);
+            }
         }
-    }
-    if let Some(mono) = defs.families.get_mut(&FontFamily::Monospace) {
-        mono.extend(fallbacks.iter().cloned());
+        if *key == "inter" {
+            if let Some(mono) = defs.families.get_mut(&FontFamily::Monospace) {
+                mono.extend(fallbacks.iter().cloned());
+            }
+        }
     }
     ctx.set_fonts(defs);
 }
@@ -270,11 +318,15 @@ fn map(path: &str) -> Option<&'static [u8]> {
 
 /// Apply a theme preset's chrome: how strong glass surfaces are and how round
 /// buttons, pills and fields are.
-pub fn apply_chrome(ctx: &egui::Context, glass_k: f32, radius: f32) {
-    GLASS.store(glass_k.clamp(0.0, 2.5).to_bits(), std::sync::atomic::Ordering::Relaxed);
+pub fn apply_chrome(ctx: &egui::Context, p: &crate::preset::Preset) {
+    GLASS.store(p.chrome.glass.clamp(0.0, 2.5).to_bits(), std::sync::atomic::Ordering::Relaxed);
     install_style(ctx);
-    let r = radius.clamp(2.0, 28.0) as u8;
+    install_fonts(ctx, &p.app.font);
+    let r = p.chrome.radius.clamp(2.0, 28.0) as u8;
+    let pr = egui::CornerRadius::same(p.app.panel_radius.clamp(0.0, 32.0) as u8);
     ctx.global_style_mut(|s| {
+        s.visuals.window_corner_radius = pr;
+        s.visuals.menu_corner_radius = pr;
         for w in [&mut s.visuals.widgets.inactive, &mut s.visuals.widgets.hovered, &mut s.visuals.widgets.active, &mut s.visuals.widgets.open] {
             w.corner_radius = egui::CornerRadius::same(r);
         }

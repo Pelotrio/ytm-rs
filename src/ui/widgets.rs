@@ -136,7 +136,7 @@ pub fn icon_button(ui: &mut Ui, glyph: char, size: f32, name: &str, active: bool
     if h > 0.0 {
         ui.painter().circle_filled(rect.center(), d / 2.0, theme::glass(0.10 * h));
     }
-    let color = if active { theme::TEXT } else { theme::lerp_color(theme::TEXT_DIM, theme::TEXT, h) };
+    let color = if active { theme::TEXT } else { theme::lerp_color(theme::text_dim(), theme::TEXT, h) };
     let press = if resp.is_pointer_button_down_on() { 0.9 } else { 1.0 };
     icon_at(ui, rect.center(), glyph, size * press, color);
     resp
@@ -174,9 +174,23 @@ pub fn chip(ui: &mut Ui, label: &str, selected: bool) -> Response {
     let resp = named(resp, label);
     let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
     let s = theme::anim_bool(ui.ctx(), resp.id.with("s"), selected, 0.2);
-    let fill = theme::lerp_color(theme::glass(0.09 + 0.06 * h), Color32::from_gray(245), s);
-    ui.painter().rect_filled(rect, 10.0, fill);
-    let fg = theme::lerp_color(theme::TEXT, Color32::from_gray(15), s);
+    use crate::preset::ChipStyle;
+    let style = crate::preset::active().app.chip;
+    let radius = (crate::preset::active().chrome.radius * 0.55).clamp(4.0, 17.0);
+    let (on_fill, on_fg) = match style {
+        ChipStyle::Accent => {
+            let a = ui.ctx().data(|d| d.get_temp::<Color32>(egui::Id::new("accent"))).unwrap_or(theme::RED);
+            (a, if a.r() as u32 + a.g() as u32 + a.b() as u32 > 480 { Color32::from_gray(15) } else { Color32::WHITE })
+        }
+        _ => (Color32::from_gray(245), Color32::from_gray(15)),
+    };
+    let off_fill = if style == ChipStyle::Outline { theme::glass(0.04 * h) } else { theme::glass(0.09 + 0.06 * h) };
+    let fill = theme::lerp_color(off_fill, on_fill, s);
+    ui.painter().rect_filled(rect, radius, fill);
+    if style == ChipStyle::Outline {
+        ui.painter().rect_stroke(rect, radius, egui::Stroke::new(1.0, theme::glass(0.3 * (1.0 - s))), egui::StrokeKind::Inside);
+    }
+    let fg = theme::lerp_color(theme::TEXT, on_fg, s);
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, font, fg);
     resp
 }
@@ -259,8 +273,8 @@ pub fn card(ui: &mut Ui, c: &Card, width: f32, liked: bool, acts: &mut Vec<Actio
     // card must stay "hovered" while the pointer is on it or the button would vanish.
     let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.contains_pointer(), 0.22);
     let img = Rect::from_min_size(rect.min, Vec2::splat(width));
-    let radius = if c.round { width / 2.0 } else { 8.0 };
-    paint_cover(ui, img, &c.thumbs, radius, 1.0 + 0.06 * h);
+    let radius = if c.round { width / 2.0 } else { theme::card_radius().min(width / 2.0) };
+    paint_cover(ui, img, &c.thumbs, radius, 1.0 + 0.06 * h * theme::hover_k());
     if h > 0.0 && !c.round {
         ui.painter().rect_filled(img, radius, theme::shade(0.28 * h));
     }
@@ -285,7 +299,7 @@ pub fn card(ui: &mut Ui, c: &Card, width: f32, liked: bool, acts: &mut Vec<Actio
     let title_h = title.size().y;
     ui.painter().galley(pos2(rect.left(), img.bottom() + 10.0), title, tcolor);
     let sub_y = img.bottom() + 14.0 + title_h;
-    linked_text(ui, pos2(rect.left(), sub_y), &c.subtitle, &c.links, theme::regular(13.0), theme::TEXT_DIM, width - 36.0, acts);
+    linked_text(ui, pos2(rect.left(), sub_y), &c.subtitle, &c.links, theme::regular(13.0), theme::text_dim(), width - 36.0, acts);
     // On the subtitle line, whose width leaves room for it, so a two-line title never sits under it.
     let more_rect = Rect::from_center_size(pos2(rect.right() - 16.0, sub_y + 8.0), Vec2::splat(30.0));
     let more = more_button(ui, more_rect, resp.id.with("more"), "Options");
@@ -332,7 +346,7 @@ fn more_button(ui: &mut Ui, rect: Rect, id: egui::Id, label: &str) -> Response {
     if response.hovered() || egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response)) {
         ui.painter().rect_filled(rect, 7.0, theme::glass(0.16));
     }
-    let color = if response.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+    let color = if response.hovered() { theme::TEXT } else { theme::text_dim() };
     icon_at(ui, rect.center(), icon::ELLIPSIS_VERTICAL, 18.0, color);
     response
 }
@@ -343,7 +357,7 @@ fn menu_action(ui: &mut Ui, glyph: Option<char>, label: &str) -> bool {
     if response.hovered() {
         ui.painter().rect_filled(rect, 7.0, theme::glass(0.12));
     }
-    let color = if response.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+    let color = if response.hovered() { theme::TEXT } else { theme::text_dim() };
     if let Some(glyph) = glyph {
         icon_at(ui, pos2(rect.left() + 19.0, rect.center().y), glyph, 16.0, color);
     } else {
@@ -502,17 +516,18 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
         } else if h > 0.5 {
             play_triangle(ui, slot.center(), 6.0, theme::TEXT);
         } else {
-            ui.painter().text(slot.center(), Align2::CENTER_CENTER, n.to_string(), theme::regular(14.0), theme::TEXT_DIM);
+            ui.painter().text(slot.center(), Align2::CENTER_CENTER, n.to_string(), theme::regular(14.0), theme::text_dim());
         }
         x += 36.0;
     } else {
         let img = Rect::from_min_size(pos2(x, cy - 20.0), Vec2::splat(40.0));
-        paint_cover(ui, img, &t.thumbs, 5.0, 1.0);
+        let tr = theme::thumb_radius();
+        paint_cover(ui, img, &t.thumbs, tr, 1.0);
         if o.current {
-            ui.painter().rect_filled(img, 5.0, theme::shade(0.55));
+            ui.painter().rect_filled(img, tr, theme::shade(0.55));
             equalizer(ui, img.shrink(11.0), o.time, o.level, o.playing, Color32::WHITE);
         } else if h > 0.0 {
-            ui.painter().rect_filled(img, 5.0, theme::shade(0.5 * h));
+            ui.painter().rect_filled(img, tr, theme::shade(0.5 * h));
             play_triangle(ui, img.center(), 7.0, theme::with_alpha(Color32::WHITE, h));
         }
         x += 54.0;
@@ -541,22 +556,22 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
     let title_y = if sub.is_some() { cy - 18.0 } else { cy - 9.0 };
     text_at(ui, pos2(x, title_y), &t.title, theme::semibold(14.5), title_col, title_w);
     if let Some(sub) = &sub {
-        linked_text(ui, pos2(x, cy + 2.0), sub, &t.artists, theme::regular(13.0), theme::TEXT_DIM, title_w, acts);
+        linked_text(ui, pos2(x, cy + 2.0), sub, &t.artists, theme::regular(13.0), theme::text_dim(), title_w, acts);
     }
     if let (Some(px), Some(p)) = (plays_x, &plays) {
-        ui.painter().text(pos2(px, cy), Align2::LEFT_CENTER, p, theme::regular(13.5), theme::TEXT_DIM);
+        ui.painter().text(pos2(px, cy), Align2::LEFT_CENTER, p, theme::regular(13.5), theme::text_dim());
     }
     if let (Some(ax), Some(album)) = (album_x, &t.album) {
         let w = plays_x.unwrap_or(right - dur_w) - ax - 10.0;
-        let g = galley(ui, &album.name, theme::regular(13.5), theme::TEXT_DIM, w);
+        let g = galley(ui, &album.name, theme::regular(13.5), theme::text_dim(), w);
         let ar = Rect::from_min_size(pos2(ax, cy - 9.0), g.size());
-        ui.painter().galley(ar.min, g, theme::TEXT_DIM);
+        ui.painter().galley(ar.min, g, theme::text_dim());
         // Album name opens the album, like the artist names.
         if let Some(id) = &album.id {
             let r = named(ui.interact(ar, resp.id.with("album"), Sense::click()), &album.name);
             let r = r.on_hover_cursor(egui::CursorIcon::PointingHand);
             if r.hovered() {
-                ui.painter().hline(ar.x_range(), ar.bottom() - 1.0, egui::Stroke::new(1.0, theme::TEXT_DIM));
+                ui.painter().hline(ar.x_range(), ar.bottom() - 1.0, egui::Stroke::new(1.0, theme::text_dim()));
             }
             if r.clicked() {
                 acts.push(Action::Open(Target::Album(id.clone())));
@@ -564,7 +579,7 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
         }
     }
     if let Some(d) = t.duration {
-        ui.painter().text(pos2(right, cy), Align2::RIGHT_CENTER, super::fmt_time(d), theme::regular(13.0), theme::TEXT_DIM);
+        ui.painter().text(pos2(right, cy), Align2::RIGHT_CENTER, super::fmt_time(d), theme::regular(13.0), theme::text_dim());
     }
     let more_rect = Rect::from_center_size(pos2(rect.right() - 20.0, cy), Vec2::splat(30.0));
     let more = more_button(ui, more_rect, base.id.with("more"), "Song options");
@@ -586,7 +601,7 @@ pub fn shelf_header(ui: &mut Ui, title: &str, strap: Option<&str>, strap_thumb: 
         }
         ui.vertical(|ui| {
             if let Some(s) = strap {
-                ui.label(egui::RichText::new(s.to_uppercase()).font(theme::semibold(12.0)).color(theme::TEXT_DIM));
+                ui.label(egui::RichText::new(s.to_uppercase()).font(theme::semibold(12.0)).color(theme::text_dim()));
             }
             ui.label(egui::RichText::new(title).font(theme::bold(24.0)).color(theme::TEXT));
         });

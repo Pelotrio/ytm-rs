@@ -177,7 +177,7 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
         text_at(ui, pos2(art.left(), title_y), &track.title, theme::bold(28.0), Color32::WHITE, w);
         // Each artist opens their own page (features included).
         let line = track.artist_line();
-        widgets::linked_text(ui, pos2(art.left(), title_y + 40.0), &line, &track.artists, theme::regular(17.0), theme::TEXT_DIM, w, &mut app.actions);
+        widgets::linked_text(ui, pos2(art.left(), title_y + 40.0), &line, &track.artists, theme::regular(17.0), theme::text_dim(), w, &mut app.actions);
         if cs.side == Side::Right {
             Rect::from_min_max(content.min, pos2(col.left() - 28.0, content.bottom()))
         } else {
@@ -216,14 +216,14 @@ fn lyrics_panel(app: &mut App, ui: &mut Ui, rect: Rect, now: f64, centered: bool
         ui.add_space(rect.height() * 0.35);
         ui.vertical_centered(|ui| {
             ui.spinner();
-            ui.label(egui::RichText::new("Loading lyrics…").color(theme::TEXT_DIM));
+            ui.label(egui::RichText::new("Loading lyrics…").color(theme::text_dim()));
         });
         return;
     };
     let Some(lyrics) = lyrics.clone() else {
         ui.add_space(rect.height() * 0.4);
         ui.vertical_centered(|ui| {
-            ui.label(egui::RichText::new("No lyrics found for this song").font(theme::semibold(20.0)).color(theme::TEXT_DIM));
+            ui.label(egui::RichText::new("No lyrics found for this song").font(theme::semibold(20.0)).color(theme::text_dim()));
         });
         return;
     };
@@ -400,7 +400,16 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, nar
                     BlurScope::Upcoming => !past,
                 };
                 let target_blur = if style.blur > 0.0 && blur_on && !lit { style.blur * (1.0 + 0.35 * (dist - 1.0).clamp(0.0, 3.0)) } else { 0.0 };
-                let blur = theme::anim(ui.ctx(), ("lyr-b", k), target_blur.min(9.0).min(size * 0.22), 0.35);
+                let target_blur = target_blur.min(9.0).min(size * 0.22);
+                // Blur fades in/out as a crossfade between the sharp line and a cached
+                // blurred copy (radius is kept while fading back to sharp).
+                let blur_key = egui::Id::new(("lyr-br", k));
+                let last_r: f32 = ui.data(|d| d.get_temp(blur_key)).unwrap_or(0.0);
+                if target_blur > 0.0 && (target_blur - last_r).abs() > 0.01 {
+                    ui.data_mut(|d| d.insert_temp(blur_key, target_blur));
+                }
+                let radius = if target_blur > 0.0 { target_blur } else { last_r };
+                let blur_mix = theme::anim(ui.ctx(), ("lyr-bm", k), if target_blur > 0.0 { 1.0 } else { 0.0 }, 0.35);
 
                 let progress = if lit_amt > 0.0 {
                     if lit {
@@ -427,11 +436,20 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, nar
                             let from = if soft { r.edge - 6.0 } else { r.edge };
                             if from < r.right {
                                 let clip = Rect::from_min_max(pos2(from.max(r.left), r.top), pos2(r.right, r.bottom));
-                                draw_blurred(&painter, &g, pos, clip, theme::with_alpha(Color32::WHITE, a), blur);
+                                painter.with_clip_rect(clip.intersect(painter.clip_rect())).galley_with_override_text_color(pos, g.clone(), theme::with_alpha(Color32::WHITE, a));
                             }
                         }
                     } else {
-                        draw_blurred(&painter, &g, pos, line_rect.expand(size), theme::with_alpha(Color32::WHITE, a), blur);
+                        let blurred = if blur_mix > 0.01 && radius > 0.2 { app.textfx.get(ui.ctx(), &g, radius, 1.25) } else { None };
+                        match blurred {
+                            Some(b) => {
+                                if blur_mix < 0.99 {
+                                    painter.galley_with_override_text_color(pos, g.clone(), theme::with_alpha(Color32::WHITE, a * (1.0 - blur_mix)));
+                                }
+                                b.paint(&painter, pos, theme::with_alpha(Color32::WHITE, a * blur_mix));
+                            }
+                            None => painter.galley_with_override_text_color(pos, g.clone(), theme::with_alpha(Color32::WHITE, a)),
+                        }
                     }
                 }
                 if lit_amt > 0.0 {
@@ -442,7 +460,12 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, nar
                         if solid_end > r.left {
                             let clip = Rect::from_min_max(pos2(r.left, r.top), pos2(solid_end, r.bottom));
                             if style.glow > 0.0 {
-                                glow(&painter, &g, pos + lift, clip, theme::with_alpha(glow_color, lit_amt * edge_fade), style.glow, size);
+                                let gr = size * 0.2 * style.glow.clamp(0.0, 1.0) + 3.0;
+                                if let Some(b) = app.textfx.get(ui.ctx(), &g, gr, 1.8) {
+                                    let gclip = Rect::from_min_max(pos2(r.left - gr * 2.0, r.top - gr * 2.0), pos2(solid_end, r.bottom + gr * 2.0));
+                                    let tint = theme::with_alpha(glow_color, lit_amt * edge_fade * (0.45 + 0.55 * style.glow.clamp(0.0, 1.0)));
+                                    b.paint(&painter.with_clip_rect(gclip.intersect(painter.clip_rect())), pos + lift, tint);
+                                }
                             }
                             painter.with_clip_rect(clip.intersect(painter.clip_rect())).galley_with_override_text_color(pos + lift, g.clone(), color);
                         }
@@ -570,40 +593,4 @@ fn split_rows(g: &std::sync::Arc<egui::Galley>, pos: Pos2, progress: f32) -> Vec
         out.push(RowSplit { left, right, top, bottom, edge });
     }
     out
-}
-
-/// Draw a galley clipped to `clip`, softened by `blur` px: a centre copy plus two
-/// rings of offset copies sharing the alpha (a cheap stand-in for a Gaussian).
-fn draw_blurred(painter: &egui::Painter, g: &std::sync::Arc<egui::Galley>, pos: Pos2, clip: Rect, color: Color32, blur: f32) {
-    let p = painter.with_clip_rect(clip.expand(blur).intersect(painter.clip_rect()));
-    if blur < 0.3 {
-        p.galley_with_override_text_color(pos, g.clone(), color);
-        return;
-    }
-    let taps: &[(f32, usize)] = &[(0.0, 1), (0.35, 6), (0.7, 10), (1.0, 14)];
-    let total: usize = taps.iter().map(|t| t.1).sum();
-    // Overlapping copies add up; like a real blur, spreading the ink over the radius
-    // lowers its peak, so the copies share a little less than the full opacity.
-    let each = theme::with_alpha(color, (1.6 / total as f32).min(1.0));
-    for &(f, n) in taps {
-        for i in 0..n {
-            let a = i as f32 / n as f32 * std::f32::consts::TAU + f * 2.3;
-            let off = vec2(a.cos(), a.sin()) * blur * f;
-            p.galley_with_override_text_color(pos + off, g.clone(), each);
-        }
-    }
-}
-
-/// Soft glow behind sung text: many faint copies spread over a few rings.
-fn glow(painter: &egui::Painter, g: &std::sync::Arc<egui::Galley>, pos: Pos2, clip: Rect, color: Color32, amount: f32, size: f32) {
-    let amount = amount.clamp(0.0, 1.0);
-    let r = size * 0.18 * amount + 3.0;
-    let p = painter.with_clip_rect(clip.expand2(vec2(0.0, r)).intersect(painter.clip_rect()));
-    let each = theme::with_alpha(color, 0.055 + 0.05 * amount);
-    for (f, n) in [(0.3, 8), (0.6, 12), (1.0, 16)] {
-        for i in 0..n {
-            let a = i as f32 / n as f32 * std::f32::consts::TAU + f * 1.7;
-            p.galley_with_override_text_color(pos + vec2(a.cos(), a.sin()) * r * f, g.clone(), each);
-        }
-    }
 }

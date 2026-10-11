@@ -11,7 +11,8 @@
    "scale": 1.25,
    "np_dim": 0.57,
    "page_dim": 0.3,
-   "reactive": 1.1
+   "reactive": 1.1,
+   "solid": "#000000"
   },
   "accent": "#fa586a",
   "lyrics": {
@@ -31,6 +32,12 @@
   },
   "chrome": {
    "radius": 6
+  },
+  "app": {
+   "page_bg": "solid",
+   "sidebar": "solid",
+   "bar_alpha": 1.0,
+   "panel_radius": 6
   }
  },
  {
@@ -67,6 +74,14 @@
    "glass": 1.5,
    "radius": 16,
    "player_bar": "floating"
+  },
+  "app": {
+   "page_bg": "static",
+   "page_dim": 0.55,
+   "sidebar_alpha": 0.15,
+   "bar_alpha": 0.85,
+   "bar_border": true,
+   "panel_radius": 16
   }
  },
  {
@@ -101,6 +116,17 @@
    "glass": 1.3,
    "radius": 16,
    "player_bar": "floating"
+  },
+  "app": {
+   "page_dim": 0.45,
+   "sidebar": "transparent",
+   "bar_alpha": 0.8,
+   "bar_border": true,
+   "nav": "accent",
+   "card_radius": 12,
+   "thumb_radius": 6,
+   "panel_radius": 16,
+   "text_dim": "#949494"
   }
  },
  {
@@ -136,6 +162,14 @@
   "chrome": {
    "glass": 0.6,
    "radius": 8
+  },
+  "app": {
+   "page_bg": "solid",
+   "page_dim": 1,
+   "sidebar": "transparent",
+   "bar_alpha": 0.8,
+   "thumb_radius": 8,
+   "panel_radius": 8
   }
  },
  {
@@ -173,6 +207,12 @@
   "chrome": {
    "glass": 0.6,
    "radius": 14
+  },
+  "app": {
+   "font": "Google Sans Flex",
+   "page_bg": "solid",
+   "sidebar": "solid",
+   "bar_alpha": 0.35
   }
  },
  {
@@ -183,7 +223,8 @@
   ],
   "blurb": "Clean glassmorphism with heavy Figtree lyrics, Spotify-green accents and a floating glass player bar.",
   "background": {
-   "mode": "cover_static"
+   "mode": "cover_static",
+   "solid": "#0e0e12"
   },
   "accent": "#1db954",
   "lyrics": {
@@ -204,6 +245,12 @@
    "glass": 1.3,
    "radius": 20,
    "player_bar": "floating"
+  },
+  "app": {
+   "page_bg": "solid",
+   "sidebar": "transparent",
+   "bar_alpha": 0.86,
+   "bar_border": true
   }
  },
  {
@@ -227,6 +274,9 @@
    "sung_color": "accent",
    "glow": 0.6,
    "glow_color": "accent"
+  },
+  "app": {
+   "page_bg": "accent"
   }
  },
  {
@@ -242,7 +292,8 @@
    "np_dim": 0.57,
    "page_dim": 0.3,
    "reactive": 1.1,
-   "scrim": 0.45
+   "scrim": 0.45,
+   "solid": "#000000"
   },
   "lyrics": {
    "font": "SF Pro Display",
@@ -262,7 +313,16 @@
    "glass": 1.5,
    "radius": 16
   },
-  "accent": "#ffffff"
+  "accent": "#ffffff",
+  "app": {
+   "page_bg": "solid",
+   "sidebar": "transparent",
+   "bar_alpha": 0.2,
+   "card_radius": 12,
+   "thumb_radius": 10,
+   "panel_radius": 16,
+   "hover": 1.4
+  }
  },
  {
   "id": "dynamic-background",
@@ -294,6 +354,17 @@
   "chrome": {
    "glass": 1.2,
    "radius": 16
+  },
+  "app": {
+   "page_bg": "same",
+   "page_dim": 0.7,
+   "sidebar": "transparent",
+   "bar_alpha": 0.08,
+   "card_radius": 20,
+   "thumb_radius": 8,
+   "panel_radius": 16,
+   "hover": 0.4,
+   "text_dim": "#b3b3b3"
   }
  },
  {
@@ -310,6 +381,13 @@
   "chrome": {
    "glass": 1.5,
    "radius": 14
+  },
+  "app": {
+   "sidebar_alpha": 0.5,
+   "bar_alpha": 0.5,
+   "card_radius": 15,
+   "thumb_radius": 8,
+   "panel_radius": 15
   }
  },
  {
@@ -343,6 +421,9 @@
   "cover": {
    "radius": 24,
    "size": 1.2
+  },
+  "app": {
+   "page_bg": "static"
   }
  },
  {
@@ -368,6 +449,13 @@
   "chrome": {
    "glass": 0.2,
    "radius": 12
+  },
+  "app": {
+   "font": "Google Sans Flex",
+   "page_bg": "solid",
+   "bar_alpha": 1.0,
+   "bar_border": true,
+   "panel_radius": 12
   }
  },
  {
@@ -405,6 +493,17 @@
   "chrome": {
    "glass": 1.4,
    "radius": 16
+  },
+  "app": {
+   "page_bg": "static",
+   "page_dim": 0.7,
+   "sidebar_alpha": 0.05,
+   "bar_alpha": 0.2,
+   "card_radius": 20,
+   "thumb_radius": 2,
+   "panel_radius": 24,
+   "hover": 1.5,
+   "text_dim": "#b3b3b3"
   }
  },
  {
@@ -438,6 +537,15 @@
   "chrome": {
    "glass": 1.4,
    "radius": 16
+  },
+  "app": {
+   "page_dim": 0.6,
+   "sidebar_alpha": 0.05,
+   "bar_alpha": 0.2,
+   "card_radius": 12,
+   "thumb_radius": 10,
+   "panel_radius": 24,
+   "hover": 1.4
   }
  },
  {
@@ -479,6 +587,17 @@
   "chrome": {
    "glass": 0.8,
    "radius": 14
+  },
+  "app": {
+   "page_bg": "solid",
+   "sidebar_alpha": 0.48,
+   "bar_alpha": 0.72,
+   "bar_border": true,
+   "card_radius": 14,
+   "thumb_radius": 14,
+   "panel_radius": 20,
+   "hover": 0.8,
+   "text_dim": "#a8a8a8"
   }
  },
  {
@@ -495,7 +614,8 @@
    "np_dim": 0.22,
    "page_dim": 0.22,
    "reactive": 0,
-   "scrim": 0.1
+   "scrim": 0.1,
+   "solid": "#0e0e10"
   },
   "lyrics": {
    "font": "Google Sans Flex",
@@ -515,6 +635,12 @@
   },
   "chrome": {
    "glass": 0.6
+  },
+  "app": {
+   "font": "Google Sans Flex",
+   "page_bg": "solid",
+   "bar_alpha": 0.78,
+   "hover": 0
   }
  },
  {
@@ -573,6 +699,10 @@
   },
   "chrome": {
    "radius": 10
+  },
+  "app": {
+   "font": "Google Sans Flex",
+   "card_radius": 24
   }
  },
  {
@@ -610,6 +740,10 @@
   },
   "chrome": {
    "glass": 0.6
+  },
+  "app": {
+   "font": "Google Sans Flex",
+   "bar_alpha": 0.7
   }
  },
  {
@@ -674,6 +808,14 @@
   },
   "chrome": {
    "radius": 10
+  },
+  "app": {
+   "page_dim": 0.4,
+   "sidebar_alpha": 0.35,
+   "bar_alpha": 0.35,
+   "bar_border": true,
+   "card_radius": 10,
+   "thumb_radius": 10
   }
  },
  {
@@ -776,6 +918,13 @@
   "chrome": {
    "glass": 1.3,
    "radius": 16
+  },
+  "app": {
+   "font": "DM Sans",
+   "page_bg": "static",
+   "bar_alpha": 0.2,
+   "card_radius": 32,
+   "thumb_radius": 16
   }
  },
  {
@@ -800,6 +949,10 @@
   },
   "chrome": {
    "glass": 0.3
+  },
+  "app": {
+   "sidebar": "transparent",
+   "bar_alpha": 0
   }
  }
 ]

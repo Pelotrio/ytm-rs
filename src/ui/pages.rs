@@ -140,7 +140,7 @@ fn home(app: &mut App, ui: &mut Ui, now: f64) {
     let shelves = app.home.as_ref().map(|h| h.shelves.clone()).unwrap_or_default();
     if shelves.is_empty() {
         ui.add_space(40.0);
-        ui.label(RichText::new("Nothing here yet").color(theme::TEXT_DIM));
+        ui.label(RichText::new("Nothing here yet").color(theme::text_dim()));
     }
     for (i, s) in shelves.iter().enumerate() {
         let id = format!("home-{i}-{}", s.title);
@@ -269,10 +269,10 @@ fn top_result(ui: &mut Ui, c: &Card, acts: &mut Vec<Action>) {
         let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.contains_pointer(), 0.2);
         ui.painter().rect_filled(rect, 14.0, theme::glass(0.07 + 0.05 * h));
         let img = Rect::from_min_size(rect.min + vec2(20.0, 20.0), Vec2::splat(110.0));
-        paint_cover(ui, img, &c.thumbs, if c.round { 55.0 } else { 8.0 }, 1.0);
+        paint_cover(ui, img, &c.thumbs, if c.round { 55.0 } else { theme::card_radius() }, 1.0);
         let x = rect.left() + 20.0;
         widgets::text_at(ui, pos2(x, img.bottom() + 16.0), &c.title, theme::bold(26.0), theme::TEXT, rect.width() - 40.0);
-        widgets::linked_text(ui, pos2(x, img.bottom() + 52.0), &c.subtitle, &c.links, theme::regular(14.0), theme::TEXT_DIM, rect.width() - 40.0, acts);
+        widgets::linked_text(ui, pos2(x, img.bottom() + 52.0), &c.subtitle, &c.links, theme::regular(14.0), theme::text_dim(), rect.width() - 40.0, acts);
         // Floating play button
         let pc = rect.right_bottom() + vec2(-44.0, -44.0 + 6.0 * (1.0 - h));
         let pr = Rect::from_center_size(pc, Vec2::splat(52.0));
@@ -308,16 +308,16 @@ fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
     ui.horizontal_top(|ui| {
         let (img, _) = ui.allocate_exact_size(Vec2::splat(232.0), Sense::hover());
         widgets::soft_shadow(ui, img, 10.0, 40.0, 0.5);
-        paint_cover(ui, img, &thumbs, 10.0, 1.0);
+        paint_cover(ui, img, &thumbs, theme::card_radius() + 2.0, 1.0);
         ui.add_space(26.0);
         ui.vertical(|ui| {
             ui.set_max_width(ui.available_width().min(760.0));
             ui.add_space(24.0);
-            ui.label(RichText::new(if is_album { "ALBUM" } else { "PLAYLIST" }).font(theme::semibold(12.0)).color(theme::TEXT_DIM));
+            ui.label(RichText::new(if is_album { "ALBUM" } else { "PLAYLIST" }).font(theme::semibold(12.0)).color(theme::text_dim()));
             ui.label(RichText::new(&title).font(theme::bold(40.0)).color(theme::TEXT));
             ui.add_space(2.0);
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
-            widgets::linked_text(ui, r.min, &subtitle, &artists, theme::regular(15.0), theme::TEXT_DIM, r.width(), &mut app.actions);
+            widgets::linked_text(ui, r.min, &subtitle, &artists, theme::regular(15.0), theme::text_dim(), r.width(), &mut app.actions);
             let total: u32 = tracks.iter().filter_map(|t| t.duration).sum();
             if total > 0 {
                 ui.label(
@@ -326,7 +326,7 @@ fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
             }
             if let Some(d) = desc.filter(|d| !d.trim().is_empty()) {
                 ui.add_space(6.0);
-                let g = widgets::galley_wrapped(ui, d.trim(), theme::regular(13.5), theme::TEXT_DIM, ui.available_width(), 2);
+                let g = widgets::galley_wrapped(ui, d.trim(), theme::regular(13.5), theme::text_dim(), ui.available_width(), 2);
                 ui.label(g);
             }
             ui.add_space(16.0);
@@ -411,7 +411,7 @@ fn artist(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
     let base = hero.left_bottom() + vec2(28.0, -30.0);
     ui.painter().text(base - vec2(0.0, 44.0), Align2::LEFT_BOTTOM, &name, theme::bold(58.0), Color32::WHITE);
     if let Some(s) = subs {
-        ui.painter().text(base - vec2(0.0, 18.0), Align2::LEFT_BOTTOM, format!("{} subscribers", compact(s)), theme::regular(14.0), theme::TEXT_DIM);
+        ui.painter().text(base - vec2(0.0, 18.0), Align2::LEFT_BOTTOM, format!("{} subscribers", compact(s)), theme::regular(14.0), theme::text_dim());
     }
     ui.add_space(18.0);
     ui.horizontal(|ui| {
@@ -454,7 +454,7 @@ fn artist(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
     card_row(ui, "a-sim", "Fans might also like", &similar, &mut app.actions);
     if let Some(d) = desc.filter(|d| !d.trim().is_empty()) {
         shelf_header(ui, "About", None, None, false);
-        let g = widgets::galley_wrapped(ui, d.trim(), theme::regular(14.5), theme::TEXT_DIM, ui.available_width().min(820.0), 8);
+        let g = widgets::galley_wrapped(ui, d.trim(), theme::regular(14.5), theme::text_dim(), ui.available_width().min(820.0), 8);
         ui.label(g);
     }
 }
@@ -465,7 +465,7 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
     page_title(ui, "Library");
     if !app.logged_in {
         ui.add_space(10.0);
-        ui.label(RichText::new("Sign in to see your playlists, liked songs and history.").color(theme::TEXT_DIM));
+        ui.label(RichText::new("Sign in to see your playlists, liked songs and history.").color(theme::text_dim()));
         ui.add_space(12.0);
         if pill(ui, "Sign in with Google", Some(icon::CIRCLE_USER), true).clicked() {
             app.start_sign_in(ui.ctx());
@@ -557,7 +557,7 @@ fn settings(app: &mut App, ui: &mut Ui) {
     page_title(ui, "Settings");
     let section = |ui: &mut Ui, title: &str, body: &mut dyn FnMut(&mut Ui)| {
         ui.add_space(18.0);
-        egui::Frame::new().fill(theme::glass(0.06)).corner_radius(14).inner_margin(20).show(ui, |ui| {
+        egui::Frame::new().fill(theme::glass(0.06)).corner_radius(theme::panel_radius()).inner_margin(20).show(ui, |ui| {
             ui.set_width(ui.available_width().min(760.0));
             ui.label(RichText::new(title).font(theme::bold(18.0)));
             ui.add_space(10.0);
@@ -577,13 +577,13 @@ fn settings(app: &mut App, ui: &mut Ui) {
             ui.add_space(8.0);
             sign_out = pill(ui, "Sign out", Some(icon::LOG_OUT), false).clicked();
         } else {
-            ui.label(RichText::new("Sign in to get your home feed, library and likes.").color(theme::TEXT_DIM));
+            ui.label(RichText::new("Sign in to get your home feed, library and likes.").color(theme::text_dim()));
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 sign_in = !busy && pill(ui, "Sign in with Google", Some(icon::CIRCLE_USER), true).clicked();
                 if busy {
                     ui.spinner();
-                    ui.label(RichText::new("Finish signing in in the window that opened").color(theme::TEXT_DIM));
+                    ui.label(RichText::new("Finish signing in in the window that opened").color(theme::text_dim()));
                 }
             });
             ui.add_space(10.0);
@@ -592,7 +592,7 @@ fn settings(app: &mut App, ui: &mut Ui) {
                     RichText::new(
                         "Paste the `cookie` request header from a signed-in music.youtube.com tab (DevTools → Network → any request), or a cookies.txt export.",
                     )
-                    .color(theme::TEXT_DIM),
+                    .color(theme::text_dim()),
                 );
                 ui.add(egui::TextEdit::multiline(cookie).hint_text("cookie header or cookies.txt").desired_rows(3).desired_width(f32::INFINITY));
                 if ui.add_enabled(!cookie.trim().is_empty(), egui::Button::new("Sign in")).clicked() {
@@ -646,7 +646,7 @@ fn settings(app: &mut App, ui: &mut Ui) {
         ] {
             ui.horizontal(|ui| {
                 ui.add_sized([250.0, 20.0], egui::Label::new(RichText::new(k).font(theme::semibold(13.5))));
-                ui.label(RichText::new(v).color(theme::TEXT_DIM));
+                ui.label(RichText::new(v).color(theme::text_dim()));
             });
         }
     });
@@ -658,7 +658,7 @@ fn settings(app: &mut App, ui: &mut Ui) {
             "Lyric fonts: DM Sans, Google Sans Flex, Figtree, Instrument Sans (SIL OFL 1.1)",
             "Inter typeface (SIL OFL 1.1) • Lucide icons (ISC)",
         ] {
-            ui.label(RichText::new(line).color(theme::TEXT_DIM));
+            ui.label(RichText::new(line).color(theme::text_dim()));
         }
     });
 }
@@ -666,14 +666,14 @@ fn settings(app: &mut App, ui: &mut Ui) {
 /// Theme preset gallery: one card per preset with its cover, name and creators.
 fn themes(app: &mut App, ui: &mut Ui) {
     ui.add_space(18.0);
-    egui::Frame::new().fill(theme::glass(0.06)).corner_radius(14).inner_margin(20).show(ui, |ui| {
+    egui::Frame::new().fill(theme::glass(0.06)).corner_radius(theme::panel_radius()).inner_margin(20).show(ui, |ui| {
         let avail = ui.available_width().min(1180.0);
         ui.set_width(avail);
         ui.label(RichText::new("Themes").font(theme::bold(18.0)));
         ui.add_space(2.0);
         ui.label(
             RichText::new("Presets rebuilt from the Better Lyrics community themes. They change the background, lyrics, cover and player bar.")
-                .color(theme::TEXT_DIM),
+                .color(theme::text_dim()),
         );
         ui.add_space(12.0);
         let gap = 14.0;

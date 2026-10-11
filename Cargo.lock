@@ -6920,6 +6920,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
+ "skrifa",
  "souvlaki",
  "tao",
  "tokio",
