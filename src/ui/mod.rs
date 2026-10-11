@@ -155,6 +155,8 @@ pub struct App {
     buffering: bool,
     repeat: Repeat,
     autoplay: bool,
+    /// Turn loud tracks down to YouTube's loudness target.
+    normalize: bool,
     radio_pending: bool,
     seek_drag: Option<f32>,
 
@@ -260,6 +262,7 @@ impl App {
                 _ => Repeat::Off,
             },
             autoplay: get("autoplay").is_none_or(|v| v == "1"),
+            normalize: get("normalize").is_none_or(|v| v == "1"),
             radio_pending: false,
             seek_drag: None,
             art_key: None,
@@ -325,6 +328,7 @@ impl App {
         if std::env::var("YTM_NOWPLAYING").is_ok() {
             app.np_open = true;
         }
+        app.audio.set_normalize(app.normalize);
         app
     }
 
@@ -1358,6 +1362,7 @@ impl eframe::App for App {
         storage.set_string("repeat", repeat.into());
         let b = |v: bool| if v { "1" } else { "0" }.to_owned();
         storage.set_string("autoplay", b(self.autoplay));
+        storage.set_string("normalize", b(self.normalize));
         storage.set_string("discord_enabled", b(self.discord_enabled));
         storage.set_string("default_theme", b(self.default_theme));
         if std::env::var_os("YTM_THEME").is_none() {

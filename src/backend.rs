@@ -588,7 +588,7 @@ impl Backend {
     /// Resolve a stream URL and start downloading it into a new buffer.
     async fn open_stream(&self, video_id: &str) -> anyhow::Result<Arc<Shared>> {
         let (source, s) = self.resolve(video_id).await?;
-        let shared = Shared::new(s.size, s.duration_ms);
+        let shared = Shared::new(s.size, s.duration_ms, s.loudness_db);
         let refresh: stream::Refresh = {
             let (this, id) = (self.clone(), video_id.to_owned());
             Arc::new(move || {
@@ -624,7 +624,13 @@ impl Backend {
     }
 
     async fn resolve_from(&self, source: Source, video_id: &str) -> anyhow::Result<ResolvedStream> {
-        let plain = |s: innertube::Stream, ua: &str| ResolvedStream { url: s.url, size: s.size, duration_ms: s.duration_ms, user_agent: ua.to_owned() };
+        let plain = |s: innertube::Stream, ua: &str| ResolvedStream {
+            url: s.url,
+            size: s.size,
+            duration_ms: s.duration_ms,
+            user_agent: ua.to_owned(),
+            loudness_db: s.loudness_db,
+        };
         Ok(match source {
             Source::VisionOs => plain(self.visionos_stream(video_id).await?, innertube::UA),
             Source::WebMusic => {
@@ -633,7 +639,8 @@ impl Backend {
             }
             Source::YtDlp => {
                 let s = ytdlp::resolve(&self.http, &self.data_dir, video_id).await?;
-                ResolvedStream { url: s.url, size: s.size, duration_ms: s.duration_ms, user_agent: s.user_agent }
+                // yt-dlp's JSON doesn't carry YouTube's loudness figure.
+                ResolvedStream { url: s.url, size: s.size, duration_ms: s.duration_ms, user_agent: s.user_agent, loudness_db: None }
             }
             Source::RustyPipe => {
                 let q = self.rp.query();
@@ -648,6 +655,7 @@ impl Backend {
                     size: s.size,
                     duration_ms: s.duration_ms.unwrap_or(0) as u64,
                     user_agent: q.user_agent(player.client_type).into_owned(),
+                    loudness_db: s.loudness_db,
                 }
             }
         })
@@ -731,6 +739,7 @@ struct ResolvedStream {
     size: u64,
     duration_ms: u64,
     user_agent: String,
+    loudness_db: Option<f32>,
 }
 
 /// The anonymous visionOS player refused because the song needs an account:

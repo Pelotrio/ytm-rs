@@ -48,6 +48,8 @@ pub struct AudioStatus {
     pub wanted_gen: AtomicU64,
     /// f32 bits
     volume: AtomicU32,
+    /// Turn loud tracks down to YouTube's loudness target.
+    pub normalize: AtomicBool,
     /// Smoothed output loudness 0..1 (f32 bits), for audio-reactive visuals.
     level: AtomicU32,
 }
@@ -150,9 +152,24 @@ impl AudioHandle {
         f32::from_bits(self.status.volume.load(Ordering::Relaxed))
     }
 
+    pub fn set_normalize(&self, on: bool) {
+        self.status.normalize.store(on, Ordering::Relaxed);
+        self.send(AudioCmd::Volume(self.volume()));
+    }
+
     pub fn set_volume(&self, v: f32) {
         self.status.volume.store(v.to_bits(), Ordering::Relaxed);
         self.send(AudioCmd::Volume(v));
+    }
+}
+
+/// Volume normalization the way YouTube Music does it: tracks mastered louder than
+/// the -14 LUFS target are turned down by the difference; quieter ones are left alone
+/// (boosting would clip).
+fn norm_gain(status: &AudioStatus, shared: Option<&Shared>) -> f32 {
+    match shared.and_then(|s| s.loudness_db) {
+        Some(db) if db > 0.0 && status.normalize.load(Ordering::Relaxed) => 10f32.powf(-db / 20.0),
+        _ => 1.0,
     }
 }
 
@@ -208,6 +225,9 @@ fn run(
                 }
                 log::debug!("audio: start generation {generation}");
                 player.clear();
+                let gain = norm_gain(&status, Some(&s));
+                log::info!("audio: loudness {:?} dB, normalization gain {gain:.3}", s.loudness_db);
+                player.set_volume(f32::from_bits(status.volume.load(Ordering::Relaxed)) * gain);
                 player.append(Meter::new(decoder, status.clone()));
                 player.play();
                 status.duration_ms.store(duration_ms, Ordering::Relaxed);
@@ -267,7 +287,7 @@ fn run(
                     });
                 }
             }
-            Ok(AudioCmd::Volume(v)) => player.set_volume(v),
+            Ok(AudioCmd::Volume(v)) => player.set_volume(v * norm_gain(&status, shared.as_deref())),
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
         }
@@ -282,5 +302,25 @@ fn run(
                 wake();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalization_only_turns_loud_tracks_down() {
+        let status = AudioStatus::default();
+        let loud = Shared::new(1, 0, Some(7.29));
+        let quiet = Shared::new(1, 0, Some(-4.0));
+        let unknown = Shared::new(1, 0, None);
+        status.normalize.store(true, Ordering::Relaxed);
+        assert!((norm_gain(&status, Some(&loud)) - 0.432).abs() < 0.001);
+        assert_eq!(norm_gain(&status, Some(&quiet)), 1.0);
+        assert_eq!(norm_gain(&status, Some(&unknown)), 1.0);
+        assert_eq!(norm_gain(&status, None), 1.0);
+        status.normalize.store(false, Ordering::Relaxed);
+        assert_eq!(norm_gain(&status, Some(&loud)), 1.0);
     }
 }

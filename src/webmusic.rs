@@ -110,6 +110,7 @@ impl Session {
             .ok_or_else(|| anyhow::anyhow!("no AAC stream in web player response"))?;
         let size = f["contentLength"].as_str().and_then(|s| s.parse().ok()).ok_or_else(|| anyhow::anyhow!("unknown stream size"))?;
         let duration_ms = f["approxDurationMs"].as_str().and_then(|d| d.parse().ok()).unwrap_or(0);
+        let loudness_db = crate::innertube::loudness(&resp, f);
 
         // Either a plain URL, or `signatureCipher` = s=<challenge>&sp=<param>&url=<url>.
         let (raw, cipher) = match f["url"].as_str() {
@@ -134,6 +135,6 @@ impl Session {
             pairs.push((sp, sig));
         }
         url.query_pairs_mut().clear().extend_pairs(pairs);
-        Ok(Stream { url: url.into(), size, duration_ms })
+        Ok(Stream { url: url.into(), size, duration_ms, loudness_db })
     }
 }

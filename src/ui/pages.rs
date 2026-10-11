@@ -632,6 +632,12 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
         setting_row(ui, true, "Autoplay", Some("Keep playing similar songs when the queue ends."), |ui| {
             toggle(ui, &mut app.autoplay, "Autoplay");
         });
+        divider(ui);
+        setting_row(ui, false, "Volume normalization", Some("Turn loud songs down to the same level, like YouTube Music does."), |ui| {
+            if toggle(ui, &mut app.normalize, "Volume normalization").changed() {
+                app.audio.set_normalize(app.normalize);
+            }
+        });
     });
 
     // ---- appearance

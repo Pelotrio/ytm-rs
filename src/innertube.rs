@@ -14,6 +14,18 @@ pub struct Stream {
     pub url: String,
     pub size: u64,
     pub duration_ms: u64,
+    /// dB above YouTube's -14 LUFS loudness target (positive = louder).
+    pub loudness_db: Option<f32>,
+}
+
+/// A format's loudness relative to YouTube's target, falling back to the track-level
+/// figure in `playerConfig.audioConfig`.
+pub fn loudness(resp: &Value, format: &Value) -> Option<f32> {
+    format["loudnessDb"].as_f64().map(|v| v as f32).or_else(|| {
+        let a = &resp["playerConfig"]["audioConfig"];
+        let track = a["trackAbsoluteLoudnessLkfs"].as_f64().or_else(|| a["perceptualLoudnessDb"].as_f64())?;
+        Some((track - a["loudnessTargetLkfs"].as_f64().unwrap_or(-14.0)) as f32)
+    })
 }
 
 pub async fn audio_stream(http: &reqwest::Client, video_id: &str, visitor_data: &str) -> anyhow::Result<Stream> {
@@ -67,6 +79,7 @@ pub async fn audio_stream(http: &reqwest::Client, video_id: &str, visitor_data: 
                 url: f["url"].as_str()?.to_owned(),
                 size: f["contentLength"].as_str()?.parse().ok()?,
                 duration_ms: f["approxDurationMs"].as_str().and_then(|d| d.parse().ok()).unwrap_or(0),
+                loudness_db: loudness(&resp, f),
             })
         })
         .ok_or_else(|| anyhow::anyhow!("no AAC stream in visionOS player response"))
