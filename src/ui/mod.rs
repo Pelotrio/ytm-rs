@@ -162,6 +162,10 @@ pub struct App {
     art_changed: f64,
     accent: Color32,
     default_theme: bool,
+    /// Selected theme preset (see `preset.rs`); applies unless `default_theme`.
+    theme_id: String,
+    /// Preset whose chrome (glass, corner radius) is installed in the egui style.
+    chrome_applied: Option<String>,
     anim_bg: bool,
     reactive_bg: bool,
     /// Background animation clock: advances only while music plays, so pausing
@@ -181,6 +185,8 @@ pub struct App {
     fullscreen: bool,
     lyrics: Option<(String, Option<Lyrics>)>,
     lyrics_user_scroll: f64,
+    /// Rotation of a "record" cover (radians); advances only while playing.
+    record_angle: f64,
 
     // account / misc
     logged_in: bool,
@@ -256,7 +262,10 @@ impl App {
             art_key: None,
             art_changed: -10.0,
             accent: theme::RED,
-            default_theme: get("default_theme").is_some_and(|v| v == "1"),
+            default_theme: get("default_theme").is_some_and(|v| v == "1") && std::env::var_os("YTM_THEME").is_none(),
+            // Dev hook: YTM_THEME=<preset id> tries a theme without saving it.
+            theme_id: std::env::var("YTM_THEME").ok().or_else(|| get("theme")).unwrap_or_else(|| crate::preset::DEFAULT_ID.to_owned()),
+            chrome_applied: None,
             anim_bg: get("anim_bg").is_none_or(|v| v == "1"),
             reactive_bg: get("reactive_bg").is_none_or(|v| v == "1"),
             bg_time: 0.0,
@@ -271,6 +280,7 @@ impl App {
             fullscreen: false,
             lyrics: None,
             lyrics_user_scroll: -10.0,
+            record_angle: 0.0,
             logged_in,
             signing_in: Default::default(),
             cookie_input: String::new(),
@@ -425,7 +435,17 @@ impl App {
     }
 
     fn accent_color(&self) -> Color32 {
-        if self.default_theme { theme::RED } else { self.accent }
+        if self.default_theme { theme::RED } else { self.look().accent(self.accent) }
+    }
+
+    /// The active theme preset; the classic red theme uses the built-in look's layout.
+    fn look(&self) -> &'static crate::preset::Preset {
+        crate::preset::get(if self.default_theme { crate::preset::DEFAULT_ID } else { &self.theme_id })
+    }
+
+    /// Height of the bottom player area (a floating bar leaves a margin around it).
+    fn bar_height(&self) -> f32 {
+        if self.look().chrome.player_bar == crate::preset::PlayerBar::Floating { 100.0 } else { 86.0 }
     }
 
     fn set_discord_enabled(&mut self, enabled: bool) {
@@ -1199,13 +1219,34 @@ impl eframe::App for App {
         let now = ctx.input(|i| i.time);
         let screen = ctx.content_rect();
 
+        let look = self.look();
+        if self.chrome_applied.as_deref() != Some(look.id.as_str()) {
+            theme::apply_chrome(&ctx, look.chrome.glass, look.chrome.radius);
+            self.chrome_applied = Some(look.id.clone());
+        }
         shell::background(self, ui, screen, now);
         if !self.fullscreen {
+            let floating = look.chrome.player_bar == crate::preset::PlayerBar::Floating;
+            let frame = if floating {
+                egui::Frame::new().inner_margin(egui::Margin { left: 14, right: 14, top: 0, bottom: 14 })
+            } else {
+                egui::Frame::new().fill(theme::shade(0.55))
+            };
             egui::Panel::bottom("player")
-                .exact_size(86.0)
-                .frame(egui::Frame::new().fill(theme::shade(0.55)))
+                .exact_size(self.bar_height())
+                .frame(frame)
                 .show_separator_line(false)
-                .show(ui, |ui| shell::player_bar(self, ui, now));
+                .show(ui, |ui| {
+                    if floating {
+                        let r = ui.max_rect();
+                        let radius = look.chrome.radius.clamp(10.0, 26.0);
+                        widgets::soft_shadow(ui, r, radius, 24.0, 0.45);
+                        ui.painter().rect_filled(r, radius, theme::shade(0.62));
+                        ui.painter().rect_stroke(r, radius, egui::Stroke::new(1.0, theme::glass(0.08)), egui::StrokeKind::Inside);
+                        ui.set_clip_rect(r);
+                    }
+                    shell::player_bar(self, ui, now)
+                });
             egui::Panel::left("nav")
                 .exact_size(236.0)
                 .frame(egui::Frame::new().fill(theme::shade(0.28)).inner_margin(egui::Margin::symmetric(14, 16)))
@@ -1233,7 +1274,11 @@ impl eframe::App for App {
         shell::suggestions(self, &ctx);
         shell::toast(self, &ctx, now);
 
-        dev_screenshot(&ctx, now);
+        if std::env::var_os("YTM_THEME_TOUR").is_some() {
+            self.theme_tour(&ctx, now);
+        } else {
+            dev_screenshot(&ctx, now);
+        }
 
         // Thumbnails are cheap to refetch; cap the decoded cache instead of growing forever.
         let bytes: usize = ctx.loaders().bytes.lock().iter().map(|l| l.byte_size()).sum();
@@ -1288,6 +1333,9 @@ impl eframe::App for App {
         storage.set_string("autoplay", b(self.autoplay));
         storage.set_string("discord_enabled", b(self.discord_enabled));
         storage.set_string("default_theme", b(self.default_theme));
+        if std::env::var_os("YTM_THEME").is_none() {
+            storage.set_string("theme", self.theme_id.clone());
+        }
         storage.set_string("anim_bg", b(self.anim_bg));
         storage.set_string("reactive_bg", b(self.reactive_bg));
         // Background test runs leave the user's real "last song" alone unless asked.
@@ -1339,6 +1387,56 @@ fn dev_screenshot(ctx: &egui::Context, now: f64) {
         match image::RgbaImage::from_raw(w as u32, h as u32, bytes).map(|i| i.save(&path)) {
             Some(Ok(())) => log::info!("screenshot saved"),
             other => log::warn!("screenshot failed: {other:?}"),
+        }
+    }
+}
+
+impl App {
+    /// Dev hook: `YTM_THEME_TOUR=<secs>` steps through every theme preset from
+    /// `YTM_SCREENSHOT_AT`, saving `<YTM_SCREENSHOT stem>_<id>.png` for each, then exits.
+    fn theme_tour(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(path) = std::env::var_os("YTM_SCREENSHOT").map(std::path::PathBuf::from) else { return };
+        let at: f64 = std::env::var("YTM_SCREENSHOT_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(8.0);
+        let step: f64 = std::env::var("YTM_THEME_TOUR").ok().and_then(|v| v.parse().ok()).unwrap_or(3.0);
+        // YTM_TOUR_ONLY=id,id limits the tour to those presets.
+        let only = std::env::var("YTM_TOUR_ONLY").unwrap_or_default();
+        let all: Vec<&crate::preset::Preset> = crate::preset::all().iter().filter(|p| only.is_empty() || only.split(',').any(|o| o == p.id)).collect();
+        ctx.request_repaint_after(Duration::from_millis(100));
+        if now < at {
+            return;
+        }
+        let n = ((now - at) / step) as usize;
+        if n >= all.len() {
+            // Let the last screenshot land, then quit.
+            if now - at > step * all.len() as f64 + 1.5 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        } else if self.theme_id != all[n].id {
+            self.theme_id = all[n].id.clone();
+            self.default_theme = false;
+        }
+        let shot_id = egui::Id::new("tour-shot");
+        let requested: usize = ctx.data(|d| d.get_temp(shot_id)).unwrap_or(usize::MAX);
+        let in_slot = (now - at) - n as f64 * step;
+        if n < all.len() && requested != n && in_slot > step * 0.8 {
+            ctx.data_mut(|d| d.insert_temp(shot_id, n));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(n)));
+        }
+        let shot = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, user_data, .. } => Some((image.clone(), user_data.data.as_ref().and_then(|d| d.downcast_ref::<usize>().copied()))),
+                _ => None,
+            })
+        });
+        if let Some((img, Some(i))) = shot {
+            let [w, h] = img.size;
+            let bytes: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+            let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let out = path.with_file_name(format!("{stem}_{:02}_{}.png", i, all[i].id));
+            match image::RgbaImage::from_raw(w as u32, h as u32, bytes).map(|im| im.save(&out)) {
+                Some(Ok(())) => log::info!("tour screenshot saved: {}", all[i].id),
+                other => log::warn!("tour screenshot failed: {other:?}"),
+            }
         }
     }
 }

@@ -1,0 +1,320 @@
+//! Theme presets: native translations of the Better Lyrics community themes
+//! (github.com/better-lyrics/themes). Those are CSS for the YouTube Music website,
+//! which this app can't run, so each one is reduced to the knobs this renderer has:
+//! the background shader, lyric styling, cover treatment and chrome. The data lives
+//! in `assets/themes/presets.json`; covers in `assets/themes/covers/<id>.jpg`.
+
+use std::sync::OnceLock;
+
+use egui::Color32;
+use serde::Deserialize;
+
+/// Id of the built-in look (the app's own design, not a Better Lyrics theme).
+pub const DEFAULT_ID: &str = "ytm-rs";
+
+#[derive(Clone, Copy, PartialEq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BgMode {
+    /// Animated warped, blurred cover.
+    #[default]
+    Kawarp,
+    /// Blurred cover, no motion.
+    CoverStatic,
+    /// Flat dark with a soft gradient in the cover's colour.
+    AccentGradient,
+    /// One colour.
+    Solid,
+    /// Now playing: the cover itself fills the screen behind a scrim.
+    CoverFullbleed,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+pub struct Background {
+    pub mode: BgMode,
+    pub solid: String,
+    /// The shader values are for now playing; pages use a calmer version.
+    pub intensity: f32,
+    pub saturation: f32,
+    pub speed: f32,
+    pub scale: f32,
+    pub np_dim: f32,
+    pub page_dim: f32,
+    pub reactive: f32,
+    pub scrim: f32,
+}
+
+impl Default for Background {
+    fn default() -> Self {
+        Self {
+            mode: BgMode::Kawarp,
+            solid: "#0c0a0e".into(),
+            intensity: 1.0,
+            saturation: 1.5,
+            speed: 1.0,
+            scale: 1.2,
+            np_dim: 0.85,
+            page_dim: 0.5,
+            reactive: 1.0,
+            scrim: 0.3,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Align {
+    #[default]
+    Left,
+    Center,
+}
+
+#[derive(Clone, Copy, PartialEq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Weight {
+    Regular,
+    Semibold,
+    #[default]
+    Bold,
+}
+
+#[derive(Clone, Copy, PartialEq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Fill {
+    /// Soft per-character karaoke wipe.
+    #[default]
+    Sweep,
+    /// Each word lights fully when it starts.
+    Word,
+    /// The whole active line is lit at once.
+    Line,
+}
+
+#[derive(Clone, Copy, PartialEq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlurScope {
+    #[default]
+    All,
+    /// Only lines already sung.
+    Past,
+    /// Only lines still to come.
+    Upcoming,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+pub struct LyricStyle {
+    pub align: Align,
+    pub weight: Weight,
+    pub font: String,
+    pub size: f32,
+    pub line_gap: f32,
+    pub anchor: f32,
+    pub fill: Fill,
+    pub active_alpha: f32,
+    pub inactive_alpha: f32,
+    pub falloff: f32,
+    pub min_alpha: f32,
+    /// Alpha for lines already sung (0 = they vanish); unset = same as upcoming.
+    pub past_alpha: Option<f32>,
+    pub sung_color: String,
+    pub blur: f32,
+    pub blur_scope: BlurScope,
+    pub glow: f32,
+    pub glow_color: String,
+    pub active_scale: f32,
+    pub lift: f32,
+}
+
+impl Default for LyricStyle {
+    fn default() -> Self {
+        Self {
+            align: Align::Left,
+            weight: Weight::Bold,
+            font: "inter".into(),
+            size: 1.0,
+            line_gap: 0.6,
+            anchor: 0.32,
+            fill: Fill::Sweep,
+            active_alpha: 0.38,
+            inactive_alpha: 0.36,
+            falloff: 0.035,
+            min_alpha: 0.14,
+            past_alpha: None,
+            sung_color: "white".into(),
+            blur: 0.0,
+            blur_scope: BlurScope::All,
+            glow: 0.0,
+            glow_color: "white".into(),
+            active_scale: 1.0,
+            lift: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Layout {
+    #[default]
+    Split,
+    LyricsOnly,
+    CoverHero,
+}
+
+#[derive(Clone, Copy, PartialEq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Side {
+    #[default]
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, PartialEq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Shape {
+    #[default]
+    Rounded,
+    Circle,
+    /// A disc that spins slowly while playing.
+    Record,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+pub struct CoverStyle {
+    pub layout: Layout,
+    pub side: Side,
+    pub shape: Shape,
+    pub radius: f32,
+    pub spin_secs: f32,
+    pub brightness: f32,
+    pub size: f32,
+    pub shadow: f32,
+    pub glow: f32,
+}
+
+impl Default for CoverStyle {
+    fn default() -> Self {
+        Self { layout: Layout::Split, side: Side::Left, shape: Shape::Rounded, radius: 12.0, spin_secs: 60.0, brightness: 1.0, size: 1.0, shadow: 0.55, glow: 0.0 }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayerBar {
+    #[default]
+    Docked,
+    Floating,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+pub struct Chrome {
+    pub glass: f32,
+    pub radius: f32,
+    pub player_bar: PlayerBar,
+}
+
+impl Default for Chrome {
+    fn default() -> Self {
+        Self { glass: 1.0, radius: 18.0, player_bar: PlayerBar::Docked }
+    }
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Preset {
+    pub id: String,
+    pub name: String,
+    pub creators: Vec<String>,
+    pub blurb: String,
+    pub background: Background,
+    /// "cover" (sampled from the art) or a fixed "#rrggbb".
+    pub accent: String,
+    pub lyrics: LyricStyle,
+    pub cover: CoverStyle,
+    pub chrome: Chrome,
+}
+
+impl Preset {
+    fn builtin() -> Self {
+        Self {
+            id: DEFAULT_ID.into(),
+            name: "ytm-rs".into(),
+            blurb: "The app's own look: animated album-art background, left-aligned karaoke lyrics.".into(),
+            accent: "cover".into(),
+            ..Default::default()
+        }
+    }
+
+    /// The accent to use given the one sampled from the current cover.
+    pub fn accent(&self, from_cover: Color32) -> Color32 {
+        hex(&self.accent).unwrap_or(from_cover)
+    }
+
+    pub fn solid(&self) -> Color32 {
+        hex(&self.background.solid).unwrap_or(crate::theme::BG)
+    }
+}
+
+/// Resolve a colour name from the presets: "white", "accent"/"cover", or "#rrggbb".
+pub fn paint(name: &str, accent: Color32) -> Color32 {
+    match name {
+        "accent" | "cover" => accent,
+        "white" | "" => Color32::WHITE,
+        s => hex(s).unwrap_or(Color32::WHITE),
+    }
+}
+
+fn hex(s: &str) -> Option<Color32> {
+    let s = s.strip_prefix('#')?;
+    if s.len() != 6 {
+        return None;
+    }
+    let v = u32::from_str_radix(s, 16).ok()?;
+    Some(Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
+}
+
+/// Every preset, the built-in look first.
+pub fn all() -> &'static [Preset] {
+    static ALL: OnceLock<Vec<Preset>> = OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut v = vec![Preset::builtin()];
+        match serde_json::from_str::<Vec<Preset>>(include_str!("../assets/themes/presets.json")) {
+            Ok(list) => v.extend(list),
+            Err(e) => log::error!("theme presets: {e}"),
+        }
+        v
+    })
+}
+
+pub fn get(id: &str) -> &'static Preset {
+    all().iter().find(|p| p.id == id).unwrap_or(&all()[0])
+}
+
+/// The preset's cover thumbnail (JPEG), if it has one.
+pub fn cover(id: &str) -> Option<&'static [u8]> {
+    const COVERS: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/theme_covers.rs"));
+    COVERS.iter().find(|(k, _)| *k == id).map(|(_, b)| *b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every bundled preset parses, has a cover thumbnail and a unique id.
+    #[test]
+    fn presets_are_complete() {
+        let list: Vec<Preset> = serde_json::from_str(include_str!("../assets/themes/presets.json")).expect("presets.json parses");
+        assert_eq!(list.len(), 26);
+        let mut ids = std::collections::HashSet::new();
+        for p in &list {
+            assert!(ids.insert(p.id.clone()), "duplicate id {}", p.id);
+            assert!(!p.name.is_empty() && !p.creators.is_empty() && !p.blurb.is_empty(), "{} lacks name/creators/blurb", p.id);
+            assert!(cover(&p.id).is_some(), "{} has no cover", p.id);
+            assert!(p.accent == "cover" || p.accent.is_empty() || hex(&p.accent).is_some(), "{} accent {}", p.id, p.accent);
+        }
+        assert_eq!(all().len(), list.len() + 1);
+        assert_eq!(get("nope").id, DEFAULT_ID);
+    }
+}

@@ -11,6 +11,7 @@ mod login;
 mod lyrics;
 mod media;
 mod model;
+mod preset;
 mod shader;
 mod stream;
 mod theme;

@@ -614,14 +614,16 @@ fn settings(app: &mut App, ui: &mut Ui) {
         ui.checkbox(&mut app.autoplay, "Autoplay similar songs when the queue ends");
     });
     let was_default = app.default_theme;
+    let was_theme = app.theme_id.clone();
     section(ui, "Appearance", &mut |ui| {
-        ui.checkbox(&mut app.default_theme, "Keep default theme (dark with red accents)");
+        ui.checkbox(&mut app.default_theme, "Classic theme (dark with red accents, no album-art colours)");
         ui.add_enabled_ui(!app.default_theme, |ui| {
-            ui.checkbox(&mut app.anim_bg, "Animated album-art background (Kawarp)");
+            ui.checkbox(&mut app.anim_bg, "Animate the album-art background");
             ui.checkbox(&mut app.reactive_bg, "Background pulses with the music");
         });
     });
-    if was_default && !app.default_theme {
+    themes(app, ui);
+    if (was_default && !app.default_theme) || was_theme != app.theme_id {
         app.request_art();
     }
     let mut discord_enabled = app.discord_enabled;
@@ -652,9 +654,96 @@ fn settings(app: &mut App, ui: &mut Ui) {
         for line in [
             "Lyrics: Better Lyrics API (Musixmatch, LRCLIB, QQ, KuGou, Better Lyrics TTML)",
             "Background: port of Kawarp, MIT © Better Lyrics",
+            "Theme presets: adapted from the Better Lyrics theme store; each card credits its creators",
+            "Lyric fonts: DM Sans, Google Sans Flex, Figtree, Instrument Sans (SIL OFL 1.1)",
             "Inter typeface (SIL OFL 1.1) • Lucide icons (ISC)",
         ] {
             ui.label(RichText::new(line).color(theme::TEXT_DIM));
         }
     });
+}
+
+/// Theme preset gallery: one card per preset with its cover, name and creators.
+fn themes(app: &mut App, ui: &mut Ui) {
+    ui.add_space(18.0);
+    egui::Frame::new().fill(theme::glass(0.06)).corner_radius(14).inner_margin(20).show(ui, |ui| {
+        let avail = ui.available_width().min(1180.0);
+        ui.set_width(avail);
+        ui.label(RichText::new("Themes").font(theme::bold(18.0)));
+        ui.add_space(2.0);
+        ui.label(
+            RichText::new("Presets rebuilt from the Better Lyrics community themes. They change the background, lyrics, cover and player bar.")
+                .color(theme::TEXT_DIM),
+        );
+        ui.add_space(12.0);
+        let gap = 14.0;
+        let cols = ((avail + gap) / (220.0 + gap)).floor().max(1.0);
+        let w = ((avail + gap) / cols - gap).floor();
+        let mut picked = None;
+        ui.spacing_mut().item_spacing = vec2(gap, gap);
+        ui.horizontal_wrapped(|ui| {
+            for p in crate::preset::all() {
+                let selected = !app.default_theme && app.theme_id == p.id;
+                if theme_card(ui, p, w, selected, app.accent_color()).clicked() {
+                    picked = Some(p.id.clone());
+                }
+            }
+        });
+        if let Some(id) = picked {
+            app.theme_id = id;
+            app.default_theme = false;
+        }
+    });
+}
+
+fn theme_card(ui: &mut Ui, p: &crate::preset::Preset, w: f32, selected: bool, accent: Color32) -> egui::Response {
+    let img_h = (w * 0.625).round();
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, img_h + 52.0), Sense::click());
+    let resp = named(resp, &format!("Theme: {}", p.name)).on_hover_cursor(egui::CursorIcon::PointingHand);
+    if !ui.is_rect_visible(rect) {
+        return resp;
+    }
+    let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
+    let s = theme::anim_bool(ui.ctx(), resp.id.with("s"), selected, 0.2);
+    let img = Rect::from_min_size(rect.min, vec2(w, img_h));
+    let painter = ui.painter();
+    painter.rect_filled(rect.expand(6.0), 16.0, theme::glass(0.04 * h + 0.06 * s));
+    match crate::preset::cover(&p.id) {
+        Some(bytes) => {
+            egui::Image::from_bytes(format!("bytes://theme-cover/{}.jpg", p.id), bytes)
+                .corner_radius(egui::CornerRadius::same(10))
+                .paint_at(ui, img);
+        }
+        None => {
+            // The built-in look has no screenshot: a small abstract of it instead.
+            painter.rect_filled(img, 10.0, Color32::from_rgb(22, 18, 28));
+            let c = img.center();
+            painter.circle_filled(c - vec2(w * 0.18, 0.0), img_h * 0.42, theme::with_alpha(accent, 0.35));
+            painter.circle_filled(c + vec2(w * 0.2, img_h * 0.1), img_h * 0.36, theme::with_alpha(Color32::from_rgb(110, 80, 200), 0.3));
+            painter.rect_filled(Rect::from_center_size(c - vec2(w * 0.22, 0.0), Vec2::splat(img_h * 0.42)), 6.0, theme::glass(0.25));
+            for (i, len) in [0.34f32, 0.42, 0.28].iter().enumerate() {
+                let y = c.y - img_h * 0.12 + i as f32 * img_h * 0.13;
+                let a = if i == 1 { 0.9 } else { 0.35 };
+                painter.rect_filled(Rect::from_min_size(pos2(c.x - w * 0.02, y), vec2(w * len, img_h * 0.07)), 4.0, theme::with_alpha(Color32::WHITE, a));
+            }
+        }
+    }
+    if h > 0.0 {
+        painter.rect_filled(img, 10.0, theme::glass(0.06 * h));
+    }
+    if s > 0.0 {
+        painter.rect_stroke(img.expand(2.0), 12.0, egui::Stroke::new(2.5, theme::with_alpha(Color32::WHITE, s)), egui::StrokeKind::Outside);
+        let badge = pos2(img.right() - 18.0, img.top() + 18.0);
+        painter.circle_filled(badge, 12.0 * s, Color32::WHITE);
+        widgets::icon_at(ui, badge, icon::CHECK, 14.0 * s, Color32::from_gray(15));
+    }
+    let name_y = img.bottom() + 10.0;
+    widgets::text_at(ui, pos2(rect.left() + 2.0, name_y), &p.name, theme::semibold(14.5), theme::TEXT, w - 4.0);
+    let by = if p.creators.is_empty() { "Built in".to_owned() } else { format!("by {}", p.creators.join(", ")) };
+    widgets::text_at(ui, pos2(rect.left() + 2.0, name_y + 20.0), &by, theme::regular(12.0), theme::TEXT_FAINT, w - 4.0);
+    if !p.blurb.is_empty() {
+        resp.on_hover_text(&p.blurb)
+    } else {
+        resp
+    }
 }

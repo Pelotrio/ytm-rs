@@ -23,28 +23,36 @@ pub fn vgradient(ui: &Ui, rect: Rect, top: Color32, bottom: Color32) {
 }
 
 pub fn background(app: &mut App, ui: &mut Ui, screen: Rect, now: f64) {
+    use crate::preset::BgMode;
     let dt = (now - app.last_frame).clamp(0.0, 0.1);
     app.last_frame = now;
-    let moving = !app.default_theme && app.anim_bg && app.playing();
+    let look = app.look();
+    let b = &look.background;
+    let animated = matches!(b.mode, BgMode::Kawarp | BgMode::CoverFullbleed) && b.speed > 0.0;
+    let moving = !app.default_theme && app.anim_bg && animated && app.playing();
     if moving {
-        app.bg_time += dt;
+        app.bg_time += dt * b.speed as f64;
     }
-    ui.painter().rect_filled(screen, 0.0, theme::BG);
-    if let Some(bg) = app.bg.as_ref().filter(|_| !app.default_theme) {
+    ui.painter().rect_filled(screen, 0.0, if app.default_theme { theme::BG } else { look.solid() });
+    let art = matches!(b.mode, BgMode::Kawarp | BgMode::CoverStatic | BgMode::CoverFullbleed);
+    if let Some(bg) = app.bg.as_ref().filter(|_| !app.default_theme && art) {
         let blend = theme::ease_in_out(((now - app.art_changed) / 1.4) as f32);
-        let level = if app.reactive_bg && app.playing() { app.audio.status.level() } else { 0.0 };
+        let level = if app.reactive_bg && app.playing() { app.audio.status.level() * b.reactive } else { 0.0 };
+        let still = b.mode == BgMode::CoverStatic;
         bg.paint(
             ui.painter(),
             screen,
             Params {
                 time: app.bg_time as f32,
                 blend,
-                intensity: 0.9,
-                saturation: 1.35,
-                dim: 0.5,
-                scale: 1.12 + level.min(0.5) * 0.08,
+                intensity: if still { 0.0 } else { b.intensity * 0.9 },
+                saturation: b.saturation * 0.9,
+                dim: b.page_dim,
+                scale: (b.scale - 0.08).max(1.0) + level.min(0.5) * 0.08,
             },
         );
+    } else if !app.default_theme && b.mode == BgMode::Solid {
+        // Plain colour: nothing over it.
     } else {
         vgradient(ui, screen, theme::with_alpha(app.accent_color(), 0.18), theme::BG);
     }
@@ -262,6 +270,9 @@ pub fn suggestions(app: &mut App, ctx: &egui::Context) {
 
 pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
     let full = ui.max_rect();
+    // A floating bar is rounded: keep the progress line clear of its corners.
+    let inset = if app.look().chrome.player_bar == crate::preset::PlayerBar::Floating { app.look().chrome.radius.clamp(10.0, 26.0) } else { 0.0 };
+    let track_rect = full.shrink2(vec2(inset, 0.0));
     let status = app.audio.status.clone();
     let track = app.current().cloned();
     let playing = app.playing();
@@ -273,12 +284,12 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
     let pos = app.seek_drag.unwrap_or(status.position_smooth().as_secs_f32()).min(total.max(0.0));
 
     // Progress line along the top edge; thickens with a knob on hover.
-    let bar_hit = Rect::from_min_size(full.min - vec2(0.0, 6.0), vec2(full.width(), 14.0));
+    let bar_hit = Rect::from_min_size(track_rect.min - vec2(0.0, 6.0), vec2(track_rect.width(), 14.0));
     let resp = ui.interact(bar_hit, ui.id().with("progress"), Sense::click_and_drag());
     resp.widget_info(|| egui::WidgetInfo::slider(total > 0.0, pos as f64, "Seek"));
     let h = theme::anim_bool(ui.ctx(), "progress-h", resp.hovered() || resp.dragged(), 0.15);
     let thick = 3.0 + 2.0 * h;
-    let line = Rect::from_min_size(full.min, vec2(full.width(), thick));
+    let line = Rect::from_min_size(track_rect.min, vec2(track_rect.width(), thick));
     ui.painter().rect_filled(line, 0.0, theme::glass(0.12));
     let frac = if total > 0.0 { pos / total } else { 0.0 };
     let filled = Rect::from_min_size(line.min, vec2(line.width() * frac, thick));

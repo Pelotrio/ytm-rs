@@ -12,13 +12,16 @@ use crate::shader::Params;
 use crate::theme::{self, icon};
 
 pub fn overlay(app: &mut App, ctx: &egui::Context, now: f64) {
+    use crate::preset::BgMode;
     let t = theme::anim_bool(ctx, "np-open", app.np_open && app.current().is_some(), 0.42);
     if t <= 0.001 {
         return;
     }
     let screen = ctx.content_rect();
-    let full = if app.fullscreen { screen } else { Rect::from_min_max(screen.min, pos2(screen.right(), screen.bottom() - 86.0)) };
+    let full = if app.fullscreen { screen } else { Rect::from_min_max(screen.min, pos2(screen.right(), screen.bottom() - app.bar_height())) };
     let rect = full.translate(vec2(0.0, full.height() * (1.0 - t)));
+    let look = app.look();
+    let b = &look.background;
     egui::Area::new("now-playing".into())
         .order(egui::Order::Middle)
         .fixed_pos(rect.min)
@@ -26,25 +29,57 @@ pub fn overlay(app: &mut App, ctx: &egui::Context, now: f64) {
             // Swallow input so the page underneath doesn't react.
             ui.allocate_rect(rect, Sense::click_and_drag());
             let painter = ui.painter_at(rect);
-            if let Some(bg) = app.bg.as_ref().filter(|_| !app.default_theme) {
+            let themed = !app.default_theme;
+            let art = matches!(b.mode, BgMode::Kawarp | BgMode::CoverStatic);
+            if themed && b.mode == BgMode::CoverFullbleed {
+                // The cover itself fills the screen behind a scrim. With the lyrics-only
+                // layout on a wide window it fills the height on the left instead and
+                // fades out toward the lyrics (reCover).
+                let solid = look.solid();
+                painter.rect_filled(rect, 0.0, solid);
+                if let Some(track) = app.current() {
+                    let side_by_side = look.cover.layout == crate::preset::Layout::LyricsOnly && rect.width() >= 900.0;
+                    let area = if side_by_side { Rect::from_min_size(rect.min, Vec2::splat(rect.height())) } else { rect };
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
+                    child.set_clip_rect(area);
+                    widgets::paint_cover_fill(&child, area, &track.thumbs, Color32::from_gray((b.np_dim.clamp(0.0, 1.0) * 255.0) as u8));
+                    if side_by_side {
+                        let fade = Rect::from_min_max(pos2(area.center().x - area.width() * 0.1, area.top()), area.max);
+                        hgradient(&painter, fade, Color32::TRANSPARENT, solid);
+                    }
+                }
+            } else if let Some(bg) = app.bg.as_ref().filter(|_| themed && art) {
                 let blend = theme::ease_in_out(((now - app.art_changed) / 1.4) as f32);
-                let level = if app.reactive_bg && app.playing() { app.audio.status.level() } else { 0.0 };
+                let level = if app.reactive_bg && app.playing() { app.audio.status.level() * b.reactive } else { 0.0 };
                 bg.paint(
                     &painter,
                     rect,
-                    Params { time: app.bg_time as f32, blend, intensity: 1.0, saturation: 1.5, dim: 0.85, scale: 1.2 + level.min(0.5) * 0.12 },
+                    Params {
+                        time: app.bg_time as f32,
+                        blend,
+                        intensity: if b.mode == BgMode::CoverStatic { 0.0 } else { b.intensity },
+                        saturation: b.saturation,
+                        dim: b.np_dim,
+                        scale: b.scale + level.min(0.5) * 0.12,
+                    },
                 );
+            } else if themed && b.mode == BgMode::Solid {
+                painter.rect_filled(rect, 0.0, look.solid());
             } else {
                 painter.rect_filled(rect, 0.0, theme::lerp_color(theme::BG, app.accent_color(), 0.25));
             }
-            super::shell::vgradient(ui, rect, theme::shade(0.18), theme::shade(0.42));
+            let k = if themed { b.scrim / 0.3 } else { 1.0 };
+            super::shell::vgradient(ui, rect, theme::shade((0.18 * k).min(0.95)), theme::shade((0.42 * k).min(0.95)));
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(32.0, 20.0))));
             body(app, &mut child, now);
         });
 }
 
 fn body(app: &mut App, ui: &mut Ui, now: f64) {
+    use crate::preset::{Layout, Shape, Side};
     let Some(track) = app.current().cloned() else { return };
+    let look = app.look();
+    let cs = &look.cover;
     let area = ui.max_rect();
     // Header
     let header = Rect::from_min_size(area.min, vec2(area.width(), 44.0));
@@ -75,21 +110,64 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
     });
 
     let content = Rect::from_min_max(pos2(area.left(), header.bottom() + 12.0), area.max);
-    let lyrics_only = content.width() < 860.0;
-    let right = if lyrics_only {
+    let narrow = content.width() < 860.0;
+    let lyrics_only = narrow || cs.layout == Layout::LyricsOnly;
+    // reCover: the backdrop cover sits on the left, so the lyrics take the right side.
+    let beside_cover = !narrow && cs.layout == Layout::LyricsOnly && look.background.mode == crate::preset::BgMode::CoverFullbleed;
+    let centered = lyrics_only && !beside_cover;
+    let right = if beside_cover {
+        Rect::from_min_max(pos2(content.left() + content.width() * 0.46, content.top()), content.max)
+    } else if lyrics_only {
         content
     } else {
-        // Left column: artwork and track info.
-        let col = Rect::from_min_size(content.min, vec2(content.width() * 0.42, content.height()));
-        let side = (col.width() * 0.82).min(col.height() - 130.0).max(160.0);
+        // Cover column: artwork and track info, on the preset's side.
+        let frac = if cs.layout == Layout::CoverHero { 0.5 } else { 0.42 };
+        let col_w = content.width() * frac;
+        let col = if cs.side == Side::Right {
+            Rect::from_min_size(pos2(content.right() - col_w, content.top()), vec2(col_w, content.height()))
+        } else {
+            Rect::from_min_size(content.min, vec2(col_w, content.height()))
+        };
+        let side = (col.width() * 0.82 * cs.size.clamp(0.5, 1.35)).min(col.height() - 110.0).max(160.0);
         let art = Rect::from_center_size(pos2(col.center().x, col.top() + side / 2.0 + (col.height() - side - 110.0).max(0.0) * 0.35), Vec2::splat(side));
-        widgets::soft_shadow(ui, art, 12.0, 60.0, 0.55);
-        paint_cover(ui, art, &track.thumbs, 12.0, 1.0);
+        let round = cs.shape != Shape::Rounded;
+        let radius = if round { side / 2.0 } else { cs.radius.clamp(0.0, side / 2.0) };
+        let cr = egui::CornerRadius::same(radius.min(255.0) as u8);
+        if cs.glow > 0.0 {
+            let s = egui::epaint::Shadow { offset: [0, 16], blur: 90, spread: 6, color: theme::with_alpha(app.accent_color(), cs.glow.min(1.0) * 0.7) };
+            ui.painter().add(s.as_shape(art, cr));
+        }
+        if cs.shadow > 0.0 {
+            widgets::soft_shadow(ui, art, radius.min(255.0), 60.0, cs.shadow.min(1.0));
+        }
+        let tint = Color32::from_gray((cs.brightness.clamp(0.1, 1.0) * 255.0) as u8);
+        if round {
+            if cs.shape == Shape::Record && app.playing() {
+                let dt = ui.input(|i| i.stable_dt).min(0.1) as f64;
+                app.record_angle = (app.record_angle + dt * std::f64::consts::TAU / cs.spin_secs.max(4.0) as f64) % std::f64::consts::TAU;
+            }
+            let angle = if cs.shape == Shape::Record { app.record_angle as f32 } else { 0.0 };
+            widgets::paint_disc(ui, art.center(), side / 2.0, &track.thumbs, angle, tint);
+            if cs.shape == Shape::Record {
+                // Vinyl: faint grooves and a spindle hole.
+                let p = ui.painter();
+                for i in 1..6 {
+                    p.circle_stroke(art.center(), side / 2.0 * (0.42 + i as f32 * 0.1), egui::Stroke::new(1.0, theme::shade(0.18)));
+                }
+                p.circle_filled(art.center(), side * 0.09, theme::shade(0.35));
+                p.circle_filled(art.center(), side * 0.022, Color32::from_rgb(10, 10, 12));
+            }
+        } else {
+            paint_cover(ui, art, &track.thumbs, radius, 1.0);
+            if cs.brightness < 0.99 {
+                ui.painter().rect_filled(art, cr, theme::shade(1.0 - cs.brightness));
+            }
+        }
         let cover = named(ui.interact(art, ui.id().with(("cover-playback", &track.id)), Sense::click()), if app.playing() { "Pause" } else { "Play" })
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         let hover = theme::anim_bool(ui.ctx(), ("cover-playback-hover", &track.id), cover.hovered(), 0.16);
         if hover > 0.0 {
-            ui.painter().rect_filled(art, 12.0, theme::shade(0.28 * hover));
+            ui.painter().rect_filled(art, cr, theme::shade(0.28 * hover));
             ui.painter().circle_filled(art.center(), 38.0, theme::shade(0.58 * hover));
             widgets::icon_at(ui, art.center(), if app.playing() || app.buffering { icon::PAUSE } else { icon::PLAY }, 37.0, theme::with_alpha(Color32::WHITE, hover));
         }
@@ -100,13 +178,29 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
         // Each artist opens their own page (features included).
         let line = track.artist_line();
         widgets::linked_text(ui, pos2(art.left(), title_y + 40.0), &line, &track.artists, theme::regular(17.0), theme::TEXT_DIM, w, &mut app.actions);
-        Rect::from_min_max(pos2(col.right() + 28.0, content.top()), content.max)
+        if cs.side == Side::Right {
+            Rect::from_min_max(content.min, pos2(col.left() - 28.0, content.bottom()))
+        } else {
+            Rect::from_min_max(pos2(col.right() + 28.0, content.top()), content.max)
+        }
     };
     let mut rui = ui.new_child(egui::UiBuilder::new().max_rect(right));
     match app.np_tab {
-        NpTab::Lyrics => lyrics_panel(app, &mut rui, right, now, lyrics_only),
+        NpTab::Lyrics => lyrics_panel(app, &mut rui, right, now, centered),
         NpTab::UpNext => super::shell::queue_list(app, &mut rui, "np"),
     }
+}
+
+/// Horizontal gradient from `left` to `right` across `rect`.
+fn hgradient(painter: &egui::Painter, rect: Rect, left: Color32, right: Color32) {
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.left_top(), left);
+    mesh.colored_vertex(rect.right_top(), right);
+    mesh.colored_vertex(rect.left_bottom(), left);
+    mesh.colored_vertex(rect.right_bottom(), right);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(1, 3, 2);
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 // ------------------------------------------------------------------ lyrics
@@ -148,10 +242,19 @@ fn lyrics_panel(app: &mut App, ui: &mut Ui, rect: Rect, now: f64, centered: bool
     synced(app, ui, rect, &lyrics, now, centered);
 }
 
-fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, centered: bool) {
+fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, narrow: bool) {
+    use crate::preset::{Align, BlurScope, Fill};
+    let style = &app.look().lyrics;
+    let accent = app.accent_color();
+    let centered = narrow || style.align == Align::Center;
     let pos_ms = app.audio.status.position_smooth().as_millis() as u32 + 60;
-    let width = (rect.width() - 40.0).max(200.0);
-    let size = (width / 20.0).clamp(26.0, if centered { 46.0 } else { 36.0 });
+    let max_scale = style.active_scale.clamp(1.0, 1.2);
+    // Leave room for the active line to grow without being clipped.
+    let width = ((rect.width() - 40.0) / max_scale).max(200.0);
+    let size = (width / 20.0).clamp(26.0, if narrow { 46.0 } else { 36.0 }) * style.size.clamp(0.6, 1.6);
+    let font = |sz: f32, bg: bool| {
+        if bg { theme::lyric_font(&style.font, crate::preset::Weight::Semibold, sz * 0.62) } else { theme::lyric_font(&style.font, style.weight, sz) }
+    };
 
     // Items: lines plus breathing gaps for long instrumental breaks.
     let mut items = Vec::new();
@@ -178,7 +281,7 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, cen
     let active = items.iter().rposition(|it| started(it) <= pos_ms && !matches!(it, Item::Line(i) if lyrics.lines[*i].background));
 
     // Layout pass.
-    let gap = size * 0.6;
+    let gap = size * style.line_gap.clamp(0.1, 1.6);
     let mut ys = Vec::with_capacity(items.len());
     let mut galleys = Vec::with_capacity(items.len());
     let mut y = 0.0;
@@ -187,9 +290,7 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, cen
         match it {
             Item::Line(i) => {
                 let l = &lyrics.lines[*i];
-                let font = if l.background { theme::semibold(size * 0.62) } else { theme::bold(size) };
-                let text = display_text(l);
-                let g = ui.fonts_mut(|f| f.layout(text, font, Color32::WHITE, width));
+                let g = ui.fonts_mut(|f| f.layout(display_text(l), font(size, l.background), Color32::WHITE, width));
                 y += g.size().y + if l.background { gap * 0.5 } else { gap };
                 galleys.push(Some(g));
             }
@@ -201,17 +302,20 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, cen
     }
 
     // Smooth follow: spring the scroll toward the active item (unless the user scrolled).
-    let anchor = rect.top() + rect.height() * if centered { 0.42 } else { 0.32 };
+    let default_anchor = (style.anchor - 0.32).abs() < 1e-3;
+    let anchor_frac = if narrow && default_anchor { 0.42 } else { style.anchor.clamp(0.15, 0.6) };
+    let anchor = rect.top() + rect.height() * anchor_frac;
     let target = active.map_or(0.0, |a| ys[a]) + size * 0.5;
     let sid = egui::Id::new("lyrics-scroll");
     let dt = ui.input(|i| i.stable_dt).min(0.1);
     let mut scroll: f32 = ui.data(|d| d.get_temp(sid)).unwrap_or(target);
     let hovered = ui.rect_contains_pointer(rect);
     let wheel = if hovered { ui.input(|i| i.smooth_scroll_delta.y) } else { 0.0 };
+    let user_scrolling = now - app.lyrics_user_scroll <= 3.0;
     if wheel != 0.0 {
         scroll -= wheel;
         app.lyrics_user_scroll = now;
-    } else if now - app.lyrics_user_scroll > 3.0 {
+    } else if !user_scrolling {
         scroll += (target - scroll) * (1.0 - (-dt * 7.0).exp());
     }
     ui.data_mut(|d| d.insert_temp(sid, scroll));
@@ -223,6 +327,8 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, cen
         let t = ((yy - rect.top()) / 90.0).min((rect.bottom() - yy) / 120.0);
         t.clamp(0.0, 1.0)
     };
+    let sung_color = crate::preset::paint(&style.sung_color, accent);
+    let glow_color = crate::preset::paint(&style.glow_color, accent);
     for (k, it) in items.iter().enumerate() {
         let top = origin_y + ys[k];
         let is_active = Some(k) == active;
@@ -243,7 +349,24 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, cen
             }
             Item::Line(i) => {
                 let l = &lyrics.lines[*i];
-                let Some(g) = galleys[k].clone() else { continue };
+                let Some(base_g) = galleys[k].clone() else { continue };
+                if top > rect.bottom() + size || top + base_g.size().y < rect.top() - size {
+                    continue;
+                }
+                let sung = pos_ms >= l.start && pos_ms < l.end + 200;
+                let lit = is_active || (l.background && sung);
+                // A line that just finished stays fully lit while it fades, so its last
+                // characters are seen highlighted even when the next line follows at once.
+                let lit_amt = theme::anim_bool(ui.ctx(), ("lyr-lit", k), lit, 0.35);
+                // The active line grows a little (laid out at the bigger size, with the
+                // wrap width scaled to match so it breaks at the same words).
+                let g = if max_scale > 1.001 && lit_amt > 0.0 {
+                    let s = 1.0 + (max_scale - 1.0) * lit_amt;
+                    let s = (s * 200.0).round() / 200.0;
+                    ui.fonts_mut(|f| f.layout(display_text(l), font(size * s, l.background), Color32::WHITE, width * s))
+                } else {
+                    base_g.clone()
+                };
                 let x = if centered {
                     rect.center().x - g.size().x / 2.0
                 } else if l.alt_singer {
@@ -251,32 +374,90 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, cen
                 } else {
                     rect.left() + 20.0
                 };
-                let pos = Pos2::new(x, top);
+                // Grow from the line's anchor edge rather than its top-left.
+                let pos = Pos2::new(x, top - (g.size().y - base_g.size().y) * 0.5);
                 let line_rect = Rect::from_min_size(pos, g.size());
                 // Where the glyphs actually are: CJK fallback glyphs sit higher and taller
                 // than the Latin row box, so hover/click use the inked bounds.
                 let ink = g.mesh_bounds.translate(pos.to_vec2()).union(Rect::from_x_y_ranges(line_rect.x_range(), line_rect.center().y..=line_rect.center().y));
-                if !rect.intersects(line_rect) {
-                    continue;
-                }
-                let sung = pos_ms >= l.start && pos_ms < l.end + 200;
-                let lit = is_active || (l.background && sung);
-                let dist = active.map_or(3, |a| (k as isize - a as isize).unsigned_abs()) as f32;
-                let base_alpha = if lit { 0.38 } else { (0.36 - dist.min(6.0) * 0.035).max(0.14) };
-                let a = theme::anim(ui.ctx(), ("lyr-a", k), base_alpha, 0.3) * fade(line_rect.center().y);
-                painter.galley_with_override_text_color(pos, g.clone(), theme::with_alpha(Color32::WHITE, a));
-                // A line that just finished stays fully lit while it fades, so its last
-                // characters are seen highlighted even when the next line follows at once.
-                let lit_amt = theme::anim_bool(ui.ctx(), ("lyr-lit", k), lit, 0.35);
-                if lit_amt > 0.0 {
-                    let progress = if lit {
+                let edge_fade = fade(line_rect.center().y);
+
+                let rel = active.map_or(1, |a| k as isize - a as isize);
+                let dist = rel.unsigned_abs() as f32;
+                let past = rel < 0;
+                let upcoming_alpha = (style.inactive_alpha - dist.min(6.0) * style.falloff).max(style.min_alpha.min(style.inactive_alpha));
+                let base_alpha = if lit {
+                    style.active_alpha
+                } else if past {
+                    style.past_alpha.unwrap_or(upcoming_alpha)
+                } else {
+                    upcoming_alpha
+                };
+                let a = theme::anim(ui.ctx(), ("lyr-a", k), base_alpha.clamp(0.0, 1.0), 0.3) * edge_fade;
+                let blur_on = match style.blur_scope {
+                    BlurScope::All => true,
+                    BlurScope::Past => past,
+                    BlurScope::Upcoming => !past,
+                };
+                let target_blur = if style.blur > 0.0 && blur_on && !lit { style.blur * (1.0 + 0.35 * (dist - 1.0).clamp(0.0, 3.0)) } else { 0.0 };
+                let blur = theme::anim(ui.ctx(), ("lyr-b", k), target_blur.min(9.0).min(size * 0.22), 0.35);
+
+                let progress = if lit_amt > 0.0 {
+                    if lit {
                         // Finish the fill before the next line takes over.
                         let next = lyrics.lines[*i + 1..].iter().find(|x| !x.background).map_or(u32::MAX, |x| x.start);
-                        char_progress(l, pos_ms, next.saturating_sub(120))
+                        let done_by = next.saturating_sub(120);
+                        match style.fill {
+                            Fill::Sweep => char_progress(l, pos_ms, done_by),
+                            Fill::Word => word_progress(l, pos_ms, done_by),
+                            Fill::Line => f32::INFINITY,
+                        }
                     } else {
                         f32::INFINITY
-                    };
-                    sweep(&painter, &g, pos, progress, theme::with_alpha(Color32::WHITE, lit_amt * fade(line_rect.center().y)));
+                    }
+                } else {
+                    0.0
+                };
+                let rows = split_rows(&g, pos, progress);
+                let soft = style.fill == Fill::Sweep;
+                // Unsung text: only the part the fill hasn't reached while the line is lit.
+                if a > 0.003 {
+                    if lit {
+                        for r in &rows {
+                            let from = if soft { r.edge - 6.0 } else { r.edge };
+                            if from < r.right {
+                                let clip = Rect::from_min_max(pos2(from.max(r.left), r.top), pos2(r.right, r.bottom));
+                                draw_blurred(&painter, &g, pos, clip, theme::with_alpha(Color32::WHITE, a), blur);
+                            }
+                        }
+                    } else {
+                        draw_blurred(&painter, &g, pos, line_rect.expand(size), theme::with_alpha(Color32::WHITE, a), blur);
+                    }
+                }
+                if lit_amt > 0.0 {
+                    let color = theme::with_alpha(sung_color, lit_amt * edge_fade);
+                    let lift = vec2(0.0, -style.lift.clamp(0.0, 6.0) * lit_amt);
+                    for r in &rows {
+                        let solid_end = if soft { r.edge - 6.0 } else { r.edge };
+                        if solid_end > r.left {
+                            let clip = Rect::from_min_max(pos2(r.left, r.top), pos2(solid_end, r.bottom));
+                            if style.glow > 0.0 {
+                                glow(&painter, &g, pos + lift, clip, theme::with_alpha(glow_color, lit_amt * edge_fade), style.glow, size);
+                            }
+                            painter.with_clip_rect(clip.intersect(painter.clip_rect())).galley_with_override_text_color(pos + lift, g.clone(), color);
+                        }
+                        // Feather: a few thin bands with decreasing alpha (and lift) at the edge.
+                        if soft && r.edge > r.left && r.edge < r.right {
+                            for b in 0..4 {
+                                let x0 = r.edge - 6.0 + b as f32 * 3.0;
+                                let band = Rect::from_min_max(pos2(x0, r.top), pos2(x0 + 3.0, r.bottom));
+                                let t = 1.0 - (b as f32 + 0.5) / 4.0;
+                                painter
+                                    .with_clip_rect(band.intersect(painter.clip_rect()))
+                                    .galley_with_override_text_color(pos + lift * t, g.clone(), theme::with_alpha(color, t * color.a() as f32 / 255.0));
+                            }
+                        }
+                    }
                 }
                 // Click a line to jump there.
                 let resp = ui.interact(ink, ui.id().with(("lyr", k)), Sense::click());
@@ -331,15 +512,42 @@ fn char_progress(l: &Line, pos: u32, done_by: u32) -> f32 {
     chars
 }
 
-/// Paint the sung part of a line in full colour, clipped per row with a soft edge.
-fn sweep(painter: &egui::Painter, g: &std::sync::Arc<egui::Galley>, pos: Pos2, progress: f32, color: Color32) {
+/// Like `char_progress`, but whole words at a time: a word counts as sung the
+/// moment it starts (opacity-based karaoke).
+fn word_progress(l: &Line, pos: u32, done_by: u32) -> f32 {
+    if l.words.is_empty() {
+        // Line-synced: snap the even spread up to the end of the current word.
+        let p = char_progress(l, pos, done_by);
+        if p <= 0.0 {
+            return 0.0;
+        }
+        let chars: Vec<char> = l.text.chars().collect();
+        let mut i = (p.floor() as usize).min(chars.len());
+        while i < chars.len() && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        return i as f32;
+    }
+    l.words.iter().take_while(|w| w.start.min(done_by) <= pos).map(|w| w.text.trim_end().chars().count() as f32 + (w.text.len() - w.text.trim_end().len()) as f32).sum()
+}
+
+/// One wrapped row of a lyric line and how far along it the fill has reached.
+struct RowSplit {
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+    /// x where the sung part ends (`left` = nothing sung, `right` = all of it).
+    edge: f32,
+}
+
+/// Split a line's rows at the fill position (`progress` characters).
+fn split_rows(g: &std::sync::Arc<egui::Galley>, pos: Pos2, progress: f32) -> Vec<RowSplit> {
+    let mut out = Vec::with_capacity(g.rows.len());
     let mut remaining = progress;
     let last = g.rows.len().saturating_sub(1);
     for (r, row) in g.rows.iter().enumerate() {
         let n = row.row.glyphs.len() as f32;
-        if n == 0.0 {
-            continue;
-        }
         // Row size comes from the Latin font; CJK fallback glyphs stand taller and would
         // poke out of a tight clip, leaving their tops unlit. Leave the outer edges open
         // and give inner rows a quarter-row margin.
@@ -347,29 +555,55 @@ fn sweep(painter: &egui::Painter, g: &std::sync::Arc<egui::Galley>, pos: Pos2, p
         let row_rect = Rect::from_min_size(pos + row.pos.to_vec2(), row.row.size);
         let top = if r == 0 { row_rect.top() - row.row.size.y } else { row_rect.top() - pad };
         let bottom = if r == last { row_rect.bottom() + row.row.size.y } else { row_rect.bottom() + pad };
-        if remaining >= n {
-            let clip = Rect::from_min_max(pos2(row_rect.left() - 4.0, top), pos2(row_rect.right() + 4.0, bottom));
-            painter.with_clip_rect(clip).galley_with_override_text_color(pos, g.clone(), color);
-            // Row breaks consume the implicit newline/space between rows.
-            remaining -= n;
-            continue;
+        let (left, right) = (row_rect.left() - 4.0, row_rect.right() + 4.0);
+        let edge = if n == 0.0 || remaining <= 0.0 {
+            left
+        } else if remaining >= n {
+            right
+        } else {
+            let idx = remaining.floor() as usize;
+            let frac = remaining - idx as f32;
+            row_rect.left() + row.row.glyphs.get(idx).map_or(row.row.size.x, |gl| gl.pos.x + gl.advance_width * frac)
+        };
+        // Row breaks consume the implicit newline/space between rows.
+        remaining -= n;
+        out.push(RowSplit { left, right, top, bottom, edge });
+    }
+    out
+}
+
+/// Draw a galley clipped to `clip`, softened by `blur` px: a centre copy plus two
+/// rings of offset copies sharing the alpha (a cheap stand-in for a Gaussian).
+fn draw_blurred(painter: &egui::Painter, g: &std::sync::Arc<egui::Galley>, pos: Pos2, clip: Rect, color: Color32, blur: f32) {
+    let p = painter.with_clip_rect(clip.expand(blur).intersect(painter.clip_rect()));
+    if blur < 0.3 {
+        p.galley_with_override_text_color(pos, g.clone(), color);
+        return;
+    }
+    let taps: &[(f32, usize)] = &[(0.0, 1), (0.35, 6), (0.7, 10), (1.0, 14)];
+    let total: usize = taps.iter().map(|t| t.1).sum();
+    // Overlapping copies add up; like a real blur, spreading the ink over the radius
+    // lowers its peak, so the copies share a little less than the full opacity.
+    let each = theme::with_alpha(color, (1.6 / total as f32).min(1.0));
+    for &(f, n) in taps {
+        for i in 0..n {
+            let a = i as f32 / n as f32 * std::f32::consts::TAU + f * 2.3;
+            let off = vec2(a.cos(), a.sin()) * blur * f;
+            p.galley_with_override_text_color(pos + off, g.clone(), each);
         }
-        if remaining <= 0.0 {
-            break;
+    }
+}
+
+/// Soft glow behind sung text: many faint copies spread over a few rings.
+fn glow(painter: &egui::Painter, g: &std::sync::Arc<egui::Galley>, pos: Pos2, clip: Rect, color: Color32, amount: f32, size: f32) {
+    let amount = amount.clamp(0.0, 1.0);
+    let r = size * 0.18 * amount + 3.0;
+    let p = painter.with_clip_rect(clip.expand2(vec2(0.0, r)).intersect(painter.clip_rect()));
+    let each = theme::with_alpha(color, 0.055 + 0.05 * amount);
+    for (f, n) in [(0.3, 8), (0.6, 12), (1.0, 16)] {
+        for i in 0..n {
+            let a = i as f32 / n as f32 * std::f32::consts::TAU + f * 1.7;
+            p.galley_with_override_text_color(pos + vec2(a.cos(), a.sin()) * r * f, g.clone(), each);
         }
-        let idx = remaining.floor() as usize;
-        let frac = remaining - idx as f32;
-        let x = row.row.glyphs.get(idx).map_or(row.row.size.x, |gl| gl.pos.x + gl.advance_width * frac);
-        let edge = row_rect.left() + x;
-        let solid = Rect::from_min_max(pos2(row_rect.left() - 4.0, top), pos2(edge - 6.0, bottom));
-        painter.with_clip_rect(solid).galley_with_override_text_color(pos, g.clone(), color);
-        // Feather: a few thin bands with decreasing alpha.
-        for b in 0..4 {
-            let x0 = edge - 6.0 + b as f32 * 3.0;
-            let band = Rect::from_min_max(pos2(x0, top), pos2(x0 + 3.0, bottom));
-            let a = 1.0 - (b as f32 + 0.5) / 4.0;
-            painter.with_clip_rect(band).galley_with_override_text_color(pos, g.clone(), theme::with_alpha(color, a * color.a() as f32 / 255.0));
-        }
-        break;
     }
 }

@@ -204,6 +204,49 @@ pub fn paint_cover(ui: &Ui, rect: Rect, thumbs: &[Thumb], radius: f32, zoom: f32
     egui::Image::new(url).uv(uv).corner_radius(CornerRadius::same(radius as u8)).paint_at(ui, rect);
 }
 
+/// Paint the cover cropped to fill `rect` (any aspect), tinted, for full-bleed backdrops.
+pub fn paint_cover_fill(ui: &Ui, rect: Rect, thumbs: &[Thumb], tint: Color32) {
+    let ppp = ui.ctx().pixels_per_point();
+    let px = (rect.width().max(rect.height()) * ppp) as u32;
+    let Some(t) = pick_thumb(thumbs, px.min(1200)) else { return };
+    let uv = t.square_uv();
+    // Crop the square to the rect's aspect ratio, keeping the centre.
+    let aspect = rect.width() / rect.height().max(1.0);
+    let size = if aspect >= 1.0 { vec2(uv.width(), uv.height() / aspect) } else { vec2(uv.width() * aspect, uv.height()) };
+    let url = sized(&t.url, px.clamp(200, 1200));
+    egui::Image::new(url).uv(Rect::from_center_size(uv.center(), size)).tint(tint).paint_at(ui, rect);
+}
+
+/// Paint the cover as a disc rotated by `angle` (radians): a textured triangle fan,
+/// since egui's image rotation doesn't round corners.
+pub fn paint_disc(ui: &Ui, center: Pos2, r: f32, thumbs: &[Thumb], angle: f32, tint: Color32) {
+    ui.painter().circle_filled(center, r, theme::glass(0.07));
+    let ppp = ui.ctx().pixels_per_point();
+    let px = (r * 2.0 * ppp) as u32;
+    let Some(t) = pick_thumb(thumbs, px.min(544)) else { return };
+    let url = sized(&t.url, px.max(60));
+    let Ok(egui::load::TexturePoll::Ready { texture }) = egui::Image::new(url).load_for_size(ui.ctx(), Vec2::splat(r * 2.0)) else {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        return;
+    };
+    let uv = t.square_uv();
+    let (uc, uh) = (uv.center(), uv.width() / 2.0);
+    let mut mesh = egui::Mesh::with_texture(texture.id);
+    mesh.colored_vertex(center, tint);
+    mesh.vertices[0].uv = uc;
+    let n = 96;
+    for i in 0..=n {
+        let a = i as f32 / n as f32 * std::f32::consts::TAU;
+        let (s, c) = a.sin_cos();
+        let (sr, cr) = (a - angle).sin_cos();
+        mesh.vertices.push(egui::epaint::Vertex { pos: center + vec2(c, s) * r, uv: uc + vec2(cr * uh, sr * uv.height() / 2.0), color: tint });
+        if i > 0 {
+            mesh.add_triangle(0, i, i + 1);
+        }
+    }
+    ui.painter().add(egui::Shape::mesh(mesh));
+}
+
 /// Album/playlist/artist/song card with hover zoom, scrim and a play button.
 pub fn card(ui: &mut Ui, c: &Card, width: f32, liked: bool, acts: &mut Vec<Action>) {
     let height = width + 58.0;
