@@ -30,7 +30,7 @@ use crate::theme;
 /// File types YouTube Music accepts for upload.
 const UPLOAD_EXTS: &[&str] = &["mp3", "m4a", "flac", "ogg", "wma"];
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Hash, Debug)]
 pub enum Page {
     Home,
     Explore,
@@ -42,7 +42,7 @@ pub enum Page {
     Settings,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Hash, Debug)]
 pub enum LibTab {
     Playlists,
     Songs,
@@ -104,7 +104,8 @@ pub struct HomeState {
     pub chips: Vec<Chip>,
     pub shelves: Vec<Shelf>,
     pub continuation: Option<String>,
-    pub loading_more: bool,
+    /// When the next shelves were requested (app time, s), while they load.
+    pub loading_more: Option<f64>,
     pub picks_loading: bool,
     pub picks_expanded: bool,
 }
@@ -138,6 +139,8 @@ pub struct App {
     forward: Vec<Page>,
     page_changed: f64,
     loading: bool,
+    /// The current page's request failed with nothing cached: show a retry, not a skeleton.
+    load_failed: bool,
     search_text: String,
     suggestions: (String, Vec<String>),
     suggest_due: Option<f64>,
@@ -150,6 +153,8 @@ pub struct App {
     collection: Option<Collection>,
     artist: Option<ArtistPage>,
     library: Option<Library>,
+    /// When the library was last requested; the sidebar spinner gives up after a while.
+    library_requested: std::time::Instant,
     history: Option<Vec<Track>>,
     uploads: Option<Vec<Track>>,
     /// Files chosen in the upload dialog, handed over from its thread.
@@ -266,6 +271,7 @@ impl App {
             forward: Vec::new(),
             page_changed: 0.0,
             loading: false,
+            load_failed: false,
             search_text: String::new(),
             suggestions: Default::default(),
             suggest_due: None,
@@ -276,6 +282,7 @@ impl App {
             collection: None,
             artist: None,
             library: None,
+            library_requested: std::time::Instant::now(),
             history: None,
             uploads: None,
             picked_uploads: Default::default(),
@@ -460,9 +467,17 @@ impl App {
             _ => false,
         };
         self.loading = req.is_some() && !cached;
-        if let Some(r) = req {
-            self.backend.request(r);
+        self.load_failed = false;
+        match req {
+            Some(Req::Library) => self.request_library(),
+            Some(r) => self.backend.request(r),
+            None => {}
         }
+    }
+
+    fn request_library(&mut self) {
+        self.library_requested = std::time::Instant::now();
+        self.backend.request(Req::Library);
     }
 
     fn preferred_artist_ids(&self) -> Vec<String> {
@@ -525,8 +540,16 @@ impl App {
     }
 
     /// The active theme preset; the classic red theme uses the built-in look's layout.
+    /// Synced once per frame (`sync_look`), so this is a plain index, not a search.
     fn look(&self) -> &'static crate::preset::Preset {
-        crate::preset::get(if self.default_theme { crate::preset::DEFAULT_ID } else { &self.theme_id })
+        crate::preset::active()
+    }
+
+    fn sync_look(&self) {
+        let id = if self.default_theme { crate::preset::DEFAULT_ID } else { &self.theme_id };
+        if crate::preset::active().id != id {
+            crate::preset::set_active(id);
+        }
     }
 
     /// Height of the bottom player area (a floating bar leaves a margin around it).
@@ -552,34 +575,30 @@ impl App {
     /// new song, play/pause, a seek, or a newly learned duration.
     fn sync_discord(&mut self) {
         let Some(d) = &self.discord else { return };
-        let want = self.current().filter(|_| self.playing() && !self.buffering).map(|t| {
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-            let start_ms = now - self.audio.status.position().as_millis() as i64;
-            let dur = self.audio.status.duration_ms.load(Ordering::Relaxed) as i64;
-            crate::discord::Presence {
-                video_id: t.id.clone(),
-                title: t.title.clone(),
-                artist: t.artist_line(),
-                album: t.album.as_ref().map(|a| a.name.clone()),
-                art: backend::art_url(t),
-                start_ms,
-                end_ms: (dur > 0).then_some(start_ms + dur),
-            }
-        });
+        let track = self.current().filter(|_| self.playing() && !self.buffering);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+        let start_ms = now - self.audio.status.position().as_millis() as i64;
+        let dur = self.audio.status.duration_ms.load(Ordering::Relaxed) as i64;
         // Position ticks every 100 ms; only a jump of 2 s or more is a real seek.
-        let same = match (&want, &self.discord_sent) {
-            (Some(a), Some(b)) => {
-                (a.start_ms - b.start_ms).abs() < 2000
-                    && a.end_ms.is_some() == b.end_ms.is_some()
-                    && crate::discord::Presence { start_ms: b.start_ms, end_ms: b.end_ms, ..a.clone() } == *b
-            }
+        let same = match (track, &self.discord_sent) {
+            (Some(t), Some(b)) => b.video_id == t.id && (start_ms - b.start_ms).abs() < 2000 && b.end_ms.is_some() == (dur > 0),
             (None, None) => true,
             _ => false,
         };
-        if !same {
-            d.set(want.clone());
-            self.discord_sent = want;
+        if same {
+            return;
         }
+        let want = track.map(|t| crate::discord::Presence {
+            video_id: t.id.clone(),
+            title: t.title.clone(),
+            artist: t.artist_line(),
+            album: t.album.as_ref().map(|a| a.name.clone()),
+            art: backend::art_url(t),
+            start_ms,
+            end_ms: (dur > 0).then_some(start_ms + dur),
+        });
+        d.set(want.clone());
+        self.discord_sent = want;
     }
 
     fn play_list(&mut self, tracks: Vec<Track>, start: usize) {
@@ -718,7 +737,7 @@ impl App {
 
     /// Automatic update checks: shortly after launch, then every six hours.
     fn tick_updates(&mut self, ctx: &egui::Context, now: f64) {
-        use crate::update::{State, Updater, installed};
+        use crate::update::{State, Updater};
         if self.updater.is_none() {
             let c = ctx.clone();
             self.updater = Some(Updater::new(self.backend.data_dir(), move || c.request_repaint()));
@@ -728,7 +747,7 @@ impl App {
             None => now > 8.0,
             Some(t) => now - t > 6.0 * 3600.0 && !matches!(u.state(), State::Ready { .. }),
         };
-        let enabled = self.auto_update && installed() && std::env::var_os("YTM_BACKGROUND").is_none_or(|_| std::env::var_os("YTM_UPDATE_FORCE").is_some());
+        let enabled = self.auto_update && installed() && dev_var("YTM_BACKGROUND").is_none_or(|_| dev_var("YTM_UPDATE_FORCE").is_some());
         if enabled && due {
             self.update_checked = Some(now);
             u.check();
@@ -972,7 +991,7 @@ impl App {
                     chips,
                     shelves: page.shelves,
                     continuation: page.continuation,
-                    loading_more: false,
+                    loading_more: None,
                     picks_loading: false,
                     picks_expanded: false,
                 });
@@ -985,7 +1004,7 @@ impl App {
                 if let Some(h) = &mut self.home {
                     h.shelves.extend(page.shelves);
                     h.continuation = page.continuation;
-                    h.loading_more = false;
+                    h.loading_more = None;
                 }
             }
             Resp::Explore(e) => {
@@ -1095,12 +1114,12 @@ impl App {
                 }
             }
             Resp::PlaylistCreated { id, had_song } => {
-                self.backend.request(Req::Library);
+                self.request_library();
                 self.toast(if had_song { "Song added to new playlist" } else { "Playlist created" });
                 self.go(Page::Playlist(id));
             }
             Resp::PlaylistChanged { id, message } => {
-                self.backend.request(Req::Library);
+                self.request_library();
                 if let Some(id) = id {
                     if self.page == Page::Playlist(id.clone()) { self.backend.request(Req::Playlist(id)); }
                 } else if matches!(self.page, Page::Playlist(_)) {
@@ -1138,18 +1157,20 @@ impl App {
                 self.home_loading = true;
                 self.backend.request(Req::Home(None));
                 if v {
-                    self.backend.request(Req::Library);
+                    self.request_library();
                 } else {
                     self.liked.clear();
                 }
                 self.toast(if v { "Signed in" } else { "Signed out" });
             }
             Resp::Error(e) => {
+                // A page still waiting for its first data shows a retry instead of loading forever.
+                self.load_failed |= self.loading || (self.page == Page::Home && self.home_loading);
                 self.loading = false;
                 self.home_loading = false;
                 self.radio_pending = false;
                 if let Some(h) = &mut self.home {
-                    h.loading_more = false;
+                    h.loading_more = None;
                     h.picks_loading = false;
                 }
                 self.toast(e);
@@ -1348,6 +1369,7 @@ impl App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let now = ctx.input(|i| i.time);
+        self.sync_look();
         self.pump(now);
         // Upload: files from the picker, or dropped onto the window.
         let mut files = self.picked_uploads.lock().unwrap().take().unwrap_or_default();
@@ -1362,7 +1384,7 @@ impl eframe::App for App {
             self.page_changed = now;
         }
         // Dev hook: YTM_NP_TOGGLE_AT=<secs>[,<secs>…] clicks the Lyrics chip at those times.
-        if let Ok(v) = std::env::var("YTM_NP_TOGGLE_AT") {
+        if let Some(v) = dev_var("YTM_NP_TOGGLE_AT") {
             let times: Vec<f64> = v.split(',').filter_map(|t| t.parse().ok()).collect();
             let id = egui::Id::new("dev-np-toggles");
             let done: usize = ctx.data(|d| d.get_temp(id)).unwrap_or(0);
@@ -1397,7 +1419,7 @@ impl eframe::App for App {
         let playing = self.playing();
         if self.np_open && playing {
             ctx.request_repaint_after(Duration::from_millis(33));
-        } else if playing && self.anim_bg && !self.default_theme {
+        } else if playing && self.anim_bg && !self.default_theme && shell::pages_bg_moves(self.look()) {
             ctx.request_repaint_after(Duration::from_millis(66));
         } else if playing || self.buffering {
             ctx.request_repaint_after(Duration::from_millis(250));
@@ -1410,16 +1432,23 @@ impl eframe::App for App {
         let now = ctx.input(|i| i.time);
         let screen = ctx.content_rect();
 
+        self.sync_look();
         let look = self.look();
-        crate::preset::set_active(&look.id);
         let accent = self.accent_color();
         ctx.data_mut(|d| d.insert_temp(egui::Id::new("accent"), accent));
         if self.chrome_applied.as_deref() != Some(look.id.as_str()) {
+            if self.chrome_applied.is_none() {
+                ctx.add_texture_loader(Arc::new(crate::images::Textures::default()));
+            }
             theme::apply_chrome(&ctx, look);
             self.chrome_applied = Some(look.id.clone());
         }
         let app_style = &look.app;
-        shell::background(self, ui, screen, now);
+        // Once now playing has slid all the way up it hides everything but the player
+        // bar, so the pages and the full-screen background under it aren't drawn.
+        let covered = !self.fullscreen && theme::anim_bool(&ctx, "np-open", self.np_open && self.current().is_some(), 0.42) >= 1.0;
+        let bar_strip = egui::Rect::from_min_max(egui::pos2(screen.left(), screen.bottom() - self.bar_height()), screen.max);
+        shell::background(self, ui, screen, now, covered.then_some(bar_strip));
         if !self.fullscreen {
             let floating = look.chrome.player_bar == crate::preset::PlayerBar::Floating;
             let bar_alpha = app_style.bar_alpha.clamp(0.0, 1.0);
@@ -1448,6 +1477,8 @@ impl eframe::App for App {
                     }
                     shell::player_bar(self, ui, now)
                 });
+        }
+        if !self.fullscreen && !covered {
             use crate::preset::SidebarStyle;
             let side_alpha = app_style.sidebar_alpha.clamp(0.0, 1.0);
             let side_frame = match app_style.sidebar {
@@ -1490,16 +1521,10 @@ impl eframe::App for App {
         shell::suggestions(self, &ctx);
         shell::toast(self, &ctx, now);
 
-        if std::env::var_os("YTM_THEME_TOUR").is_some() {
+        if dev_var("YTM_THEME_TOUR").is_some() {
             self.theme_tour(&ctx, now);
         } else {
             dev_screenshot(&ctx, now);
-        }
-
-        // Thumbnails are cheap to refetch; cap the decoded cache instead of growing forever.
-        let bytes: usize = ctx.loaders().bytes.lock().iter().map(|l| l.byte_size()).sum();
-        if bytes > 64 * 1024 * 1024 {
-            ctx.forget_all_images();
         }
     }
 
@@ -1507,7 +1532,7 @@ impl eframe::App for App {
     /// hover behaviour without touching the real mouse.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         // Dev hook: YTM_FAKE_WHEEL="secs,notches" injects one wheel event, for testing.
-        if let Some((at, n)) = std::env::var("YTM_FAKE_WHEEL").ok().and_then(|v| {
+        if let Some((at, n)) = dev_var("YTM_FAKE_WHEEL").and_then(|v| {
             let (a, n) = v.split_once(',')?;
             Some((a.parse::<f64>().ok()?, n.parse::<f32>().ok()?))
         }) {
@@ -1526,7 +1551,7 @@ impl eframe::App for App {
             }
         }
         smooth_wheel(self, ctx, raw);
-        if let Some((x, y)) = std::env::var("YTM_FAKE_POINTER").ok().and_then(|v| {
+        if let Some((x, y)) = dev_var("YTM_FAKE_POINTER").and_then(|v| {
             let (x, y) = v.split_once(',')?;
             Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
         }) {
@@ -1602,9 +1627,9 @@ struct Session {
 /// (in memory, so saving doesn't slow them) and then writes `<stem>_<i>_<ms>.png`,
 /// `ms` being each frame's time: a filmstrip of an animation and its frame pacing.
 fn dev_screenshot(ctx: &egui::Context, now: f64) {
-    let Some(path) = std::env::var_os("YTM_SCREENSHOT") else { return };
-    let at: f64 = std::env::var("YTM_SCREENSHOT_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(8.0);
-    if let Some(n) = std::env::var("YTM_SCREENSHOT_BURST").ok().and_then(|v| v.parse::<usize>().ok()) {
+    let Some(path) = dev_var("YTM_SCREENSHOT") else { return };
+    let at: f64 = dev_var("YTM_SCREENSHOT_AT").and_then(|v| v.parse().ok()).unwrap_or(8.0);
+    if let Some(n) = dev_var("YTM_SCREENSHOT_BURST").and_then(|v| v.parse::<usize>().ok()) {
         static FRAMES: std::sync::Mutex<Vec<(f64, Arc<egui::ColorImage>)>> = std::sync::Mutex::new(Vec::new());
         static DONE: AtomicBool = AtomicBool::new(false);
         if DONE.load(Ordering::Relaxed) {
@@ -1668,11 +1693,11 @@ impl App {
     /// Dev hook: `YTM_THEME_TOUR=<secs>` steps through every theme preset from
     /// `YTM_SCREENSHOT_AT`, saving `<YTM_SCREENSHOT stem>_<id>.png` for each, then exits.
     fn theme_tour(&mut self, ctx: &egui::Context, now: f64) {
-        let Some(path) = std::env::var_os("YTM_SCREENSHOT").map(std::path::PathBuf::from) else { return };
-        let at: f64 = std::env::var("YTM_SCREENSHOT_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(8.0);
-        let step: f64 = std::env::var("YTM_THEME_TOUR").ok().and_then(|v| v.parse().ok()).unwrap_or(3.0);
+        let Some(path) = dev_var("YTM_SCREENSHOT").map(std::path::PathBuf::from) else { return };
+        let at: f64 = dev_var("YTM_SCREENSHOT_AT").and_then(|v| v.parse().ok()).unwrap_or(8.0);
+        let step: f64 = dev_var("YTM_THEME_TOUR").and_then(|v| v.parse().ok()).unwrap_or(3.0);
         // YTM_TOUR_ONLY=id,id limits the tour to those presets.
-        let only = std::env::var("YTM_TOUR_ONLY").unwrap_or_default();
+        let only = dev_var("YTM_TOUR_ONLY").unwrap_or_default();
         let all: Vec<&crate::preset::Preset> = crate::preset::all().iter().filter(|p| only.is_empty() || only.split(',').any(|o| o == p.id)).collect();
         ctx.request_repaint_after(Duration::from_millis(100));
         if now < at {
@@ -1799,6 +1824,23 @@ pub fn shuffle<T>(v: &mut [T]) {
         x ^= x << 17;
         v.swap(i, (x % (i as u64 + 1)) as usize);
     }
+}
+
+/// Whether this is the installed app (updates only apply there). It can't change while
+/// running, and the check touches the disk, so it runs once.
+fn installed() -> bool {
+    static INSTALLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *INSTALLED.get_or_init(crate::update::installed)
+}
+
+/// A `YTM_*` dev hook, read once: several are checked every frame.
+fn dev_var(name: &str) -> Option<&'static str> {
+    static VARS: std::sync::OnceLock<std::collections::HashMap<String, String>> = std::sync::OnceLock::new();
+    VARS.get_or_init(|| {
+        std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).filter(|(k, _)| k.starts_with("YTM_")).collect()
+    })
+    .get(name)
+    .map(String::as_str)
 }
 
 pub fn fmt_time(secs: u32) -> String {

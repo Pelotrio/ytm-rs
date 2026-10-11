@@ -114,7 +114,12 @@ struct Gl {
     tex: [glow::Texture; 2],
     /// Index of the texture holding the current art.
     cur: usize,
+    /// Uniform locations, looked up once: u_a, u_b, u_blend, u_time, u_intensity,
+    /// u_scale, u_saturation, u_dim, u_resolution.
+    loc: [Option<glow::UniformLocation>; 9],
 }
+
+const UNIFORMS: [&str; 9] = ["u_a", "u_b", "u_blend", "u_time", "u_intensity", "u_scale", "u_saturation", "u_dim", "u_resolution"];
 
 #[derive(Clone)]
 pub struct Background {
@@ -167,8 +172,9 @@ impl Background {
                 Ok(t)
             };
             let tex = [mk()?, mk()?];
+            let loc = UNIFORMS.map(|n| gl.get_uniform_location(program, n));
             let this = Self {
-                gl: Arc::new(Mutex::new(Some(Gl { program, vao, tex, cur: 0 }))),
+                gl: Arc::new(Mutex::new(Some(Gl { program, vao, tex, cur: 0, loc }))),
                 pending: Default::default(),
             };
             // Both slots start with the idle backdrop.
@@ -199,22 +205,22 @@ impl Background {
                 }
                 gl.use_program(Some(s.program));
                 gl.bind_vertex_array(Some(s.vao));
-                let loc = |n: &str| gl.get_uniform_location(s.program, n);
+                let [a, b, blend, time, intensity, scale, saturation, dim, resolution] = s.loc.each_ref();
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(s.tex[s.cur]));
-                gl.uniform_1_i32(loc("u_a").as_ref(), 0);
+                gl.uniform_1_i32(a.as_ref(), 0);
                 gl.active_texture(glow::TEXTURE1);
                 gl.bind_texture(glow::TEXTURE_2D, Some(s.tex[s.cur ^ 1]));
-                gl.uniform_1_i32(loc("u_b").as_ref(), 1);
+                gl.uniform_1_i32(b.as_ref(), 1);
                 gl.active_texture(glow::TEXTURE0);
-                gl.uniform_1_f32(loc("u_blend").as_ref(), p.blend);
-                gl.uniform_1_f32(loc("u_time").as_ref(), p.time);
-                gl.uniform_1_f32(loc("u_intensity").as_ref(), p.intensity);
-                gl.uniform_1_f32(loc("u_scale").as_ref(), p.scale);
-                gl.uniform_1_f32(loc("u_saturation").as_ref(), p.saturation);
-                gl.uniform_1_f32(loc("u_dim").as_ref(), p.dim);
+                gl.uniform_1_f32(blend.as_ref(), p.blend);
+                gl.uniform_1_f32(time.as_ref(), p.time);
+                gl.uniform_1_f32(intensity.as_ref(), p.intensity);
+                gl.uniform_1_f32(scale.as_ref(), p.scale);
+                gl.uniform_1_f32(saturation.as_ref(), p.saturation);
+                gl.uniform_1_f32(dim.as_ref(), p.dim);
                 let vp = info.viewport_in_pixels();
-                gl.uniform_2_f32(loc("u_resolution").as_ref(), vp.width_px as f32, vp.height_px as f32);
+                gl.uniform_2_f32(resolution.as_ref(), vp.width_px as f32, vp.height_px as f32);
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
         });
@@ -237,7 +243,6 @@ impl Background {
 unsafe fn upload(gl: &glow::Context, tex: glow::Texture, art: &Art) {
     unsafe {
         gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
         gl.tex_image_2d(
             glow::TEXTURE_2D,
             0,

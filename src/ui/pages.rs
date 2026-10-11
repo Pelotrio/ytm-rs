@@ -1,5 +1,6 @@
 //! Page bodies. Every page fades and slides in when navigated to.
 
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
 use egui::{Align2, Color32, Rect, RichText, Sense, Ui, Vec2, pos2, vec2};
@@ -14,12 +15,16 @@ const CARD: f32 = 180.0;
 
 pub fn page(app: &mut App, ui: &mut Ui, now: f64) {
     let t = theme::ease_out(((now - app.page_changed) / 0.32) as f32);
+    if t < 1.0 {
+        // The fade-in finishes even when nothing else is drawing frames.
+        ui.ctx().request_repaint();
+    }
     ui.set_opacity(0.15 + 0.85 * t);
     let page = app.page.clone();
-    let scroll_id = format!("{:?}", std::mem::discriminant(&page));
-    let mut area = egui::ScrollArea::vertical().id_salt(&scroll_id).auto_shrink(false);
+    // Each page (each album, each search) keeps its own scroll position.
+    let mut area = egui::ScrollArea::vertical().id_salt(("page", &page)).auto_shrink(false);
     // Dev hook: YTM_SCROLL=<px> pins the page scroll, for screenshots of lower sections.
-    if let Some(y) = std::env::var("YTM_SCROLL").ok().and_then(|v| v.parse::<f32>().ok()) {
+    if let Some(y) = super::dev_var("YTM_SCROLL").and_then(|v| v.parse::<f32>().ok()) {
         area = area.vertical_scroll_offset(y);
     }
     let out = area.show(ui, |ui| {
@@ -40,13 +45,66 @@ pub fn page(app: &mut App, ui: &mut Ui, now: f64) {
     if page == Page::Home {
         let remaining = out.content_size.y - (out.state.offset.y + out.inner_rect.height());
         if let Some(h) = &mut app.home {
-            if remaining < 700.0 && !h.loading_more {
+            // A failed fetch reports nothing (it's a quiet request): allow a retry later.
+            if h.loading_more.is_some_and(|t| now - t > 20.0) {
+                h.loading_more = None;
+            }
+            if remaining < 700.0 && h.loading_more.is_none() {
                 if let Some(token) = h.continuation.clone() {
-                    h.loading_more = true;
+                    h.loading_more = Some(now);
                     app.backend.request(crate::backend::Req::HomeMore(token));
                 }
             }
         }
+    }
+}
+
+/// What every song row needs from the app, gathered once per frame.
+pub(super) struct Rows {
+    current: Option<String>,
+    playing: bool,
+    accent: Color32,
+    level: f32,
+    now: f64,
+}
+
+impl Rows {
+    pub(super) fn new(app: &App, now: f64) -> Self {
+        Self {
+            current: app.current_id().map(str::to_owned),
+            playing: app.audio.status.playing.load(Ordering::Relaxed),
+            accent: app.accent_color(),
+            level: app.audio.status.level(),
+            now,
+        }
+    }
+
+    pub(super) fn opts(&self, liked: &HashSet<String>, t: &Track, number: Option<usize>, show_album: bool) -> RowOpts {
+        RowOpts {
+            number,
+            show_album,
+            current: self.current.as_deref() == Some(t.id.as_str()),
+            playing: self.playing,
+            accent: self.accent,
+            time: self.now,
+            level: self.level,
+            liked: liked.contains(&t.id),
+        }
+    }
+}
+
+/// A page's data hasn't arrived: shimmering placeholders while it loads, a retry if the
+/// request failed.
+fn placeholder(app: &mut App, ui: &mut Ui, now: f64, rows: usize, card: f32) {
+    if app.load_failed {
+        ui.add_space(40.0);
+        ui.label(RichText::new("Couldn't load this page").color(theme::text_dim()));
+        ui.add_space(12.0);
+        if pill(ui, "Try again", None, false).clicked() {
+            app.refresh();
+        }
+    } else {
+        widgets::skeleton(ui, now, rows, card);
     }
 }
 
@@ -64,19 +122,6 @@ fn play_pill(ui: &mut Ui, acts: &mut Vec<Action>, target: &Target, tracks: &[Tra
     }
 }
 
-fn opts(app: &App, t: &Track, number: Option<usize>, show_album: bool, now: f64) -> RowOpts {
-    RowOpts {
-        number,
-        show_album,
-        current: app.current_id() == Some(t.id.as_str()),
-        playing: app.audio.status.playing.load(Ordering::Relaxed),
-        accent: app.accent_color(),
-        time: now,
-        level: app.audio.status.level(),
-        liked: app.liked.contains(&t.id),
-    }
-}
-
 fn card_row(ui: &mut Ui, id: &str, title: &str, cards: &[Card], acts: &mut Vec<Action>) {
     if cards.is_empty() {
         return;
@@ -91,8 +136,10 @@ fn card_row(ui: &mut Ui, id: &str, title: &str, cards: &[Card], acts: &mut Vec<A
     });
 }
 
-/// Songs laid out in columns of `rows`, scrolling sideways (Quick picks).
-fn song_grid(app: &mut App, ui: &mut Ui, id: &str, title: &str, strap: Option<&str>, tracks: &[Track], rows: usize, now: f64) -> bool {
+/// Songs laid out in columns of `rows`, scrolling sideways (Quick picks). Clicking a
+/// song starts its radio. Returns whether the arrows reached the end.
+#[allow(clippy::too_many_arguments)]
+fn song_grid(ui: &mut Ui, rows_ctx: &Rows, liked: &HashSet<String>, acts: &mut Vec<Action>, id: &str, title: &str, strap: Option<&str>, tracks: &[Track], rows: usize) -> bool {
     let (l, r) = shelf_header(ui, title, strap, None, true);
     let nudge = r as i32 - l as i32;
     let col_w = (ui.available_width() / 2.6).clamp(300.0, 420.0);
@@ -104,9 +151,8 @@ fn song_grid(app: &mut App, ui: &mut Ui, id: &str, title: &str, strap: Option<&s
                 ui.set_width(col_w);
                 ui.vertical(|ui| {
                     for (i, t) in col.iter().enumerate() {
-                        let o = opts(app, t, None, false, now);
-                        let resp = track_row(ui, t, &o, &mut app.actions);
-                        if resp.clicked() {
+                        let o = rows_ctx.opts(liked, t, None, false);
+                        if track_row(ui, t, &o, acts).clicked() {
                             picked = Some(c * rows + i);
                         }
                     }
@@ -115,9 +161,20 @@ fn song_grid(app: &mut App, ui: &mut Ui, id: &str, title: &str, strap: Option<&s
         }
     });
     if let Some(i) = picked {
-        app.actions.push(Action::Radio(tracks[i].clone()));
+        acts.push(Action::Radio(tracks[i].clone()));
     }
     reached_end
+}
+
+/// A long song list; only the rows on screen are built. Clicking one plays `tracks` from it.
+fn list(ui: &mut Ui, rows: &Rows, liked: &HashSet<String>, tracks: &[Track], show_album: bool, number: impl Fn(usize, &Track) -> Option<usize>, acts: &mut Vec<Action>) {
+    widgets::visible_rows(ui, tracks.len(), |ui, i| {
+        let t = &tracks[i];
+        let o = rows.opts(liked, t, number(i, t), show_album);
+        if track_row(ui, t, &o, acts).clicked() {
+            acts.push(Action::Play(tracks.to_vec(), i));
+        }
+    });
 }
 
 // ------------------------------------------------------------------ home
@@ -125,11 +182,10 @@ fn song_grid(app: &mut App, ui: &mut Ui, id: &str, title: &str, strap: Option<&s
 fn home(app: &mut App, ui: &mut Ui, now: f64) {
     if let Some(h) = &app.home {
         if !h.chips.is_empty() {
-            let chips = h.chips.clone();
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
-                for c in &chips {
+                for c in &h.chips {
                     if chip(ui, &c.title, c.selected).clicked() {
                         let params = if c.selected { None } else { c.params.clone() };
                         app.actions.push(Action::HomeChip(params));
@@ -140,15 +196,17 @@ fn home(app: &mut App, ui: &mut Ui, now: f64) {
     }
     // A refresh keeps showing the current feed; the skeleton is only for an empty one.
     if app.home.as_ref().is_none_or(|h| app.home_loading && h.shelves.is_empty()) {
-        widgets::skeleton(ui, now, 3, CARD);
+        placeholder(app, ui, now, 3, CARD);
         return;
     }
-    let shelves = app.home.as_ref().map(|h| h.shelves.clone()).unwrap_or_default();
-    if shelves.is_empty() {
+    let rows = Rows::new(app, now);
+    let Some(h) = &app.home else { return };
+    if h.shelves.is_empty() {
         ui.add_space(40.0);
         ui.label(RichText::new("Nothing here yet").color(theme::text_dim()));
     }
-    for (i, s) in shelves.iter().enumerate() {
+    let mut more_picks = None;
+    for (i, s) in h.shelves.iter().enumerate() {
         let id = format!("home-{i}-{}", s.title);
         match &s.kind {
             ShelfKind::Cards(cards) => {
@@ -165,22 +223,22 @@ fn home(app: &mut App, ui: &mut Ui, now: f64) {
                     }
                 });
             }
-            ShelfKind::Songs { tracks, rows } => {
-                let reached_end = song_grid(app, ui, &id, &s.title, s.strapline.as_deref(), tracks, *rows, now);
-                if s.title == "Quick picks" && reached_end {
-                    if let Some(h) = &mut app.home {
-                        if !h.picks_loading && !h.picks_expanded {
-                            if let Some(seed) = tracks.last() {
-                                h.picks_loading = true;
-                                app.backend.request(crate::backend::Req::MoreQuickPicks(seed.id.clone()));
-                            }
-                        }
-                    }
+            ShelfKind::Songs { tracks, rows: n } => {
+                let reached_end = song_grid(ui, &rows, &app.liked, &mut app.actions, &id, &s.title, s.strapline.as_deref(), tracks, *n);
+                if s.title == "Quick picks" && reached_end && !h.picks_loading && !h.picks_expanded {
+                    more_picks = tracks.last().map(|t| t.id.clone());
                 }
             }
         }
     }
-    if app.home.as_ref().is_some_and(|h| h.loading_more) {
+    let loading_more = h.loading_more.is_some();
+    if let Some(seed) = more_picks
+        && let Some(h) = &mut app.home
+    {
+        h.picks_loading = true;
+        app.backend.request(crate::backend::Req::MoreQuickPicks(seed));
+    }
+    if loading_more {
         widgets::skeleton(ui, now, 1, CARD);
     }
 }
@@ -189,18 +247,17 @@ fn home(app: &mut App, ui: &mut Ui, now: f64) {
 
 fn explore(app: &mut App, ui: &mut Ui, now: f64) {
     page_title(ui, "Explore");
-    let Some(e) = &app.explore else {
-        widgets::skeleton(ui, now, 2, CARD);
+    if app.explore.is_none() {
+        placeholder(app, ui, now, 2, CARD);
         return;
-    };
+    }
+    let rows = Rows::new(app, now);
+    let Some(e) = &app.explore else { return };
     card_row(ui, "ex-new", if app.logged_in { "New releases for you" } else { "Popular new releases" }, &e.new_albums, &mut app.actions);
-    let top = e.top.clone();
-    if !top.is_empty() {
-        song_grid(app, ui, "ex-top", "Top songs", None, &top, 4, now);
+    if !e.top.is_empty() {
+        song_grid(ui, &rows, &app.liked, &mut app.actions, "ex-top", "Top songs", None, &e.top, 4);
     }
-    if let Some(e) = &app.explore {
-        card_row(ui, "ex-charts", "Charts", &e.charts, &mut app.actions);
-    }
+    card_row(ui, "ex-charts", "Charts", &e.charts, &mut app.actions);
 }
 
 fn page_title(ui: &mut Ui, title: &str) {
@@ -211,21 +268,24 @@ fn page_title(ui: &mut Ui, title: &str) {
 // ------------------------------------------------------------------ search
 
 fn search(app: &mut App, ui: &mut Ui, q: &str, now: f64) {
-    let Some(r) = app.search.as_ref().filter(|r| r.query == q) else {
-        widgets::skeleton(ui, now, 2, CARD);
+    if app.search.as_ref().is_none_or(|r| r.query != q) {
+        placeholder(app, ui, now, 2, CARD);
         return;
-    };
-    let (tracks, artists, albums, playlists) = (r.tracks.clone(), r.artists.clone(), r.albums.clone(), r.playlists.clone());
-    if tracks.is_empty() && artists.is_empty() && albums.is_empty() && playlists.is_empty() {
+    }
+    let rows = Rows::new(app, now);
+    let Some(r) = &app.search else { return };
+    let acts = &mut app.actions;
+    let liked = &app.liked;
+    if r.tracks.is_empty() && r.artists.is_empty() && r.albums.is_empty() && r.playlists.is_empty() {
         page_title(ui, "No results");
         return;
     }
     ui.add_space(8.0);
     // Top result: the first artist when the query names one, otherwise the first song.
     ui.horizontal_top(|ui| {
-        if let Some(top) = artists.first().filter(|a| a.title.eq_ignore_ascii_case(q.trim())).or(None) {
-            top_result(ui, top, &mut app.actions);
-        } else if let Some(t) = tracks.first() {
+        if let Some(top) = r.artists.first().filter(|a| a.title.eq_ignore_ascii_case(q.trim())) {
+            top_result(ui, top, acts);
+        } else if let Some(t) = r.tracks.first() {
             let c = Card {
                 title: t.title.clone(),
                 subtitle: format!("Song • {}", t.artist_line()),
@@ -234,36 +294,34 @@ fn search(app: &mut App, ui: &mut Ui, q: &str, now: f64) {
                 round: false,
                 links: t.artists.clone(),
             };
-            top_result(ui, &c, &mut app.actions);
+            top_result(ui, &c, acts);
         }
         ui.add_space(24.0);
         ui.vertical(|ui| {
             ui.label(RichText::new("Songs").font(theme::bold(24.0)));
             ui.add_space(8.0);
-            for (i, t) in tracks.iter().take(4).enumerate() {
-                let o = opts(app, t, None, false, now);
-                let resp = track_row(ui, t, &o, &mut app.actions);
-                if resp.clicked() {
-                    app.actions.push(Action::Play(tracks.clone(), i));
+            for (i, t) in r.tracks.iter().take(4).enumerate() {
+                let o = rows.opts(liked, t, None, false);
+                if track_row(ui, t, &o, acts).clicked() {
+                    acts.push(Action::Play(r.tracks.clone(), i));
                 }
             }
         });
     });
-    card_row(ui, "s-artists", "Artists", &artists, &mut app.actions);
-    card_row(ui, "s-albums", "Albums", &albums, &mut app.actions);
-    if tracks.len() > 4 {
+    card_row(ui, "s-artists", "Artists", &r.artists, acts);
+    card_row(ui, "s-albums", "Albums", &r.albums, acts);
+    if r.tracks.len() > 4 {
         ui.add_space(26.0);
         ui.label(RichText::new("More songs").font(theme::bold(24.0)));
         ui.add_space(10.0);
-        for (i, t) in tracks.iter().enumerate().skip(4) {
-            let o = opts(app, t, None, true, now);
-            let resp = track_row(ui, t, &o, &mut app.actions);
-            if resp.clicked() {
-                app.actions.push(Action::Play(tracks.clone(), i));
+        for (i, t) in r.tracks.iter().enumerate().skip(4) {
+            let o = rows.opts(liked, t, None, true);
+            if track_row(ui, t, &o, acts).clicked() {
+                acts.push(Action::Play(r.tracks.clone(), i));
             }
         }
     }
-    card_row(ui, "s-pl", "Playlists", &playlists, &mut app.actions);
+    card_row(ui, "s-pl", "Playlists", &r.playlists, acts);
 }
 
 fn top_result(ui: &mut Ui, c: &Card, acts: &mut Vec<Action>) {
@@ -304,33 +362,36 @@ fn top_result(ui: &mut Ui, c: &Card, acts: &mut Vec<Action>) {
 // ------------------------------------------------------------------ album / playlist
 
 fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
-    let Some(c) = app.collection.as_ref().filter(|c| c.id == id) else {
-        widgets::skeleton(ui, now, 1, 232.0);
+    if app.collection.as_ref().is_none_or(|c| c.id != id) {
+        placeholder(app, ui, now, 1, 232.0);
         return;
-    };
-    let (title, subtitle, artists, desc, thumbs, tracks, is_album, save_id) =
-        (c.title.clone(), c.subtitle.clone(), c.artists.clone(), c.description.clone(), c.thumbs.clone(), c.tracks.clone(), c.is_album, c.save_id.clone());
+    }
+    let rows = Rows::new(app, now);
+    let Some(c) = &app.collection else { return };
+    let acts = &mut app.actions;
+    let tracks = &c.tracks;
+    let is_album = c.is_album;
     ui.add_space(18.0);
     ui.horizontal_top(|ui| {
         let (img, _) = ui.allocate_exact_size(Vec2::splat(232.0), Sense::hover());
         widgets::soft_shadow(ui, img, 10.0, 40.0, 0.5);
-        paint_cover(ui, img, &thumbs, theme::card_radius() + 2.0, 1.0);
+        paint_cover(ui, img, &c.thumbs, theme::card_radius() + 2.0, 1.0);
         ui.add_space(26.0);
         ui.vertical(|ui| {
             ui.set_max_width(ui.available_width().min(760.0));
             ui.add_space(24.0);
             ui.label(RichText::new(if is_album { "ALBUM" } else { "PLAYLIST" }).font(theme::semibold(12.0)).color(theme::text_dim()));
-            ui.label(RichText::new(&title).font(theme::bold(40.0)).color(theme::TEXT));
+            ui.label(RichText::new(&c.title).font(theme::bold(40.0)).color(theme::TEXT));
             ui.add_space(2.0);
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
-            widgets::linked_text(ui, r.min, &subtitle, &artists, theme::regular(15.0), theme::text_dim(), r.width(), &mut app.actions);
+            widgets::linked_text(ui, r.min, &c.subtitle, &c.artists, theme::regular(15.0), theme::text_dim(), r.width(), acts);
             let total: u32 = tracks.iter().filter_map(|t| t.duration).sum();
             if total > 0 {
                 ui.label(
                     RichText::new(format!("{} songs • {} min", tracks.len(), total / 60)).font(theme::regular(13.5)).color(theme::TEXT_FAINT),
                 );
             }
-            if let Some(d) = desc.filter(|d| !d.trim().is_empty()) {
+            if let Some(d) = c.description.as_deref().filter(|d| !d.trim().is_empty()) {
                 ui.add_space(6.0);
                 let g = widgets::galley_wrapped(ui, d.trim(), theme::regular(13.5), theme::text_dim(), ui.available_width(), 2);
                 ui.label(g);
@@ -339,99 +400,87 @@ fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 let target = if is_album { Target::Album(id.to_owned()) } else { Target::Playlist(id.to_owned()) };
-                play_pill(ui, &mut app.actions, &target, &tracks);
+                play_pill(ui, acts, &target, tracks);
                 if pill(ui, "Shuffle", Some(icon::SHUFFLE), false).clicked() && !tracks.is_empty() {
                     let mut t = tracks.clone();
                     super::shuffle(&mut t);
-                    app.actions.push(Action::Play(t, 0));
+                    acts.push(Action::Play(t, 0));
                 }
                 if let Some(first) = tracks.first() {
                     if pill(ui, "Radio", Some(icon::RADIO), false).clicked() {
-                        app.actions.push(Action::Radio(first.clone()));
+                        acts.push(Action::Radio(first.clone()));
                     }
                 }
                 if pill(ui, "Share", None, false).clicked() {
-                    app.actions.push(Action::Share(target.clone()));
+                    acts.push(Action::Share(target.clone()));
                 }
                 if app.logged_in {
                     let saved = app.library.as_ref().is_some_and(|l| {
                         let cards = if is_album { &l.albums } else { &l.playlists };
                         cards.iter().any(|card| card.target == target)
                     });
-                    if let Some(save_id) = if is_album { save_id.clone() } else { Some(id.to_owned()) } {
+                    if let Some(save_id) = if is_album { c.save_id.clone() } else { Some(id.to_owned()) } {
                         if pill(ui, if saved { "Remove from library" } else { "Save to library" }, None, false).clicked() {
-                            app.actions.push(Action::SaveCollection(save_id, !saved));
+                            acts.push(Action::SaveCollection(save_id, !saved));
                         }
                     }
                     // Mixes (RD...) are generated by YouTube Music: nothing to edit or delete.
                     if !is_album && !id.starts_with("RD") {
-                        if pill(ui, "Edit", None, false).clicked() { app.actions.push(Action::EditPlaylist); }
-                        if pill(ui, "Delete", None, false).clicked() { app.actions.push(Action::DeletePlaylist); }
+                        if pill(ui, "Edit", None, false).clicked() { acts.push(Action::EditPlaylist); }
+                        if pill(ui, "Delete", None, false).clicked() { acts.push(Action::DeletePlaylist); }
                     }
                 }
             });
         });
     });
     ui.add_space(26.0);
-    for (i, t) in tracks.iter().enumerate() {
-        let number = is_album.then(|| t.track_nr.map_or(i + 1, |n| n as usize));
-        let o = opts(app, t, number, !is_album, now);
-        let resp = track_row(ui, t, &o, &mut app.actions);
-        if resp.clicked() {
-            app.actions.push(Action::Play(tracks.clone(), i));
-        }
-    }
+    let number = |i: usize, t: &Track| is_album.then(|| t.track_nr.map_or(i + 1, |n| n as usize));
+    list(ui, &rows, &app.liked, tracks, !is_album, number, acts);
 }
 
 // ------------------------------------------------------------------ artist
 
 fn artist(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
-    let Some(a) = app.artist.as_ref().filter(|a| a.id == id) else {
-        widgets::skeleton(ui, now, 2, CARD);
+    if app.artist.as_ref().is_none_or(|a| a.id != id) {
+        placeholder(app, ui, now, 2, CARD);
         return;
-    };
-    let (name, banner, subs, desc, top, top_playlist, albums, playlists, similar) = (
-        a.name.clone(),
-        a.banner.clone(),
-        a.subscribers,
-        a.description.clone(),
-        a.top.clone(),
-        a.top_playlist.clone(),
-        a.albums.clone(),
-        a.playlists.clone(),
-        a.similar.clone(),
-    );
+    }
+    let rows = Rows::new(app, now);
+    let accent = app.accent_color();
+    let Some(a) = &app.artist else { return };
+    let acts = &mut app.actions;
+    let top = &a.top;
     // Hero banner fading into the page.
     let w = ui.available_width();
     let hero_h = (w * 0.34).clamp(240.0, 380.0);
     let (hero, _) = ui.allocate_exact_size(vec2(w, hero_h), Sense::hover());
-    if let Some(t) = banner.iter().max_by_key(|t| t.width) {
+    if let Some(t) = a.banner.iter().max_by_key(|t| t.width) {
         let img_ratio = if t.height > 0 { t.width as f32 / t.height as f32 } else { 16.0 / 9.0 };
         // Cover-fit: crop the image's top band to the hero's aspect.
         let vis_h = (img_ratio / (w / hero_h)).min(1.0);
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, vis_h));
         egui::Image::new(t.url.clone()).uv(uv).corner_radius(14).paint_at(ui, hero);
     } else {
-        ui.painter().rect_filled(hero, 14.0, theme::with_alpha(app.accent_color(), 0.25));
+        ui.painter().rect_filled(hero, 14.0, theme::with_alpha(accent, 0.25));
     }
-    super::shell::vgradient(ui, Rect::from_min_max(pos2(hero.left(), hero.center().y - 40.0), hero.max), Color32::TRANSPARENT, theme::shade(0.85));
+    super::shell::vgradient(ui.painter(), Rect::from_min_max(pos2(hero.left(), hero.center().y - 40.0), hero.max), Color32::TRANSPARENT, theme::shade(0.85));
     let base = hero.left_bottom() + vec2(28.0, -30.0);
-    ui.painter().text(base - vec2(0.0, 44.0), Align2::LEFT_BOTTOM, &name, theme::bold(58.0), Color32::WHITE);
-    if let Some(s) = subs {
+    ui.painter().text(base - vec2(0.0, 44.0), Align2::LEFT_BOTTOM, &a.name, theme::bold(58.0), Color32::WHITE);
+    if let Some(s) = a.subscribers {
         ui.painter().text(base - vec2(0.0, 18.0), Align2::LEFT_BOTTOM, format!("{} subscribers", compact(s)), theme::regular(14.0), theme::text_dim());
     }
     ui.add_space(18.0);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
-        play_pill(ui, &mut app.actions, &Target::Artist(id.to_owned()), &top);
+        play_pill(ui, acts, &Target::Artist(id.to_owned()), top);
         if pill(ui, "Shuffle", Some(icon::SHUFFLE), false).clicked() && !top.is_empty() {
             let mut t = top.clone();
             super::shuffle(&mut t);
-            app.actions.push(Action::Play(t, 0));
+            acts.push(Action::Play(t, 0));
         }
         if let Some(first) = top.first() {
             if pill(ui, "Radio", Some(icon::RADIO), false).clicked() {
-                app.actions.push(Action::Radio(first.clone()));
+                acts.push(Action::Radio(first.clone()));
             }
         }
     });
@@ -439,27 +488,26 @@ fn artist(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
         ui.add_space(26.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new("Top songs").font(theme::bold(24.0)).color(theme::TEXT));
-            if let Some(pl) = &top_playlist {
+            if let Some(pl) = &a.top_playlist {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if pill(ui, "Show all", None, false).clicked() {
-                        app.actions.push(Action::Open(Target::Playlist(pl.clone())));
+                        acts.push(Action::Open(Target::Playlist(pl.clone())));
                     }
                 });
             }
         });
         ui.add_space(12.0);
         for (i, t) in top.iter().enumerate().take(5) {
-            let o = opts(app, t, None, true, now);
-            let resp = track_row(ui, t, &o, &mut app.actions);
-            if resp.clicked() {
-                app.actions.push(Action::Play(top.clone(), i));
+            let o = rows.opts(&app.liked, t, None, true);
+            if track_row(ui, t, &o, acts).clicked() {
+                acts.push(Action::Play(top.clone(), i));
             }
         }
     }
-    card_row(ui, "a-albums", "Albums & singles", &albums, &mut app.actions);
-    card_row(ui, "a-pl", "Featured on", &playlists, &mut app.actions);
-    card_row(ui, "a-sim", "Fans might also like", &similar, &mut app.actions);
-    if let Some(d) = desc.filter(|d| !d.trim().is_empty()) {
+    card_row(ui, "a-albums", "Albums & singles", &a.albums, acts);
+    card_row(ui, "a-pl", "Featured on", &a.playlists, acts);
+    card_row(ui, "a-sim", "Fans might also like", &a.similar, acts);
+    if let Some(d) = a.description.as_deref().filter(|d| !d.trim().is_empty()) {
         shelf_header(ui, "About", None, None, false);
         let g = widgets::galley_wrapped(ui, d.trim(), theme::regular(14.5), theme::text_dim(), ui.available_width().min(820.0), 8);
         ui.label(g);
@@ -503,22 +551,24 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
             }
         });
     };
+    let rows = Rows::new(app, now);
+    let plain = |_: usize, _: &Track| None;
     match tab {
         LibTab::History => {
-            let Some(h) = app.history.clone() else {
-                widgets::skeleton(ui, now, 1, 48.0);
+            if app.history.is_none() {
+                placeholder(app, ui, now, 1, 48.0);
                 return;
-            };
-            list(app, ui, &h, now);
+            }
+            let Some(h) = &app.history else { return };
+            list(ui, &rows, &app.liked, h, true, plain, &mut app.actions);
         }
         LibTab::Uploads => {
             ui.horizontal(|ui| {
                 if pill(ui, "Upload music", Some(icon::UPLOAD), true).clicked() {
                     app.pick_uploads(ui.ctx());
                 }
-                let up = app.uploads.clone().unwrap_or_default();
-                if !up.is_empty() && pill(ui, "Shuffle", Some(icon::SHUFFLE), false).clicked() {
-                    let mut t = up;
+                if app.uploads.as_ref().is_some_and(|u| !u.is_empty()) && pill(ui, "Shuffle", Some(icon::SHUFFLE), false).clicked() {
+                    let mut t = app.uploads.clone().unwrap_or_default();
                     super::shuffle(&mut t);
                     app.actions.push(Action::Play(t, 0));
                 }
@@ -526,36 +576,34 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
             ui.add_space(6.0);
             ui.label(RichText::new("Or drop audio files anywhere on the window. MP3, M4A, FLAC, OGG and WMA.").font(theme::regular(13.0)).color(theme::text_dim()));
             ui.add_space(12.0);
-            let Some(up) = app.uploads.clone() else {
-                widgets::skeleton(ui, now, 1, 48.0);
+            if app.uploads.is_none() {
+                placeholder(app, ui, now, 1, 48.0);
                 return;
-            };
+            }
+            let Some(up) = &app.uploads else { return };
             if up.is_empty() {
                 ui.add_space(20.0);
                 ui.label(RichText::new("No uploads yet").color(theme::text_dim()));
             }
-            list(app, ui, &up, now);
+            list(ui, &rows, &app.liked, up, true, plain, &mut app.actions);
         }
         _ => {
-            let Some(lib) = &app.library else {
-                widgets::skeleton(ui, now, 2, CARD);
+            if app.library.is_none() {
+                placeholder(app, ui, now, 2, CARD);
                 return;
-            };
+            }
+            let Some(lib) = &app.library else { return };
             match tab {
                 LibTab::Playlists => {
-                    let cards = lib.playlists.clone();
                     if pill(ui, "New playlist", None, false).clicked() {
                         app.actions.push(Action::NewPlaylist(None));
                     }
                     ui.add_space(14.0);
-                    grid(ui, &cards, &mut app.actions)
+                    grid(ui, &lib.playlists, &mut app.actions)
                 }
-                LibTab::Albums => {
-                    let cards = lib.albums.clone();
-                    grid(ui, &cards, &mut app.actions)
-                }
+                LibTab::Albums => grid(ui, &lib.albums, &mut app.actions),
                 LibTab::Songs => {
-                    let liked = lib.liked.clone();
+                    let liked = &lib.liked;
                     if !liked.is_empty() {
                         ui.horizontal(|ui| {
                             if pill(ui, "Play", Some(icon::PLAY), true).clicked() {
@@ -569,20 +617,10 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
                         });
                         ui.add_space(10.0);
                     }
-                    list(app, ui, &liked, now);
+                    list(ui, &rows, &app.liked, liked, true, plain, &mut app.actions);
                 }
                 LibTab::History | LibTab::Uploads => unreachable!(),
             }
-        }
-    }
-}
-
-fn list(app: &mut App, ui: &mut Ui, tracks: &[Track], now: f64) {
-    for (i, t) in tracks.iter().enumerate() {
-        let o = opts(app, t, None, true, now);
-        let resp = track_row(ui, t, &o, &mut app.actions);
-        if resp.clicked() {
-            app.actions.push(Action::Play(tracks.to_vec(), i));
         }
     }
 }
@@ -613,11 +651,11 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
     settings_card(ui, |ui| {
         if app.logged_in {
             let name = app.account_name.clone().unwrap_or_else(|| "YouTube Music".to_owned());
-            setting_row(ui, true, &name, Some("Signed in with Google. Your home feed, library and likes come from this account."), |ui| {
+            setting_row(ui, &name, Some("Signed in with Google. Your home feed, library and likes come from this account."), |ui| {
                 sign_out = pill(ui, "Sign out", Some(icon::LOG_OUT), false).clicked();
             });
         } else {
-            setting_row(ui, true, "Not signed in", Some("Sign in to get your home feed, library and likes."), |ui| {
+            setting_row(ui, "Not signed in", Some("Sign in to get your home feed, library and likes."), |ui| {
                 if busy {
                     ui.spinner();
                 } else {
@@ -660,17 +698,17 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
     // ---- playback
     section_label(ui, "Playback", None);
     settings_card(ui, |ui| {
-        setting_row(ui, true, "Autoplay", Some("Keep playing similar songs when the queue ends."), |ui| {
+        setting_row(ui, "Autoplay", Some("Keep playing similar songs when the queue ends."), |ui| {
             toggle(ui, &mut app.autoplay, "Autoplay");
         });
         divider(ui);
-        setting_row(ui, false, "Volume normalization", Some("Turn loud songs down to the same level, like YouTube Music does."), |ui| {
+        setting_row(ui, "Volume normalization", Some("Turn loud songs down to the same level, like YouTube Music does."), |ui| {
             if toggle(ui, &mut app.normalize, "Volume normalization").changed() {
                 app.audio.set_normalize(app.normalize);
             }
         });
         divider(ui);
-        setting_row(ui, false, "High quality audio", Some("256 kbps instead of 128 kbps, for accounts with YouTube Premium. Applies from the next song."), |ui| {
+        setting_row(ui, "High quality audio", Some("256 kbps instead of 128 kbps, for accounts with YouTube Premium. Applies from the next song."), |ui| {
             if toggle(ui, &mut app.high_quality, "High quality audio").changed() {
                 app.backend.set_high_quality(app.high_quality);
             }
@@ -682,17 +720,17 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
     let was_theme = app.theme_id.clone();
     section_label(ui, "Appearance", None);
     settings_card(ui, |ui| {
-        setting_row(ui, true, "Classic theme", Some("Plain dark with red accents. Turns off album-art colours and the theme below."), |ui| {
+        setting_row(ui, "Classic theme", Some("Plain dark with red accents. Turns off album-art colours and the theme below."), |ui| {
             toggle(ui, &mut app.default_theme, "Classic theme");
         });
         let enabled = !app.default_theme;
         divider(ui);
         ui.add_enabled_ui(enabled, |ui| {
-            setting_row(ui, false, "Animated background", Some("The album art slowly drifts behind everything."), |ui| {
+            setting_row(ui, "Animated background", Some("The album art slowly drifts behind everything."), |ui| {
                 toggle(ui, &mut app.anim_bg, "Animated background");
             });
             divider(ui);
-            setting_row(ui, false, "Pulse with the music", Some("The background swells with the beat."), |ui| {
+            setting_row(ui, "Pulse with the music", Some("The background swells with the beat."), |ui| {
                 toggle(ui, &mut app.reactive_bg, "Pulse with the music");
             });
         });
@@ -716,7 +754,7 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
     let mut discord_enabled = app.discord_enabled;
     section_label(ui, "Connections", None);
     settings_card(ui, |ui| {
-        setting_row(ui, true, "Discord", Some("Show what you're playing on your Discord profile."), |ui| {
+        setting_row(ui, "Discord", Some("Show what you're playing on your Discord profile."), |ui| {
             toggle(ui, &mut discord_enabled, "Discord");
         });
     });
@@ -727,7 +765,7 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
     // ---- updates
     section_label(ui, "Updates", None);
     let state = app.updater.as_ref().map(|u| u.state());
-    let installed = crate::update::installed();
+    let installed = super::installed();
     let (mut check, mut restart) = (false, false);
     settings_card(ui, |ui| {
         use crate::update::State;
@@ -743,11 +781,11 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
                 _ => format!("Version {}.", crate::update::current_version()),
             }
         };
-        setting_row(ui, true, "Automatic updates", Some("Download new versions in the background and install them when you close the app."), |ui| {
+        setting_row(ui, "Automatic updates", Some("Download new versions in the background and install them when you close the app."), |ui| {
             ui.add_enabled_ui(installed, |ui| toggle(ui, &mut app.auto_update, "Automatic updates"));
         });
         divider(ui);
-        setting_row(ui, false, "Status", Some(&status), |ui| {
+        setting_row(ui, "Status", Some(&status), |ui| {
             if !installed {
                 return;
             }
@@ -784,7 +822,7 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
                     ui.vertical(|ui| {
                         crate::ui::notes::show(ui, &crate::ui::notes::parse(&md), 13.5);
                         ui.add_space(6.0);
-                        ui.hyperlink_to(RichText::new("Full release notes on GitHub").font(theme::regular(13.0)).color(Color32::from_rgb(62, 166, 255)), crate::update::RELEASES);
+                        crate::ui::notes::github_link(ui);
                     });
                 });
             }
@@ -831,7 +869,7 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
     // ---- about
     section_label(ui, "About", None);
     settings_card(ui, |ui| {
-        setting_row(ui, true, &format!("ytm-rs {}", env!("CARGO_PKG_VERSION")), Some("A fast, native YouTube Music client."), |_| {});
+        setting_row(ui, &format!("ytm-rs {}", env!("CARGO_PKG_VERSION")), Some("A fast, native YouTube Music client."), |_| {});
         for (title, desc) in [
             ("Lyrics", "Better Lyrics API: Musixmatch, LRCLIB, QQ, KuGou and Better Lyrics TTML"),
             ("Themes", "Adapted from the Better Lyrics theme store; each card credits its creators"),
@@ -839,7 +877,7 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
             ("Fonts and icons", "Inter, DM Sans, Google Sans Flex, Figtree, Instrument Sans (SIL OFL 1.1) • Lucide (ISC)"),
         ] {
             divider(ui);
-            setting_row(ui, false, title, Some(desc), |_| {});
+            setting_row(ui, title, Some(desc), |_| {});
         }
     });
 }
@@ -868,7 +906,7 @@ fn settings_card(ui: &mut Ui, body: impl FnOnce(&mut Ui)) {
 }
 
 /// A settings row: title and description on the left, the control on the right.
-pub(super) fn setting_row(ui: &mut Ui, _first: bool, title: &str, desc: Option<&str>, control: impl FnOnce(&mut Ui)) {
+pub(super) fn setting_row(ui: &mut Ui, title: &str, desc: Option<&str>, control: impl FnOnce(&mut Ui)) {
     let w = ui.available_width();
     let text_w = (w - 230.0).max(200.0);
     let title_g = widgets::galley(ui, title, theme::semibold(14.5), theme::TEXT, text_w);

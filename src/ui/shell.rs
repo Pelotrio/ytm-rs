@@ -11,30 +11,54 @@ use crate::theme::{self, icon};
 // ------------------------------------------------------------------ background
 
 /// Vertical gradient (top colour → bottom colour) over `rect`.
-pub fn vgradient(ui: &Ui, rect: Rect, top: Color32, bottom: Color32) {
-    let mut mesh = egui::Mesh::default();
-    mesh.colored_vertex(rect.left_top(), top);
-    mesh.colored_vertex(rect.right_top(), top);
-    mesh.colored_vertex(rect.left_bottom(), bottom);
-    mesh.colored_vertex(rect.right_bottom(), bottom);
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(1, 3, 2);
-    ui.painter().add(egui::Shape::mesh(mesh));
+pub fn vgradient(painter: &egui::Painter, rect: Rect, top: Color32, bottom: Color32) {
+    gradient(painter, rect, [top, top, bottom, bottom]);
 }
 
-pub fn background(app: &mut App, ui: &mut Ui, screen: Rect, now: f64) {
+/// Horizontal gradient (left colour → right colour) over `rect`.
+pub fn hgradient(painter: &egui::Painter, rect: Rect, left: Color32, right: Color32) {
+    gradient(painter, rect, [left, right, left, right]);
+}
+
+/// Corner colours: left top, right top, left bottom, right bottom.
+fn gradient(painter: &egui::Painter, rect: Rect, c: [Color32; 4]) {
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.left_top(), c[0]);
+    mesh.colored_vertex(rect.right_top(), c[1]);
+    mesh.colored_vertex(rect.left_bottom(), c[2]);
+    mesh.colored_vertex(rect.right_bottom(), c[3]);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(1, 3, 2);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// The background mode browse pages use: the theme's own choice, else whatever now
+/// playing uses.
+fn page_mode(look: &crate::preset::Preset) -> crate::preset::BgMode {
     use crate::preset::{BgMode, PageBg};
+    match look.app.page_bg {
+        PageBg::Same => look.background.mode,
+        PageBg::Static => BgMode::CoverStatic,
+        PageBg::Accent => BgMode::AccentGradient,
+        PageBg::Solid => BgMode::Solid,
+    }
+}
+
+/// Whether the pages' background moves while music plays (static themes need no frames).
+pub fn pages_bg_moves(look: &crate::preset::Preset) -> bool {
+    use crate::preset::BgMode;
+    let b = &look.background;
+    matches!(page_mode(look), BgMode::Kawarp | BgMode::CoverFullbleed) && b.speed > 0.0 && b.intensity > 0.0
+}
+
+/// `only`: paint just this part (the rest is covered by now playing).
+pub fn background(app: &mut App, ui: &mut Ui, screen: Rect, now: f64, only: Option<Rect>) {
+    use crate::preset::BgMode;
     let dt = (now - app.last_frame).clamp(0.0, 0.1);
     app.last_frame = now;
     let look = app.look();
     let b = &look.background;
-    // Browse pages: the theme's own choice, else whatever now playing uses.
-    let mode = match look.app.page_bg {
-        PageBg::Same => b.mode,
-        PageBg::Static => BgMode::CoverStatic,
-        PageBg::Accent => BgMode::AccentGradient,
-        PageBg::Solid => BgMode::Solid,
-    };
+    let mode = page_mode(look);
     let dim = look.app.page_dim.unwrap_or(b.page_dim).clamp(0.02, 1.0);
     // Now playing animates the shader itself, so keep the clock running for it too.
     let animated = matches!(b.mode, BgMode::Kawarp | BgMode::CoverFullbleed) && b.speed > 0.0;
@@ -42,14 +66,22 @@ pub fn background(app: &mut App, ui: &mut Ui, screen: Rect, now: f64) {
     if moving {
         app.bg_time += dt * b.speed as f64;
     }
-    ui.painter().rect_filled(screen, 0.0, if app.default_theme { theme::BG } else { look.solid() });
+    let painter = match only {
+        Some(r) => ui.painter().with_clip_rect(r),
+        None => ui.painter().clone(),
+    };
+    painter.rect_filled(screen, 0.0, if app.default_theme { theme::BG } else { look.solid() });
     let art = matches!(mode, BgMode::Kawarp | BgMode::CoverStatic | BgMode::CoverFullbleed);
     if let Some(bg) = app.bg.as_ref().filter(|_| !app.default_theme && art) {
         let blend = theme::ease_in_out(((now - app.art_changed) / 1.4) as f32);
+        if blend < 1.0 {
+            // The crossfade to new art finishes even while paused.
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+        }
         let level = if app.reactive_bg && app.playing() { app.audio.status.level() * b.reactive } else { 0.0 };
         let still = mode == BgMode::CoverStatic;
         bg.paint(
-            ui.painter(),
+            &painter,
             screen,
             Params {
                 time: app.bg_time as f32,
@@ -63,11 +95,11 @@ pub fn background(app: &mut App, ui: &mut Ui, screen: Rect, now: f64) {
     } else if !app.default_theme && mode == BgMode::Solid {
         // Plain colour: nothing over it.
     } else {
-        vgradient(ui, screen, theme::with_alpha(app.accent_color(), 0.18 * if app.default_theme { 1.0 } else { dim / 0.5 }), if app.default_theme { theme::BG } else { look.solid() });
+        vgradient(&painter, screen, theme::with_alpha(app.accent_color(), 0.18 * if app.default_theme { 1.0 } else { dim / 0.5 }), if app.default_theme { theme::BG } else { look.solid() });
     }
     // Keep text readable: darken toward the bottom and under the sidebar.
     if app.default_theme || mode != BgMode::Solid {
-        vgradient(ui, screen, theme::shade(0.12), theme::shade(0.55));
+        vgradient(&painter, screen, theme::shade(0.12), theme::shade(0.55));
     }
 }
 
@@ -148,7 +180,16 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         ui.add_space(6.0);
         egui::ScrollArea::vertical().id_salt("sidebar-pl").auto_shrink(false).show(ui, |ui| {
             let Some(lib) = &app.library else {
-                ui.spinner();
+                // The spinner animates every frame: give up on a request that never answered.
+                if app.library_requested.elapsed() < std::time::Duration::from_secs(20) {
+                    ui.spinner();
+                } else {
+                    ui.label(egui::RichText::new("Couldn't load your playlists").color(theme::text_dim()));
+                    ui.add_space(8.0);
+                    if widgets::pill(ui, "Try again", None, false).clicked() {
+                        app.request_library();
+                    }
+                }
                 return;
             };
             for c in &lib.playlists {
@@ -479,7 +520,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
             .collect(),
             egui::epaint::PathStroke::new(2.5, Color32::from_gray(20)),
         )));
-        ui.ctx().request_repaint();
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
     } else if morph > 0.5 {
         widgets::pause_bars(ui, center, 8.0 * (2.0 * morph - 1.0).max(0.4), Color32::from_gray(15));
     } else {
@@ -577,10 +618,7 @@ pub fn queue_drawer(app: &mut App, ui: &mut Ui) {
 
 /// Current track plus everything after it. Shared by the drawer and now playing.
 pub fn queue_list(app: &mut App, ui: &mut Ui, salt: &str) {
-    let now = ui.input(|i| i.time);
-    let level = app.audio.status.level();
-    let playing = app.playing();
-    let accent = app.accent_color();
+    let rows = super::pages::Rows::new(app, ui.input(|i| i.time));
     egui::ScrollArea::vertical().id_salt(("queue", salt)).auto_shrink(false).show(ui, |ui| {
         if app.queue.is_empty() {
             ui.label(egui::RichText::new("Nothing queued yet").color(theme::text_dim()));
@@ -589,14 +627,17 @@ pub fn queue_list(app: &mut App, ui: &mut Ui, salt: &str) {
         let start = app.index.unwrap_or(0);
         ui.checkbox(&mut app.autoplay, egui::RichText::new("Autoplay similar songs").color(theme::text_dim()));
         ui.add_space(6.0);
-        for i in start..app.queue.len() {
-            let t = app.queue[i].clone();
-            let current = Some(i) == app.index;
-            let opts = widgets::RowOpts { number: None, show_album: false, current, playing, accent, time: now, level, liked: app.liked.contains(&t.id) };
-            let resp = widgets::track_row(ui, &t, &opts, &mut app.actions);
+        let (queue, liked, acts, has_current) = (&app.queue, &app.liked, &mut app.actions, app.index.is_some());
+        widgets::visible_rows(ui, queue.len() - start, |ui, k| {
+            let i = start + k;
+            let t = &queue[i];
+            // The first row is the current song.
+            let current = k == 0 && has_current;
+            let o = widgets::RowOpts { current, ..rows.opts(liked, t, None, false) };
+            let resp = widgets::track_row(ui, t, &o, acts);
             if resp.clicked() {
                 // The playing row pauses/resumes instead of doing nothing.
-                app.actions.push(if current { Action::TogglePlay } else { Action::QueueJump(i) });
+                acts.push(if current { Action::TogglePlay } else { Action::QueueJump(i) });
             }
             if !current && ui.rect_contains_pointer(Rect::from_min_max(resp.rect.min, pos2(resp.rect.right() + 42.0, resp.rect.bottom()))) {
                 // Remove button over the duration column.
@@ -605,10 +646,10 @@ pub fn queue_list(app: &mut App, ui: &mut Ui, salt: &str) {
                 ui.painter().circle_filled(x.center(), 14.0, theme::shade(0.6));
                 icon_at(ui, x.center(), icon::X, 14.0, theme::TEXT);
                 if xr.clicked() {
-                    app.actions.push(Action::QueueRemove(i));
+                    acts.push(Action::QueueRemove(i));
                 }
             }
-        }
+        });
     });
 }
 
@@ -638,5 +679,10 @@ pub fn toast(app: &mut App, ctx: &egui::Context, now: f64) {
                     ui.label(egui::RichText::new(msg.as_str()).font(theme::regular(14.0)).color(theme::TEXT));
                 });
         });
-    ctx.request_repaint();
+    // Frames only while it fades in or out; in between it just waits.
+    if (0.25..4.1).contains(&age) {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f32(4.1 - age));
+    } else {
+        ctx.request_repaint();
+    }
 }

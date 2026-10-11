@@ -159,7 +159,7 @@ fn hline(ui: &mut Ui) {
     ui.painter().rect_filled(r, 0.0, Color32::from_gray(44));
 }
 
-fn github_link(ui: &mut Ui) {
+pub fn github_link(ui: &mut Ui) {
     ui.hyperlink_to(egui::RichText::new("Full release notes on GitHub").font(theme::regular(13.0)).color(Color32::from_rgb(62, 166, 255)), crate::update::RELEASES);
 }
 
