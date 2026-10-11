@@ -99,15 +99,19 @@ pub fn heart(ui: &Ui, center: Pos2, size: f32, fill: f32, outline: Color32, fill
     use std::f32::consts::TAU;
     // x = 16 sin^3 t, y = 13 cos t - 5 cos 2t - 2 cos 3t - cos 4t spans x ±16, y -17..12;
     // shift so the box is centred, flip y for screen space.
+    static UNIT: std::sync::OnceLock<Vec<Vec2>> = std::sync::OnceLock::new();
+    let unit = UNIT.get_or_init(|| {
+        (0..64)
+            .map(|i| {
+                let t = i as f32 / 64.0 * TAU;
+                let x = 16.0 * t.sin().powi(3);
+                let y = 13.0 * t.cos() - 5.0 * (2.0 * t).cos() - 2.0 * (3.0 * t).cos() - (4.0 * t).cos();
+                vec2(x, -y - 2.5)
+            })
+            .collect()
+    });
     let s = size / 34.0;
-    let pts: Vec<Pos2> = (0..64)
-        .map(|i| {
-            let t = i as f32 / 64.0 * TAU;
-            let x = 16.0 * t.sin().powi(3);
-            let y = 13.0 * t.cos() - 5.0 * (2.0 * t).cos() - 2.0 * (3.0 * t).cos() - (4.0 * t).cos();
-            center + vec2(x * s, (-y - 2.5) * s)
-        })
-        .collect();
+    let pts: Vec<Pos2> = unit.iter().map(|v| center + *v * s).collect();
     if fill > 0.0 {
         // The heart is star-shaped around a point just below its middle, so a fan fills it.
         let mut mesh = egui::Mesh::default();
@@ -149,10 +153,10 @@ pub fn icon_button(ui: &mut Ui, glyph: char, size: f32, name: &str, active: bool
 
 /// Rounded pill button. `primary` = white with dark text (YouTube Music's Play button).
 pub fn pill(ui: &mut Ui, label: &str, glyph: Option<char>, primary: bool) -> Response {
-    let font = theme::semibold(14.0);
-    let text_w = ui.fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font.clone(), Color32::WHITE).size().x);
+    // Laid out once; the colour is given when it's painted.
+    let text = ui.painter().layout_no_wrap(label.to_owned(), theme::semibold(14.0), Color32::PLACEHOLDER);
     let icon_w = if glyph.is_some() { 24.0 } else { 0.0 };
-    let (rect, resp) = ui.allocate_exact_size(vec2(text_w + icon_w + 36.0, 38.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(text.size().x + icon_w + 36.0, 38.0), Sense::click());
     let resp = named(resp, label);
     let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
     let (fill, fg) = if primary {
@@ -167,15 +171,14 @@ pub fn pill(ui: &mut Ui, label: &str, glyph: Option<char>, primary: bool) -> Res
         icon_at(ui, pos2(x + 8.0, r.center().y), g, 17.0, fg);
         x += icon_w;
     }
-    ui.painter().text(pos2(x, r.center().y), Align2::LEFT_CENTER, label, font, fg);
+    ui.painter().galley(pos2(x, r.center().y - text.size().y / 2.0), text, fg);
     resp
 }
 
 /// Selectable chip (home moods, library tabs).
 pub fn chip(ui: &mut Ui, label: &str, selected: bool) -> Response {
-    let font = theme::semibold(13.5);
-    let w = ui.fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font.clone(), Color32::WHITE).size().x) + 28.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 34.0), Sense::click());
+    let text = ui.painter().layout_no_wrap(label.to_owned(), theme::semibold(13.5), Color32::PLACEHOLDER);
+    let (rect, resp) = ui.allocate_exact_size(vec2(text.size().x + 28.0, 34.0), Sense::click());
     let resp = named(resp, label);
     let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
     let s = theme::anim_bool(ui.ctx(), resp.id.with("s"), selected, 0.2);
@@ -196,8 +199,16 @@ pub fn chip(ui: &mut Ui, label: &str, selected: bool) -> Response {
         ui.painter().rect_stroke(rect, radius, egui::Stroke::new(1.0, theme::glass(0.3 * (1.0 - s))), egui::StrokeKind::Inside);
     }
     let fg = theme::lerp_color(theme::TEXT, on_fg, s);
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, font, fg);
+    ui.painter().galley(rect.center() - text.size() / 2.0, text, fg);
     resp
+}
+
+/// The size to fetch an image at for `px` pixels: rounded up to a few fixed steps, so
+/// resizing the window doesn't fetch a new size every frame and small covers (rows,
+/// sidebar, player bar) share one download.
+fn fetch_px(px: u32) -> u32 {
+    const STEPS: [u32; 9] = [60, 120, 180, 240, 360, 544, 720, 960, 1200];
+    STEPS.into_iter().find(|&s| s >= px).unwrap_or(1200)
 }
 
 /// Paint a cover image (square-cropped, CDN-resized) with a placeholder underneath.
@@ -213,6 +224,7 @@ pub fn paint_cover_px(ui: &Ui, rect: Rect, thumbs: &[Thumb], radius: f32, zoom: 
     if !ui.is_rect_visible(rect) {
         return;
     }
+    let px = fetch_px(px);
     ui.painter().rect_filled(rect, radius, theme::glass(0.07));
     let Some(t) = pick_thumb(thumbs, px.min(544)) else {
         icon_at(ui, rect.center(), icon::MUSIC, rect.width() * 0.3, theme::TEXT_FAINT);
@@ -225,41 +237,40 @@ pub fn paint_cover_px(ui: &Ui, rect: Rect, thumbs: &[Thumb], radius: f32, zoom: 
         let half = uv.size() / (2.0 * zoom);
         uv = Rect::from_center_size(c, half * 2.0);
     }
-    let url = sized(&t.url, (px.max(60) as f32 * 1.0) as u32);
+    let url = sized(&t.url, px);
     egui::Image::new(url).uv(uv).corner_radius(CornerRadius::same(radius as u8)).paint_at(ui, rect);
 }
 
 /// Paint the cover cropped to fill `rect` (any aspect), tinted, for full-bleed backdrops.
 pub fn paint_cover_fill(ui: &Ui, rect: Rect, thumbs: &[Thumb], tint: Color32) {
     let ppp = ui.ctx().pixels_per_point();
-    let px = (rect.width().max(rect.height()) * ppp) as u32;
-    let Some(t) = pick_thumb(thumbs, px.min(1200)) else { return };
+    let px = fetch_px((rect.width().max(rect.height()) * ppp) as u32).clamp(200, 1200);
+    let Some(t) = pick_thumb(thumbs, px) else { return };
     let uv = t.square_uv();
     // Crop the square to the rect's aspect ratio, keeping the centre.
     let aspect = rect.width() / rect.height().max(1.0);
     let size = if aspect >= 1.0 { vec2(uv.width(), uv.height() / aspect) } else { vec2(uv.width() * aspect, uv.height()) };
-    let url = sized(&t.url, px.clamp(200, 1200));
+    let url = sized(&t.url, px);
     egui::Image::new(url).uv(Rect::from_center_size(uv.center(), size)).tint(tint).paint_at(ui, rect);
 }
 
-/// Paint the cover as a disc rotated by `angle` (radians): a textured triangle fan,
-/// since egui's image rotation doesn't round corners.
 /// Start loading a cover at `px` without drawing it, so it's ready when it appears.
 pub fn preload_cover(ctx: &egui::Context, thumbs: &[Thumb], px: u32) {
+    let px = fetch_px(px);
     if let Some(t) = pick_thumb(thumbs, px.min(544)) {
-        let _ = egui::Image::new(sized(&t.url, px.max(60))).load_for_size(ctx, Vec2::splat(px as f32));
+        let _ = egui::Image::new(sized(&t.url, px)).load_for_size(ctx, Vec2::splat(px as f32));
     }
 }
 
-/// The cover as a disc, rotated by `angle`; fetched at `px` (see [`paint_cover_px`]).
+/// The cover as a disc rotated by `angle` (radians): a textured triangle fan, since
+/// egui's image rotation doesn't round corners. Fetched at `px` (see [`paint_cover_px`]).
 pub fn paint_disc(ui: &Ui, center: Pos2, r: f32, thumbs: &[Thumb], angle: f32, tint: Color32, px: u32) {
     ui.painter().circle_filled(center, r, theme::glass(0.07));
+    let px = fetch_px(px);
     let Some(t) = pick_thumb(thumbs, px.min(544)) else { return };
-    let url = sized(&t.url, px.max(60));
-    let Ok(egui::load::TexturePoll::Ready { texture }) = egui::Image::new(url).load_for_size(ui.ctx(), Vec2::splat(r * 2.0)) else {
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-        return;
-    };
+    let url = sized(&t.url, px);
+    // While it loads, the loader wakes the UI once it's ready.
+    let Ok(egui::load::TexturePoll::Ready { texture }) = egui::Image::new(url).load_for_size(ui.ctx(), Vec2::splat(r * 2.0)) else { return };
     let uv = t.square_uv();
     let (uc, uh) = (uv.center(), uv.width() / 2.0);
     let mut mesh = egui::Mesh::with_texture(texture.id);
@@ -511,9 +522,27 @@ pub struct RowOpts {
     pub liked: bool,
 }
 
+const ROW_H: f32 = 56.0;
+
+/// A long list of song rows: only the ones on screen are built; the rest is empty space
+/// of the same height. `row(ui, i)` draws row `i`, under an id of its own so its hover
+/// and menu state don't jump to another song as the list scrolls.
+pub fn visible_rows(ui: &mut Ui, n: usize, mut row: impl FnMut(&mut Ui, usize)) {
+    let h = ROW_H + ui.spacing().item_spacing.y;
+    let top = ui.cursor().top();
+    let clip = ui.clip_rect();
+    let first = (((clip.top() - top) / h).floor().max(0.0) as usize).min(n);
+    let last = ((((clip.bottom() - top) / h).ceil().max(0.0)) as usize + 1).clamp(first, n);
+    ui.add_space(first as f32 * h);
+    for i in first..last {
+        ui.push_id(i, |ui| row(ui, i));
+    }
+    ui.add_space((n - last) as f32 * h);
+}
+
 /// Song row: cover (or index), title, artists, album, duration. Click plays.
 pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) -> Response {
-    let (rect, base) = ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::hover());
+    let (rect, base) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
     if !ui.is_rect_visible(rect) {
         return base;
     }
@@ -738,6 +767,7 @@ pub fn skeleton(ui: &mut Ui, time: f64, rows: usize, card: f32) {
             ui.painter().rect_filled(band, radius, theme::glass(0.04));
         }
     };
+    let top = ui.cursor().top();
     for _ in 0..rows {
         ui.add_space(26.0);
         let (t, _) = ui.allocate_exact_size(vec2(220.0, 26.0), Sense::hover());
@@ -752,5 +782,8 @@ pub fn skeleton(ui: &mut Ui, time: f64, rows: usize, card: f32) {
             }
         });
     }
-    ui.ctx().request_repaint();
+    // The shimmer needs frames only while it's on screen, and 15 fps is plenty.
+    if ui.is_rect_visible(Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top())) {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
+    }
 }

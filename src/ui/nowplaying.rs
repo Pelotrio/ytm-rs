@@ -45,7 +45,7 @@ pub fn overlay(app: &mut App, ctx: &egui::Context, now: f64) {
                     widgets::paint_cover_fill(&child, area, &track.thumbs, Color32::from_gray((b.np_dim.clamp(0.0, 1.0) * 255.0) as u8));
                     if side_by_side {
                         let fade = Rect::from_min_max(pos2(area.center().x - area.width() * 0.1, area.top()), area.max);
-                        hgradient(&painter, fade, Color32::TRANSPARENT, solid);
+                        super::shell::hgradient(&painter, fade, Color32::TRANSPARENT, solid);
                     }
                 }
             } else if let Some(bg) = app.bg.as_ref().filter(|_| themed && art) {
@@ -69,7 +69,7 @@ pub fn overlay(app: &mut App, ctx: &egui::Context, now: f64) {
                 painter.rect_filled(rect, 0.0, theme::lerp_color(theme::BG, app.accent_color(), 0.25));
             }
             let k = if themed { b.scrim / 0.3 } else { 1.0 };
-            super::shell::vgradient(ui, rect, theme::shade((0.18 * k).min(0.95)), theme::shade((0.42 * k).min(0.95)));
+            super::shell::vgradient(ui.painter(), rect, theme::shade((0.18 * k).min(0.95)), theme::shade((0.42 * k).min(0.95)));
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(32.0, 20.0))));
             body(app, &mut child, now);
         });
@@ -123,10 +123,10 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
             let tr = widgets::chip(ui, "文A", app.show_roman || app.show_trans).on_hover_text("Romanization and translation");
             egui::Popup::menu(&tr).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                 ui.set_width(300.0);
-                super::pages::setting_row(ui, true, "Romanization", Some("Japanese, Korean, Chinese, Cyrillic and other scripts in Latin letters."), |ui| {
+                super::pages::setting_row(ui, "Romanization", Some("Japanese, Korean, Chinese, Cyrillic and other scripts in Latin letters."), |ui| {
                     super::pages::toggle(ui, &mut app.show_roman, "Romanization");
                 });
-                super::pages::setting_row(ui, false, "English translation", Some("Machine translated by Google. Skipped for English songs."), |ui| {
+                super::pages::setting_row(ui, "English translation", Some("Machine translated by Google. Skipped for English songs."), |ui| {
                     super::pages::toggle(ui, &mut app.show_trans, "English translation");
                 });
             });
@@ -215,13 +215,13 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
     }
 }
 
-/// Artwork with the title and artists under it, laid out in `col`.
 /// Size of the artwork laid out in `col`.
 fn art_side(cs: &crate::preset::CoverStyle, col: Rect) -> f32 {
     (col.width() * 0.82 * cs.size.clamp(0.5, 1.35)).min(col.height() - 110.0).max(160.0)
 }
 
-/// `px`: the size to fetch the image at (fixed while the column animates).
+/// Artwork with the title and artists under it, laid out in `col`. `px`: the size to
+/// fetch the image at (fixed while the column animates).
 #[allow(clippy::too_many_arguments)]
 fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Track, no_lyrics: bool, now: f64, px: u32) {
     use crate::preset::Shape;
@@ -284,21 +284,11 @@ fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Tra
         if a > 0.0 {
             let c = theme::with_alpha(theme::text_dim(), a * 0.8);
             text_at(ui, pos2(art.left(), title_y + 68.0), "No lyrics for this song", theme::regular(14.0), c, w);
-            ui.ctx().request_repaint();
+            // Frames only for the fade-out.
+            let wait = (since + 3.0 - now).max(0.0);
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(if wait > 0.0 { wait } else { 0.033 }));
         }
     }
-}
-
-/// Horizontal gradient from `left` to `right` across `rect`.
-fn hgradient(painter: &egui::Painter, rect: Rect, left: Color32, right: Color32) {
-    let mut mesh = egui::Mesh::default();
-    mesh.colored_vertex(rect.left_top(), left);
-    mesh.colored_vertex(rect.right_top(), right);
-    mesh.colored_vertex(rect.left_bottom(), left);
-    mesh.colored_vertex(rect.right_bottom(), right);
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(1, 3, 2);
-    painter.add(egui::Shape::mesh(mesh));
 }
 
 // ------------------------------------------------------------------ lyrics
@@ -310,7 +300,15 @@ enum Item {
 }
 
 fn lyrics_panel(app: &mut App, ui: &mut Ui, rect: Rect, now: f64, centered: bool) {
-    let Some((_, lyrics)) = &app.lyrics else {
+    // Lent out for the frame rather than cloned (the drawing needs `app` mutably).
+    let lyrics = app.lyrics.take();
+    lyrics_body(app, ui, rect, now, centered, lyrics.as_ref().map(|(_, l)| l.as_ref()));
+    app.lyrics = lyrics;
+}
+
+/// `lyrics`: None while loading, Some(None) when the song has none.
+fn lyrics_body(app: &mut App, ui: &mut Ui, rect: Rect, now: f64, centered: bool, lyrics: Option<Option<&Lyrics>>) {
+    let Some(lyrics) = lyrics else {
         ui.add_space(rect.height() * 0.35);
         ui.vertical_centered(|ui| {
             ui.spinner();
@@ -318,7 +316,7 @@ fn lyrics_panel(app: &mut App, ui: &mut Ui, rect: Rect, now: f64, centered: bool
         });
         return;
     };
-    let Some(lyrics) = lyrics.clone() else {
+    let Some(lyrics) = lyrics else {
         ui.add_space(rect.height() * 0.4);
         ui.vertical_centered(|ui| {
             ui.label(egui::RichText::new("No lyrics found for this song").font(theme::semibold(20.0)).color(theme::text_dim()));
@@ -344,11 +342,11 @@ fn lyrics_panel(app: &mut App, ui: &mut Ui, rect: Rect, now: f64, centered: bool
             }
             ui.add_space(20.0);
             let shown = extras.is_some() && (app.show_roman || app.show_trans);
-            ui.label(egui::RichText::new(credit(&lyrics, shown)).font(theme::regular(12.0)).color(theme::TEXT_FAINT));
+            ui.label(egui::RichText::new(credit(lyrics, shown)).font(theme::regular(12.0)).color(theme::TEXT_FAINT));
         });
         return;
     }
-    synced(app, ui, rect, &lyrics, now, centered);
+    synced(app, ui, rect, lyrics, now, centered);
 }
 
 fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, narrow: bool) {
@@ -390,7 +388,7 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, nar
     let active = items.iter().rposition(|it| started(it) <= pos_ms && !matches!(it, Item::Line(i) if lyrics.lines[*i].background));
 
     // Romanization and translation, laid out under their line.
-    let extras = app.lyrics_extras.as_ref().map(|(_, e)| e.clone());
+    let extras = app.lyrics_extras.as_ref().map(|(_, e)| e);
     let (show_roman, show_trans) = (app.show_roman, app.show_trans);
     let sub_gap = size * 0.08;
     // Same font family as the lyrics: romanization a step lighter, translation regular.
@@ -398,8 +396,8 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, nar
     let subs_for = |ui: &mut Ui, i: usize, bg: bool, scale: f32| -> [Option<std::sync::Arc<egui::Galley>>; 2] {
         let s = if bg { size * 0.62 } else { size } * scale;
         let get = |on: bool, v: Option<&Vec<Option<String>>>| v.filter(|_| on).and_then(|v| v.get(i).cloned().flatten());
-        let roman = get(show_roman, extras.as_ref().map(|e| &e.roman));
-        let trans = get(show_trans, extras.as_ref().map(|e| &e.trans));
+        let roman = get(show_roman, extras.map(|e| &e.roman));
+        let trans = get(show_trans, extras.map(|e| &e.trans));
         [
             roman.map(|t| ui.fonts_mut(|f| f.layout(t, theme::lyric_font(&style.font, roman_weight, s * 0.5), Color32::WHITE, width * scale))),
             trans.map(|t| ui.fonts_mut(|f| f.layout(t, theme::lyric_font(&style.font, crate::preset::Weight::Regular, s * 0.46), Color32::WHITE, width * scale))),
@@ -493,10 +491,9 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, nar
                 let lit_amt = theme::anim_bool(ui.ctx(), ("lyr-lit", k), lit, 0.35);
                 // The active line grows a little (laid out at the bigger size, with the
                 // wrap width scaled to match so it breaks at the same words).
-                let g = if max_scale > 1.001 && lit_amt > 0.0 {
-                    let s = 1.0 + (max_scale - 1.0) * lit_amt;
-                    let s = (s * 200.0).round() / 200.0;
-                    ui.fonts_mut(|f| f.layout(display_text(l), font(size * s, l.background), Color32::WHITE, width * s))
+                let grow = if max_scale > 1.001 && lit_amt > 0.0 { ((1.0 + (max_scale - 1.0) * lit_amt) * 200.0).round() / 200.0 } else { 1.0 };
+                let g = if grow > 1.0 {
+                    ui.fonts_mut(|f| f.layout(display_text(l), font(size * grow, l.background), Color32::WHITE, width * grow))
                 } else {
                     base_g.clone()
                 };
@@ -574,7 +571,7 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, nar
                         (style.glow.clamp(0.0, 1.0), theme::with_alpha(glow_color, lit_amt * edge_fade * (0.2 + 0.5 * style.glow.clamp(0.0, 1.0))))
                     }),
                 };
-                paint_text(&mut app.textfx, ui.ctx(), &painter, &g, pos, progress, size * scale, &look);
+                paint_text(&mut app.textfx, ui.ctx(), &painter, &g, (&base_g, grow), pos, progress, size * scale, &look);
 
                 // Romanization and translation under the line, drawn the same way: same
                 // font, scale, lift, colours and glow. Romanization follows the fill in
@@ -584,8 +581,8 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, nar
                 let glyphs = |g: &egui::Galley| g.rows.iter().map(|r| r.row.glyphs.len()).sum::<usize>() as f32;
                 let frac = if progress.is_finite() { progress / glyphs(&g).max(1.0) } else { progress };
                 let mut sy = line_rect.bottom().max(ink.bottom()) + sub_gap * scale;
-                for (j, sg) in sg.iter().enumerate() {
-                    let Some(sg) = sg else { continue };
+                for (j, (sg, base_sg)) in sg.iter().zip(&subs[k]).enumerate() {
+                    let (Some(sg), Some(base_sg)) = (sg, base_sg) else { continue };
                     let sx = if centered {
                         rect.center().x - sg.size().x / 2.0
                     } else if l.alt_singer {
@@ -601,7 +598,7 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, nar
                     // Small text drowns in a glow sized for the line, so it gets half as much.
                     let glow = look.glow.map(|(st, tint)| (st, theme::with_alpha(tint, 0.5)));
                     let sub = Paint { a: a * dim, radius: radius * 0.6, sung: theme::with_alpha(look.sung, dim), glow, ..look };
-                    paint_text(&mut app.textfx, ui.ctx(), &painter, sg, sp, sub_progress, sub_size, &sub);
+                    paint_text(&mut app.textfx, ui.ctx(), &painter, sg, (base_sg, if scale > 1.001 { scale } else { 1.0 }), sp, sub_progress, sub_size, &sub);
                 }
                 // Click a line to jump there.
                 // Only inside the lyrics area: lines running past its edge mustn't take
@@ -647,17 +644,22 @@ struct Paint {
 
 /// Draw one galley of a lyric line: unsung text (blurred while inactive), then the
 /// sung part up to `progress` characters, glowing, lifted and feathered at the edge.
+/// `fx_src`: the line at its resting size and how much `g` is grown from it. Blur and
+/// glow are rasterized from that and drawn scaled, so a line growing as it lights
+/// reuses one texture instead of rasterizing a new one every frame.
 #[allow(clippy::too_many_arguments)]
 fn paint_text(
     fx: &mut super::textfx::TextFx,
     ctx: &egui::Context,
     painter: &egui::Painter,
     g: &std::sync::Arc<egui::Galley>,
+    fx_src: (&std::sync::Arc<egui::Galley>, f32),
     pos: Pos2,
     progress: f32,
     font_size: f32,
     p: &Paint,
 ) {
+    let (src, grow) = fx_src;
     let rows = split_rows(g, pos, progress);
     if p.a > 0.003 {
         if p.lit {
@@ -684,13 +686,13 @@ fn paint_text(
                 }
             }
         } else {
-            let blurred = if p.blur_mix > 0.01 && p.radius > 0.2 { fx.get(ctx, g, p.radius, 1.25) } else { None };
+            let blurred = if p.blur_mix > 0.01 && p.radius > 0.2 { fx.get(ctx, src, p.radius / grow, 1.25) } else { None };
             match blurred {
                 Some(b) => {
                     if p.blur_mix < 0.99 {
                         painter.galley_with_override_text_color(pos, g.clone(), theme::with_alpha(Color32::WHITE, p.a * (1.0 - p.blur_mix)));
                     }
-                    b.paint(painter, pos, theme::with_alpha(Color32::WHITE, p.a * p.blur_mix));
+                    b.paint(painter, pos, grow, theme::with_alpha(Color32::WHITE, p.a * p.blur_mix));
                 }
                 None => painter.galley_with_override_text_color(pos, g.clone(), theme::with_alpha(Color32::WHITE, p.a)),
             }
@@ -707,10 +709,10 @@ fn paint_text(
                 // A soft halo that spreads with the theme's strength. A tight, bright one
                 // fills the gaps inside letters and makes the text itself look blurred.
                 let gr = (font_size * (0.12 + 0.25 * strength)).max(2.5);
-                if let Some(b) = fx.get(ctx, g, gr, 1.3) {
+                if let Some(b) = fx.get(ctx, src, gr / grow, 1.3) {
                     // Only sideways past the row: above and below are the neighbouring rows.
                     let gclip = Rect::from_min_max(pos2(r.left - gr * 2.0, r.top), pos2(solid_end, r.bottom));
-                    b.paint(&painter.with_clip_rect(gclip.intersect(painter.clip_rect())), pos + p.lift, tint);
+                    b.paint(&painter.with_clip_rect(gclip.intersect(painter.clip_rect())), pos + p.lift, grow, tint);
                 }
             }
             painter.with_clip_rect(clip.intersect(painter.clip_rect())).galley_with_override_text_color(pos + p.lift, g.clone(), p.sung);

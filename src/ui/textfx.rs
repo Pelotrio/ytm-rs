@@ -19,8 +19,10 @@ pub struct Blurred {
 }
 
 impl Blurred {
-    pub fn paint(&self, painter: &egui::Painter, galley_pos: Pos2, tint: Color32) {
-        let rect = Rect::from_min_size(galley_pos + self.offset, self.size);
+    /// Draw it for the galley at `galley_pos`, scaled by `scale` (for the same text laid
+    /// out that much bigger).
+    pub fn paint(&self, painter: &egui::Painter, galley_pos: Pos2, scale: f32, tint: Color32) {
+        let rect = Rect::from_min_size(galley_pos + self.offset * scale, self.size * scale);
         painter.image(self.tex.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), tint);
     }
 }
