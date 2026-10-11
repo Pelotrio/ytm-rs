@@ -279,6 +279,11 @@ h2 {
 }
 .lyr__ro { display: block; margin-top: 4px; font: 700 clamp(14px, 1.4vw, 17px)/1.35 var(--sans); color: rgba(255, 255, 255, 0.92); }
 .lyr__tr { display: block; margin-top: 2px; font: 400 clamp(14px, 1.35vw, 16px)/1.35 var(--sans); color: rgba(255, 255, 255, 0.72); }
+.lyr__jp { position: relative; }
+.lyr.is-active .lyr__jp::before {
+  content: attr(data-text); position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  color: transparent; text-shadow: var(--glow, none);
+}
 .player:not(.show-romaji) .lyr__ro, .player:not(.show-trans) .lyr__tr { display: none; }
 .lyr.is-active { --a: 1; }
 /* active line fill (word-by-word sweep) */
@@ -294,11 +299,11 @@ h2 {
 /* style: Lyric Glow, MatiuxXcd */
 .player[data-theme="glow"] { --dim: 0.52; }
 .player[data-theme="glow"] .lyr.is-active { --scale: 1.05; }
-.player[data-theme="glow"] .lyr.is-active .lyr__jp { filter: drop-shadow(0 0 10px rgba(103, 217, 255, 0.75)) drop-shadow(0 0 22px rgba(103, 217, 255, 0.45)); }
+.player[data-theme="glow"] .lyr.is-active { --glow: 0 0 10px rgba(103, 217, 255, 0.8), 0 0 26px rgba(103, 217, 255, 0.5); }
 /* style: Burn, semicolonhope */
 .player[data-theme="burn"] { --dim: 0.75; --sung: #ffd6a8; --unsung: #fff; }
 .player[data-theme="burn"] .lyr__jp, .player[data-theme="burn"] .lyr__ro { font-family: var(--jp); }
-.player[data-theme="burn"] .lyr.is-active .lyr__jp { filter: drop-shadow(0 0 8px rgba(255, 106, 0, 0.9)) drop-shadow(0 0 24px rgba(255, 60, 0, 0.6)); }
+.player[data-theme="burn"] .lyr.is-active { --glow: 0 0 8px rgba(255, 106, 0, 0.95), 0 0 26px rgba(255, 60, 0, 0.6); }
 .player[data-theme="burn"] .lyr.is-past .lyr__jp { color: #5a1420; }
 /* style: Opacity Based Karaoke, semicolonhope */
 .player[data-theme="karaoke"] { --dim: 0.22; --sung: #dedede; --unsung: rgba(255, 255, 255, 0.18); }
@@ -376,12 +381,16 @@ h2 {
 .card__icon svg { width: 20px; height: 20px; fill: none; stroke: #ffd2c4; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .card h3 { margin: 0 0 8px; font: 700 21px/1.2 var(--display); letter-spacing: -0.01em; }
 .card p { margin: 0; color: var(--ink-2); font-size: 15.5px; line-height: 1.6; }
-.card--shot { display: grid; grid-template-columns: 0.8fr 1.2fr; gap: 24px; align-items: center; overflow: hidden; padding-right: 0; }
-.card--shot img { border-radius: 12px 0 0 12px; border: 1px solid var(--line-2); border-right: 0; box-shadow: -20px 20px 60px -20px rgba(0, 0, 0, 0.8); }
+.card--shot { display: grid; grid-template-columns: 0.8fr 1.2fr; gap: 28px; overflow: hidden; padding: 28px 0 0 28px; min-height: 360px; }
+.card--shot .card__copy { padding-bottom: 28px; align-self: center; }
+.card__window { align-self: end; position: relative; height: 300px; border-radius: 14px 0 0 0; overflow: hidden; border: 1px solid var(--line-2); border-right: 0; border-bottom: 0; box-shadow: -24px -10px 60px -24px rgba(0, 0, 0, 0.9); }
+.card__window img { width: 100%; height: 100%; object-fit: cover; object-position: left top; transition: transform 0.8s var(--ease); transform-origin: left top; }
+.card--shot:hover .card__window img { transform: scale(1.03); }
 @media (max-width: 900px) {
   .bento { grid-template-columns: 1fr 1fr; }
-  .card--shot { grid-template-columns: 1fr; padding-right: 28px; }
-  .card--shot img { border-radius: 12px; border-right: 1px solid var(--line-2); }
+  .card--shot { grid-template-columns: 1fr; gap: 0; }
+  .card--shot .card__copy { padding-right: 28px; }
+  .card__window { height: 240px; margin-left: 0; }
 }
 @media (max-width: 620px) {
   .bento { grid-template-columns: 1fr; }
@@ -406,8 +415,8 @@ h2 {
   mask-image: radial-gradient(closest-side, #000 50%, transparent);
 }
 .marquee3d__plane {
-  position: absolute; left: 50%; top: 50%; width: 1100px;
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px;
+  position: absolute; left: 50%; top: 50%; width: 1500px;
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 18px;
   transform: translate(-50%, -50%) rotateX(48deg) rotateZ(-38deg) scale(0.92);
   transform-style: preserve-3d;
 }

@@ -278,7 +278,7 @@ void main(){
     const cover = drawDemoCover($("[data-cover]", player));
     const warp = makeWarp($('[data-warp="player"]', player), cover, { sat: 1.25, scale: 0.12, speed: 1.6 });
 
-    track.innerHTML = LINES.map((l, i) => `<button type="button" class="lyr" data-i="${i}" aria-label="Jump to line ${i + 1}: ${l.tr}"><span class="lyr__jp" lang="ja">${l.jp}</span><span class="lyr__ro">${l.ro}</span><span class="lyr__tr">${l.tr}</span></button>`).join("");
+    track.innerHTML = LINES.map((l, i) => `<button type="button" class="lyr" data-i="${i}" aria-label="Jump to line ${i + 1}: ${l.tr}"><span class="lyr__jp" lang="ja" data-text="${l.jp}">${l.jp}</span><span class="lyr__ro">${l.ro}</span><span class="lyr__tr">${l.tr}</span></button>`).join("");
     const rows = $$(".lyr", track);
     player.classList.add("show-romaji", "show-trans");
 
@@ -485,9 +485,19 @@ void main(){
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
       .then((data) => { try { sessionStorage.setItem(key, JSON.stringify({ at: Date.now(), data })); } catch {} return data; });
   };
-  cached("ytmrs-repo", `https://api.github.com/repos/${REPO}`).then((r) => {
-    if (typeof r.stargazers_count === "number") $$("[data-stars]").forEach((el) => (el.textContent = r.stargazers_count.toLocaleString()));
-  }).catch(() => {});
+  // stars are fetched fresh (GitHub caches 60 s) and again when you come back to the tab, e.g. after starring
+  let starsAt = 0;
+  const loadStars = () => {
+    if (Date.now() - starsAt < 30000) return;
+    starsAt = Date.now();
+    fetch(`https://api.github.com/repos/${REPO}`, { headers: { Accept: "application/vnd.github+json" }, cache: "no-cache" })
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((r) => { if (typeof r.stargazers_count === "number") $$("[data-stars]").forEach((el) => (el.textContent = r.stargazers_count.toLocaleString())); })
+      .catch(() => {});
+  };
+  loadStars();
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) loadStars(); });
+  addEventListener("focus", loadStars);
   cached("ytmrs-release", `https://api.github.com/repos/${REPO}/releases/latest`).then((rel) => {
     if (!rel || !rel.tag_name) return;
     $$("[data-version]").forEach((el) => (el.textContent = rel.tag_name));
