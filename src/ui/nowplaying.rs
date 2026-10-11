@@ -76,11 +76,12 @@ pub fn overlay(app: &mut App, ctx: &egui::Context, now: f64) {
 }
 
 fn body(app: &mut App, ui: &mut Ui, now: f64) {
-    use crate::preset::{Layout, Shape, Side};
+    use crate::preset::{Layout, Side};
     let Some(track) = app.current().cloned() else { return };
     let look = app.look();
     let cs = &look.cover;
     let area = ui.max_rect();
+    let no_lyrics = matches!(&app.lyrics, Some((_, None)));
     // Header
     let header = Rect::from_min_size(area.min, vec2(area.width(), 44.0));
     let mut hui = ui.new_child(egui::UiBuilder::new().max_rect(header).layout(egui::Layout::left_to_right(egui::Align::Center)));
@@ -105,10 +106,19 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
         if widgets::chip(ui, "Up next", app.np_tab == NpTab::UpNext).clicked() {
             app.np_tab = if app.np_tab == NpTab::UpNext { NpTab::Art } else { NpTab::UpNext };
         }
-        if widgets::chip(ui, "Lyrics", app.np_tab == NpTab::Lyrics).clicked() {
+        // A song without lyrics: the chip is off and does nothing, but the choice stays
+        // Lyrics so the next song that has them shows them.
+        let lyr = ui.scope(|ui| {
+            if no_lyrics {
+                ui.disable();
+                ui.multiply_opacity(0.45);
+            }
+            widgets::chip(ui, "Lyrics", app.np_tab == NpTab::Lyrics && !no_lyrics).on_disabled_hover_text("No lyrics for this song")
+        });
+        if lyr.inner.clicked() {
             app.np_tab = if app.np_tab == NpTab::Lyrics { NpTab::Art } else { NpTab::Lyrics };
         }
-        if app.np_tab == NpTab::Lyrics {
+        if app.np_tab == NpTab::Lyrics && !no_lyrics {
             ui.add_space(4.0);
             let tr = widgets::chip(ui, "文A", app.show_roman || app.show_trans).on_hover_text("Romanization and translation");
             egui::Popup::menu(&tr).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
@@ -124,103 +134,131 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
     });
 
     let content = Rect::from_min_max(pos2(area.left(), header.bottom() + 12.0), area.max);
-    // No lyrics for this song: show the artwork instead of an empty panel.
-    let no_lyrics = matches!(&app.lyrics, Some((_, None)));
-    let art_only = app.np_tab == NpTab::Art || (app.np_tab == NpTab::Lyrics && no_lyrics);
-    let narrow = content.width() < 860.0;
-    let lyrics_only = !art_only && (narrow || cs.layout == Layout::LyricsOnly);
-    // reCover: the backdrop cover sits on the left, so the lyrics take the right side.
-    let beside_cover = lyrics_only && !narrow && cs.layout == Layout::LyricsOnly && look.background.mode == crate::preset::BgMode::CoverFullbleed;
-    let centered = lyrics_only && !beside_cover;
-    let right = if beside_cover {
-        Rect::from_min_max(pos2(content.left() + content.width() * 0.46, content.top()), content.max)
-    } else if lyrics_only {
-        content
+    // The side panel (lyrics / up next) slides in and out when its chip is toggled.
+    // A song without lyrics shows just the artwork, with no transition.
+    let last_id = egui::Id::new("np-last-panel");
+    let panel_tab = if app.np_tab == NpTab::Art {
+        ui.ctx().data(|d| d.get_temp(last_id)).unwrap_or(NpTab::Lyrics)
     } else {
-        // Cover column: artwork and track info, on the preset's side.
+        ui.ctx().data_mut(|d| d.insert_temp(last_id, app.np_tab));
+        app.np_tab
+    };
+    let shown = theme::ease_in_out(ui.ctx().animate_bool_with_time(egui::Id::new("np-panel"), app.np_tab != NpTab::Art, 0.45));
+    let p = if panel_tab == NpTab::Lyrics && no_lyrics { 0.0 } else { shown };
+    let narrow = content.width() < 860.0;
+    let lyrics_only = narrow || cs.layout == Layout::LyricsOnly;
+    // reCover: the backdrop cover sits on the left, so the lyrics take the right side.
+    let beside_cover = !narrow && cs.layout == Layout::LyricsOnly && look.background.mode == crate::preset::BgMode::CoverFullbleed;
+    let centered = lyrics_only && !beside_cover;
+    // Artwork alone: centered.
+    let col_art = Rect::from_center_size(content.center(), vec2(content.width().min(content.height() * 0.9), content.height()));
+    let slide = 72.0;
+    let right = if lyrics_only {
+        // No cover column next to the panel: the artwork fades in from the left as the panel leaves.
+        if p < 0.999 {
+            let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(content));
+            // Staggered with the panel (which fades over the other end of `p`), so the
+            // two don't sit on top of each other mid-way.
+            cui.multiply_opacity(((0.6 - p) / 0.6).clamp(0.0, 1.0));
+            cover_column(app, &mut cui, col_art.translate(vec2(-slide * p, 0.0)), &track, no_lyrics, now);
+        }
+        if beside_cover { Rect::from_min_max(pos2(content.left() + content.width() * 0.46, content.top()), content.max) } else { content }
+    } else {
+        // Cover column, on the preset's side; it glides to the center as the panel leaves.
         let frac = if cs.layout == Layout::CoverHero { 0.5 } else { 0.42 };
         let col_w = content.width() * frac;
-        let col = if art_only {
-            Rect::from_center_size(content.center(), vec2(content.width().min(content.height() * 0.9), content.height()))
-        } else if cs.side == Side::Right {
+        let col_panel = if cs.side == Side::Right {
             Rect::from_min_size(pos2(content.right() - col_w, content.top()), vec2(col_w, content.height()))
         } else {
             Rect::from_min_size(content.min, vec2(col_w, content.height()))
         };
-        let side = (col.width() * 0.82 * cs.size.clamp(0.5, 1.35)).min(col.height() - 110.0).max(160.0);
-        let art = Rect::from_center_size(pos2(col.center().x, col.top() + side / 2.0 + (col.height() - side - 110.0).max(0.0) * 0.35), Vec2::splat(side));
-        let round = cs.shape != Shape::Rounded;
-        let radius = if round { side / 2.0 } else { cs.radius.clamp(0.0, side / 2.0) };
-        let cr = egui::CornerRadius::same(radius.min(255.0) as u8);
-        if cs.glow > 0.0 {
-            let s = egui::epaint::Shadow { offset: [0, 16], blur: 90, spread: 6, color: theme::with_alpha(app.accent_color(), cs.glow.min(1.0) * 0.7) };
-            ui.painter().add(s.as_shape(art, cr));
-        }
-        if cs.shadow > 0.0 {
-            widgets::soft_shadow(ui, art, radius.min(255.0), 60.0, cs.shadow.min(1.0));
-        }
-        let tint = Color32::from_gray((cs.brightness.clamp(0.1, 1.0) * 255.0) as u8);
-        if round {
-            if cs.shape == Shape::Record && app.playing() {
-                let dt = ui.input(|i| i.stable_dt).min(0.1) as f64;
-                app.record_angle = (app.record_angle + dt * std::f64::consts::TAU / cs.spin_secs.max(4.0) as f64) % std::f64::consts::TAU;
-            }
-            let angle = if cs.shape == Shape::Record { app.record_angle as f32 } else { 0.0 };
-            widgets::paint_disc(ui, art.center(), side / 2.0, &track.thumbs, angle, tint);
-            if cs.shape == Shape::Record {
-                // Vinyl: faint grooves and a spindle hole.
-                let p = ui.painter();
-                for i in 1..6 {
-                    p.circle_stroke(art.center(), side / 2.0 * (0.42 + i as f32 * 0.1), egui::Stroke::new(1.0, theme::shade(0.18)));
-                }
-                p.circle_filled(art.center(), side * 0.09, theme::shade(0.35));
-                p.circle_filled(art.center(), side * 0.022, Color32::from_rgb(10, 10, 12));
-            }
-        } else {
-            paint_cover(ui, art, &track.thumbs, radius, 1.0);
-            if cs.brightness < 0.99 {
-                ui.painter().rect_filled(art, cr, theme::shade(1.0 - cs.brightness));
-            }
-        }
-        let cover = named(ui.interact(art, ui.id().with(("cover-playback", &track.id)), Sense::click()), if app.playing() { "Pause" } else { "Play" })
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
-        let hover = theme::anim_bool(ui.ctx(), ("cover-playback-hover", &track.id), cover.hovered(), 0.16);
-        if hover > 0.0 {
-            ui.painter().rect_filled(art, cr, theme::shade(0.28 * hover));
-            ui.painter().circle_filled(art.center(), 38.0, theme::shade(0.58 * hover));
-            widgets::icon_at(ui, art.center(), if app.playing() || app.buffering { icon::PAUSE } else { icon::PLAY }, 37.0, theme::with_alpha(Color32::WHITE, hover));
-        }
-        if cover.clicked() { app.actions.push(Action::TogglePlay); }
-        let w = side;
-        let title_y = art.bottom() + 22.0;
-        text_at(ui, pos2(art.left(), title_y), &track.title, theme::bold(28.0), Color32::WHITE, w);
-        // Each artist opens their own page (features included).
-        let line = track.artist_line();
-        widgets::linked_text(ui, pos2(art.left(), title_y + 40.0), &line, &track.artists, theme::regular(17.0), theme::text_dim(), w, &mut app.actions);
-        if art_only && app.np_tab == NpTab::Lyrics {
-            // A brief note, faded out after a few seconds.
-            let since = ui.ctx().memory_mut(|m| *m.data.get_temp_mut_or_insert_with(egui::Id::new(("no-lyrics", &track.id)), || now));
-            let a = (1.0 - ((now - since - 3.0) / 1.0) as f32).clamp(0.0, 1.0);
-            if a > 0.0 {
-                let c = theme::with_alpha(theme::text_dim(), a * 0.8);
-                text_at(ui, pos2(art.left(), title_y + 68.0), "No lyrics for this song", theme::regular(14.0), c, w);
-                ui.ctx().request_repaint();
-            }
-        }
+        let col = Rect::from_min_max(col_art.min.lerp(col_panel.min, p), col_art.max.lerp(col_panel.max, p));
+        cover_column(app, ui, col, &track, no_lyrics, now);
         if cs.side == Side::Right {
-            Rect::from_min_max(content.min, pos2(col.left() - 28.0, content.bottom()))
+            Rect::from_min_max(content.min, pos2(col_panel.left() - 28.0, content.bottom()))
         } else {
-            Rect::from_min_max(pos2(col.right() + 28.0, content.top()), content.max)
+            Rect::from_min_max(pos2(col_panel.right() + 28.0, content.top()), content.max)
         }
     };
-    if art_only {
+    if p <= 0.001 {
         return;
     }
-    let mut rui = ui.new_child(egui::UiBuilder::new().max_rect(right));
-    match app.np_tab {
-        NpTab::Lyrics => lyrics_panel(app, &mut rui, right, now, centered),
+    let toward = if !lyrics_only && cs.side == Side::Right { -slide } else { slide };
+    let rect = right.translate(vec2(toward * (1.0 - p), 0.0));
+    let mut rui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+    rui.set_clip_rect(content.intersect(ui.clip_rect()));
+    rui.multiply_opacity(if lyrics_only { ((p - 0.4) / 0.6).clamp(0.0, 1.0) } else { p });
+    match panel_tab {
+        NpTab::Lyrics => lyrics_panel(app, &mut rui, rect, now, centered),
         NpTab::UpNext => super::shell::queue_list(app, &mut rui, "np"),
         NpTab::Art => {}
+    }
+}
+
+/// Artwork with the title and artists under it, laid out in `col`.
+fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Track, no_lyrics: bool, now: f64) {
+    use crate::preset::Shape;
+    let look = app.look();
+    let cs = &look.cover;
+    let side = (col.width() * 0.82 * cs.size.clamp(0.5, 1.35)).min(col.height() - 110.0).max(160.0);
+    let art = Rect::from_center_size(pos2(col.center().x, col.top() + side / 2.0 + (col.height() - side - 110.0).max(0.0) * 0.35), Vec2::splat(side));
+    let round = cs.shape != Shape::Rounded;
+    let radius = if round { side / 2.0 } else { cs.radius.clamp(0.0, side / 2.0) };
+    let cr = egui::CornerRadius::same(radius.min(255.0) as u8);
+    if cs.glow > 0.0 {
+        let s = egui::epaint::Shadow { offset: [0, 16], blur: 90, spread: 6, color: theme::with_alpha(app.accent_color(), cs.glow.min(1.0) * 0.7) };
+        ui.painter().add(s.as_shape(art, cr));
+    }
+    if cs.shadow > 0.0 {
+        widgets::soft_shadow(ui, art, radius.min(255.0), 60.0, cs.shadow.min(1.0));
+    }
+    let tint = Color32::from_gray((cs.brightness.clamp(0.1, 1.0) * 255.0) as u8);
+    if round {
+        if cs.shape == Shape::Record && app.playing() {
+            let dt = ui.input(|i| i.stable_dt).min(0.1) as f64;
+            app.record_angle = (app.record_angle + dt * std::f64::consts::TAU / cs.spin_secs.max(4.0) as f64) % std::f64::consts::TAU;
+        }
+        let angle = if cs.shape == Shape::Record { app.record_angle as f32 } else { 0.0 };
+        widgets::paint_disc(ui, art.center(), side / 2.0, &track.thumbs, angle, tint);
+        if cs.shape == Shape::Record {
+            // Vinyl: faint grooves and a spindle hole.
+            let p = ui.painter();
+            for i in 1..6 {
+                p.circle_stroke(art.center(), side / 2.0 * (0.42 + i as f32 * 0.1), egui::Stroke::new(1.0, theme::shade(0.18)));
+            }
+            p.circle_filled(art.center(), side * 0.09, theme::shade(0.35));
+            p.circle_filled(art.center(), side * 0.022, Color32::from_rgb(10, 10, 12));
+        }
+    } else {
+        paint_cover(ui, art, &track.thumbs, radius, 1.0);
+        if cs.brightness < 0.99 {
+            ui.painter().rect_filled(art, cr, theme::shade(1.0 - cs.brightness));
+        }
+    }
+    let cover = named(ui.interact(art, ui.id().with(("cover-playback", &track.id)), Sense::click()), if app.playing() { "Pause" } else { "Play" })
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let hover = theme::anim_bool(ui.ctx(), ("cover-playback-hover", &track.id), cover.hovered(), 0.16);
+    if hover > 0.0 {
+        ui.painter().rect_filled(art, cr, theme::shade(0.28 * hover));
+        ui.painter().circle_filled(art.center(), 38.0, theme::shade(0.58 * hover));
+        widgets::icon_at(ui, art.center(), if app.playing() || app.buffering { icon::PAUSE } else { icon::PLAY }, 37.0, theme::with_alpha(Color32::WHITE, hover));
+    }
+    if cover.clicked() { app.actions.push(Action::TogglePlay); }
+    let w = side;
+    let title_y = art.bottom() + 22.0;
+    text_at(ui, pos2(art.left(), title_y), &track.title, theme::bold(28.0), Color32::WHITE, w);
+    // Each artist opens their own page (features included).
+    let line = track.artist_line();
+    widgets::linked_text(ui, pos2(art.left(), title_y + 40.0), &line, &track.artists, theme::regular(17.0), theme::text_dim(), w, &mut app.actions);
+    if no_lyrics && app.np_tab == NpTab::Lyrics {
+        // A brief note, faded out after a few seconds.
+        let since = ui.ctx().memory_mut(|m| *m.data.get_temp_mut_or_insert_with(egui::Id::new(("no-lyrics", &track.id)), || now));
+        let a = (1.0 - ((now - since - 3.0) / 1.0) as f32).clamp(0.0, 1.0);
+        if a > 0.0 {
+            let c = theme::with_alpha(theme::text_dim(), a * 0.8);
+            text_at(ui, pos2(art.left(), title_y + 68.0), "No lyrics for this song", theme::regular(14.0), c, w);
+            ui.ctx().request_repaint();
+        }
     }
 }
 
@@ -598,11 +636,24 @@ fn paint_text(
         if p.lit {
             // Unsung text: only the part the fill hasn't reached.
             for r in &rows {
-                // A finished row has no soft edge left to feather.
-                let from = if p.soft && r.edge < r.right { r.edge - 6.0 } else { r.edge };
+                let feathered = p.soft && r.edge > r.left && r.edge < r.right;
+                // Past the feather the text is plainly unsung.
+                let from = if feathered { r.edge + 6.0 } else { r.edge };
                 if from < r.right {
                     let clip = Rect::from_min_max(pos2(from.max(r.left), r.top), pos2(r.right, r.bottom));
                     painter.with_clip_rect(clip.intersect(painter.clip_rect())).galley_with_override_text_color(pos, g.clone(), theme::with_alpha(Color32::WHITE, p.a));
+                }
+                // In the feather, unsung text crossfades with the sung bands drawn below,
+                // at the same partial lift, so the glyph under the edge isn't seen twice.
+                if feathered {
+                    for b in 0..4 {
+                        let x0 = r.edge - 6.0 + b as f32 * 3.0;
+                        let band = Rect::from_min_max(pos2(x0, r.top), pos2(x0 + 3.0, r.bottom));
+                        let t = 1.0 - (b as f32 + 0.5) / 4.0;
+                        painter
+                            .with_clip_rect(band.intersect(painter.clip_rect()))
+                            .galley_with_override_text_color(pos + p.lift * t, g.clone(), theme::with_alpha(Color32::WHITE, p.a * (1.0 - t)));
+                    }
                 }
             }
         } else {
@@ -630,7 +681,8 @@ fn paint_text(
                 // fills the gaps inside letters and makes the text itself look blurred.
                 let gr = (font_size * (0.12 + 0.25 * strength)).max(2.5);
                 if let Some(b) = fx.get(ctx, g, gr, 1.3) {
-                    let gclip = Rect::from_min_max(pos2(r.left - gr * 2.0, r.top - gr * 2.0), pos2(solid_end, r.bottom + gr * 2.0));
+                    // Only sideways past the row: above and below are the neighbouring rows.
+                    let gclip = Rect::from_min_max(pos2(r.left - gr * 2.0, r.top), pos2(solid_end, r.bottom));
                     b.paint(&painter.with_clip_rect(gclip.intersect(painter.clip_rect())), pos + p.lift, tint);
                 }
             }
@@ -720,15 +772,31 @@ fn split_rows(g: &std::sync::Arc<egui::Galley>, pos: Pos2, progress: f32) -> Vec
     let mut out = Vec::with_capacity(g.rows.len());
     let mut remaining = progress;
     let last = g.rows.len().saturating_sub(1);
+    // Where each row's glyphs are inked. Row boxes come from the Latin font, and CJK
+    // fallback glyphs stand taller, poking out above and below them. Rows meet halfway
+    // between their inked glyphs, so a row's clip never reaches its neighbours' glyphs
+    // (which would paint them twice: lit and unlit, a lift apart).
+    let ink: Vec<(f32, f32)> = g
+        .rows
+        .iter()
+        .map(|row| {
+            let y = pos.y + row.pos.y;
+            let (mut t, mut b) = (f32::INFINITY, f32::NEG_INFINITY);
+            for gl in &row.row.glyphs {
+                if gl.uv_rect.size.y > 0.0 {
+                    t = t.min(y + gl.pos.y + gl.uv_rect.offset.y);
+                    b = b.max(y + gl.pos.y + gl.uv_rect.offset.y + gl.uv_rect.size.y);
+                }
+            }
+            if t.is_finite() { (t.min(y), b.max(y + row.row.size.y)) } else { (y, y + row.row.size.y) }
+        })
+        .collect();
     for (r, row) in g.rows.iter().enumerate() {
         let n = row.row.glyphs.len() as f32;
-        // Row size comes from the Latin font; CJK fallback glyphs stand taller and would
-        // poke out of a tight clip, leaving their tops unlit. Leave the outer edges open
-        // and give inner rows a quarter-row margin.
-        let pad = row.row.size.y * 0.25;
         let row_rect = Rect::from_min_size(pos + row.pos.to_vec2(), row.row.size);
-        let top = if r == 0 { row_rect.top() - row.row.size.y } else { row_rect.top() - pad };
-        let bottom = if r == last { row_rect.bottom() + row.row.size.y } else { row_rect.bottom() + pad };
+        // The outer edges stay open (lift, tall glyphs).
+        let top = if r == 0 { row_rect.top() - row.row.size.y } else { (ink[r - 1].1 + ink[r].0) / 2.0 };
+        let bottom = if r == last { row_rect.bottom() + row.row.size.y } else { (ink[r].1 + ink[r + 1].0) / 2.0 };
         let (left, right) = (row_rect.left() - 4.0, row_rect.right() + 4.0);
         let edge = if n == 0.0 || remaining <= 0.0 {
             left

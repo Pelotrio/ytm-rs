@@ -1640,7 +1640,12 @@ fn fit_window_to_monitor(ctx: &egui::Context) {
         ctx.data_mut(|d| d.insert_temp(done, true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(-4000.0, 0.0)));
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1920.0, 1057.0)));
+        // YTM_SIZE=WxH tests other window sizes (e.g. the narrow layout).
+        let size = std::env::var("YTM_SIZE").ok().and_then(|v| {
+            let (w, h) = v.split_once('x')?;
+            Some(egui::vec2(w.parse().ok()?, h.parse().ok()?))
+        });
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size.unwrap_or(egui::vec2(1920.0, 1057.0))));
         return;
     }
     let (outer, monitor, maximized) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().monitor_size, i.viewport().maximized));
