@@ -7,14 +7,15 @@ repository = "https://github.com/grapedjuice/ytm-rs"
 
 [dependencies]
 anyhow = "1.0.104"
-base64 = "0.23.1"
+base64 = "0.22.1"
+bytes = "1.12.1"
 crossbeam-channel = "0.5.17"
 directories = "6.0.0"
 discord-rich-presence = "1.1.0"
 eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "accesskit", "persistence", "wayland", "x11"] }
 egui = "0.36.2"
 egui_extras = { version = "0.36.2", default-features = false, features = ["image"] }
-env_logger = "0.11.11"
+env_logger = { version = "0.11.11", default-features = false, features = ["humantime"] }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 log = "0.4.34"
 memmap2 = "0.9.11"

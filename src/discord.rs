@@ -36,9 +36,6 @@ pub struct Discord {
 impl Discord {
     pub fn spawn() -> Option<Self> {
         let id = std::env::var("YTM_DISCORD_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| CLIENT_ID.to_owned());
-        if id.is_empty() {
-            return None;
-        }
         let (tx, rx) = crossbeam_channel::unbounded();
         std::thread::Builder::new().name("discord".into()).spawn(move || run(&id, rx)).ok()?;
         Some(Self { tx })
