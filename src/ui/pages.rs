@@ -485,8 +485,12 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
         for (t, label) in [(LibTab::Playlists, "Playlists"), (LibTab::Songs, "Liked songs"), (LibTab::Albums, "Albums"), (LibTab::History, "History"), (LibTab::Uploads, "Uploads")] {
             if chip(ui, label, tab == t).clicked() {
                 // Tabs swap in place (no history entry); the current one refreshes.
-                app.page = Page::Library(t);
-                app.page_loaded();
+                if tab == t {
+                    app.refresh();
+                } else {
+                    app.page = Page::Library(t);
+                    app.page_loaded();
+                }
             }
         }
     });

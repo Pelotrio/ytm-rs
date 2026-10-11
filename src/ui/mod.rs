@@ -395,7 +395,7 @@ impl App {
         self.np_open = false;
         if page == self.page {
             // Clicking the page you're on refreshes it.
-            self.page_loaded();
+            self.refresh();
             return;
         }
         let prev = std::mem::replace(&mut self.page, page);
@@ -418,6 +418,14 @@ impl App {
             self.back.push(std::mem::replace(&mut self.page, p));
             self.page_loaded();
         }
+    }
+
+    /// Reload the current page's data in place: no page transition, the page stays as
+    /// it is until the new data arrives.
+    fn refresh(&mut self) {
+        let changed = self.page_changed;
+        self.page_loaded();
+        self.page_changed = changed;
     }
 
     /// Start the page transition and (re)load the page's data. Every page refreshes on
