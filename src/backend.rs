@@ -195,6 +195,9 @@ pub struct Backend {
     jsc: Arc<jsc::Solver>,
     /// Whether the signed-in account has Premium; checked once per sign-in.
     premium: Arc<tokio::sync::Mutex<Option<bool>>>,
+    /// High quality: with Premium, every song goes through the signed-in web player
+    /// for its 256 kbps stream instead of the anonymous 128 kbps one.
+    hq: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Backend {
@@ -220,7 +223,7 @@ impl Backend {
         let lyrics = Arc::new(lyrics::Client::new(http.clone(), &data_dir));
         let translate = Arc::new(crate::translate::Client::new(http.clone(), &data_dir));
         let jsc = Arc::new(jsc::Solver::new(&data_dir));
-        Ok(Self { rt: Arc::new(rt), rp, http, tx, audio, wake, prefetched: Default::default(), data_dir, lyrics, translate, jsc, premium: Default::default() })
+        Ok(Self { rt: Arc::new(rt), rp, http, tx, audio, wake, prefetched: Default::default(), data_dir, lyrics, translate, jsc, premium: Default::default(), hq: Default::default() })
     }
 
     pub fn http(&self) -> &reqwest::Client {
@@ -668,6 +671,16 @@ impl Backend {
 
     /// Find a stream URL, trying the fastest source that can play the song.
     async fn resolve(&self, video_id: &str) -> anyhow::Result<(Source, ResolvedStream)> {
+        if self.hq.load(Ordering::Relaxed)
+            && let Some(session) = webmusic::Session::load(&self.data_dir)
+            && self.is_premium(&session).await
+        {
+            match self.resolve_from(Source::WebMusic, video_id).await {
+                Ok(s) => return Ok((Source::WebMusic, s)),
+                // Not fatal: the usual 128 kbps stream still plays.
+                Err(e) => log::warn!("high quality stream failed for {video_id} ({e:#}); using standard quality"),
+            }
+        }
         match self.resolve_from(Source::VisionOs, video_id).await {
             Ok(s) => Ok((Source::VisionOs, s)),
             // Age-restricted or Premium-only: only signed-in web players get it.
@@ -789,6 +802,10 @@ impl Backend {
 
     pub fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
+    }
+
+    pub fn set_high_quality(&self, on: bool) {
+        self.hq.store(on, Ordering::Relaxed);
     }
 
     pub fn is_logged_in(&self) -> bool {

@@ -153,6 +153,7 @@ impl Session {
             .iter()
             .find_map(|itag| formats.iter().find(|f| f["itag"] == *itag))
             .ok_or_else(|| anyhow::anyhow!("no AAC stream in web player response"))?;
+        log::info!("web music: {video_id} itag {} ({} kbps)", f["itag"], f["bitrate"].as_u64().unwrap_or(0) / 1000);
         let size = f["contentLength"].as_str().and_then(|s| s.parse().ok()).ok_or_else(|| anyhow::anyhow!("unknown stream size"))?;
         let duration_ms = f["approxDurationMs"].as_str().and_then(|d| d.parse().ok()).unwrap_or(0);
         let loudness_db = crate::innertube::loudness(&resp, f);

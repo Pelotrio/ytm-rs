@@ -167,6 +167,7 @@ pub struct App {
     autoplay: bool,
     /// Turn loud tracks down to YouTube's loudness target.
     normalize: bool,
+    high_quality: bool,
     radio_pending: bool,
     seek_drag: Option<f32>,
 
@@ -292,6 +293,7 @@ impl App {
             },
             autoplay: get("autoplay").is_none_or(|v| v == "1"),
             normalize: get("normalize").is_none_or(|v| v == "1"),
+            high_quality: get("high_quality").is_none_or(|v| v == "1"),
             updater: None,
             auto_update: get("auto_update").is_none_or(|v| v == "1"),
             update_checked: None,
@@ -383,6 +385,7 @@ impl App {
             app.np_open = true;
         }
         app.audio.set_normalize(app.normalize);
+        app.backend.set_high_quality(app.high_quality);
         app
     }
 
@@ -1523,6 +1526,7 @@ impl eframe::App for App {
         let b = |v: bool| if v { "1" } else { "0" }.to_owned();
         storage.set_string("autoplay", b(self.autoplay));
         storage.set_string("normalize", b(self.normalize));
+        storage.set_string("high_quality", b(self.high_quality));
         storage.set_string("auto_update", b(self.auto_update));
         // Pretend versions (dev hook) mustn't decide the real "what's new".
         if std::env::var_os("YTM_UPDATE_AS").is_none() {

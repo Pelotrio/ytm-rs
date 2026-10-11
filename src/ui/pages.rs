@@ -665,6 +665,12 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
                 app.audio.set_normalize(app.normalize);
             }
         });
+        divider(ui);
+        setting_row(ui, false, "High quality audio", Some("256 kbps instead of 128 kbps, for accounts with YouTube Premium. Applies from the next song."), |ui| {
+            if toggle(ui, &mut app.high_quality, "High quality audio").changed() {
+                app.backend.set_high_quality(app.high_quality);
+            }
+        });
     });
 
     // ---- appearance
