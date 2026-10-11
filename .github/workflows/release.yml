@@ -1,7 +1,11 @@
 name: Release
 
 # Builds the Windows installer from the tagged source and attaches it to the
-# GitHub release for that tag (created as a draft if it doesn't exist yet).
+# GitHub release for that tag. Releases are written as drafts (with notes) and
+# published here only once the installer is attached, so the app's updater,
+# which reads the latest published release, never sees one without it. If no
+# release exists yet, one is created as a draft to be given notes and published
+# by hand.
 on:
   push:
     tags: ["v*"]
@@ -56,6 +60,7 @@ jobs:
           file="installer/Output/ytm-rs-setup-$VERSION.exe"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "$file" --clobber
+            gh release edit "$GITHUB_REF_NAME" --draft=false --latest
           else
             gh release create "$GITHUB_REF_NAME" "$file" --draft --title "ytm-rs $VERSION" --notes ""
           fi

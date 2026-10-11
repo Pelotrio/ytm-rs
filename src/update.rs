@@ -102,10 +102,12 @@ impl Updater {
         }
         let version = tag.trim_start_matches('v').to_owned();
         let want = format!("ytm-rs-setup-{version}.exe");
-        let asset = release["assets"]
-            .as_array()
-            .and_then(|a| a.iter().find(|x| x["name"] == want.as_str()))
-            .ok_or_else(|| anyhow::anyhow!("release {tag} has no {want}"))?;
+        // A release published before its installer was built: nothing to install
+        // yet, so this isn't an error. The next check picks it up.
+        let Some(asset) = release["assets"].as_array().and_then(|a| a.iter().find(|x| x["name"] == want.as_str())) else {
+            log::info!("update: release {tag} has no {want} yet");
+            return Ok(State::UpToDate);
+        };
         let url = asset["browser_download_url"].as_str().ok_or_else(|| anyhow::anyhow!("asset has no URL"))?;
         let size = asset["size"].as_u64().unwrap_or(0);
         std::fs::create_dir_all(&self.dir)?;
