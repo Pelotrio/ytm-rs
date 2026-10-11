@@ -354,7 +354,8 @@ pub fn paint(name: &str, accent: Color32) -> Color32 {
     }
 }
 
-fn hex(s: &str) -> Option<Color32> {
+/// "#rrggbb" as a colour.
+pub fn hex(s: &str) -> Option<Color32> {
     let s = s.strip_prefix('#')?;
     if s.len() != 6 {
         return None;
@@ -390,10 +391,6 @@ pub fn set_active(id: &str) {
 
 pub fn active() -> &'static Preset {
     &all()[ACTIVE.load(std::sync::atomic::Ordering::Relaxed).min(all().len() - 1)]
-}
-
-pub fn parse_hex(s: &str) -> Option<Color32> {
-    hex(s)
 }
 
 /// The preset's cover thumbnail (JPEG), if it has one.

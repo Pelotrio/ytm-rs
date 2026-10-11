@@ -23,9 +23,13 @@ pub fn glass(a: f32) -> Color32 {
     Color32::from_white_alpha(((a * k).min(1.0) * 255.0) as u8)
 }
 
+/// The active theme's secondary text colour, set with its chrome (read very often).
+static DIM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::from_le_bytes(TEXT_DIM.to_array()));
+
 /// Secondary text colour (themes may tint it).
 pub fn text_dim() -> Color32 {
-    crate::preset::parse_hex(&crate::preset::active().app.text_dim).unwrap_or(TEXT_DIM)
+    let [r, g, b, a] = DIM.load(std::sync::atomic::Ordering::Relaxed).to_le_bytes();
+    Color32::from_rgba_premultiplied(r, g, b, a)
 }
 
 /// Corner radius of album/playlist art in cards.
@@ -102,7 +106,6 @@ pub fn icon_font(size: f32) -> FontId {
 }
 
 /// Lucide icons (ISC), subset to the glyphs used here.
-#[allow(dead_code)]
 pub mod icon {
     pub const HOUSE: char = '\u{e0f5}';
     pub const COMPASS: char = '\u{e09b}';
@@ -123,15 +126,11 @@ pub mod icon {
     pub const VOLUME_1: char = '\u{e1aa}';
     pub const VOLUME_X: char = '\u{e1ac}';
     pub const HEART: char = '\u{e0f2}';
-    pub const THUMBS_UP: char = '\u{e18a}';
     pub const THUMBS_DOWN: char = '\u{e189}';
     pub const LIST_MUSIC: char = '\u{e2e0}';
     pub const MIC_VOCAL: char = '\u{e349}';
-    pub const MAXIMIZE_2: char = '\u{e113}';
-    pub const MINIMIZE_2: char = '\u{e11b}';
     pub const X: char = '\u{e1b2}';
     pub const ELLIPSIS_VERTICAL: char = '\u{e0b7}';
-    pub const PLUS: char = '\u{e13d}';
     pub const LIST_PLUS: char = '\u{e23f}';
     pub const RADIO: char = '\u{e142}';
     pub const DISC_3: char = '\u{e494}';
@@ -139,12 +138,8 @@ pub mod icon {
     pub const SETTINGS: char = '\u{e154}';
     pub const LOG_OUT: char = '\u{e10e}';
     pub const MUSIC: char = '\u{e122}';
-    pub const LOADER_CIRCLE: char = '\u{e10a}';
-    pub const TRASH_2: char = '\u{e18e}';
-    pub const HISTORY: char = '\u{e1f5}';
     pub const SPARKLES: char = '\u{e412}';
     pub const CHECK: char = '\u{e06c}';
-    pub const LIST_VIDEO: char = '\u{e2e2}';
     pub const CIRCLE_USER: char = '\u{e461}';
     pub const EXPAND: char = '\u{e21a}';
     pub const SHRINK: char = '\u{e220}';
@@ -158,6 +153,8 @@ const LUCIDE: &[u8] = include_bytes!("../assets/fonts/lucide.ttf");
 
 /// Lyric typefaces used by theme presets (all SIL OFL 1.1), as static
 /// regular / semibold / bold instances subset to Latin, Greek and Cyrillic.
+/// Instrument Sans is only ever used at semibold (one preset), so its bold slot reuses
+/// that instead of shipping a weight nothing draws.
 const LYRIC_FONTS: &[(&str, [&[u8]; 3])] = &[
     ("dmsans", [
         include_bytes!("../assets/fonts/DMSans-Regular.ttf"),
@@ -177,12 +174,10 @@ const LYRIC_FONTS: &[(&str, [&[u8]; 3])] = &[
     ("instrumentsans", [
         include_bytes!("../assets/fonts/InstrumentSans-Regular.ttf"),
         include_bytes!("../assets/fonts/InstrumentSans-SemiBold.ttf"),
-        include_bytes!("../assets/fonts/InstrumentSans-Bold.ttf"),
+        include_bytes!("../assets/fonts/InstrumentSans-SemiBold.ttf"),
     ]),
 ];
 
-/// Lyric font for a preset's font name and weight. Fonts that can't be bundled
-/// (SF Pro, Spotify's) map to the closest open one; unknown names use Inter.
 /// The bundled font a preset font name refers to. Fonts that can't be bundled (SF Pro,
 /// Spotify's) map to the closest open one; unknown names to Inter.
 fn lyric_key(name: &str) -> Option<&'static str> {
@@ -262,20 +257,27 @@ fn em_metrics(bytes: &[u8], index: u32) -> Option<(f32, f32)> {
 /// sit visibly higher than Latin ones in the same line. Each fallback therefore gets a
 /// y offset computed from both fonts' metrics, once per primary font it backs.
 pub fn install_fonts(ctx: &egui::Context, ui_font: &str) {
+    // Installing rebuilds the font atlas; most themes share a UI font, so skip repeats.
+    static INSTALLED: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
+    let ui_key = lyric_key(ui_font).unwrap_or("inter");
+    if INSTALLED.lock().unwrap().replace(ui_key) == Some(ui_key) {
+        return;
+    }
     let mut defs = FontDefinitions::default();
     let egui_default = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     defs.font_data.insert("lucide".into(), Arc::new(FontData::from_static(LUCIDE).tweak(egui::FontTweak { y_offset_factor: 0.0, ..Default::default() })));
     defs.families.insert(FontFamily::Name("icons".into()), vec!["lucide".to_owned()]);
 
-    let system: Vec<(&str, &'static [u8], u32)> = CANDIDATES.iter().filter_map(|&(path, index)| map(path).map(|b| (path, b, index))).collect();
+    // Mapped once for the life of the process, however often fonts are installed.
+    static SYSTEM: std::sync::OnceLock<Vec<(&str, &'static [u8], u32)>> = std::sync::OnceLock::new();
+    let system = SYSTEM.get_or_init(|| CANDIDATES.iter().filter_map(|&(path, index)| map(path).map(|b| (path, b, index))).collect());
     // Primary font groups that share metrics: Inter's weights, then each lyric font.
     let mut groups: Vec<(&str, [&'static [u8]; 3])> = vec![("inter", [INTER_REGULAR, INTER_SEMIBOLD, INTER_BOLD])];
     groups.extend(LYRIC_FONTS.iter().map(|(k, w)| (*k, *w)));
-    let ui_key = lyric_key(ui_font).unwrap_or("inter");
     for (key, weights) in &groups {
         let (asc_p, h_p) = em_metrics(weights[0], 0).unwrap_or((0.97, 1.21));
         let mut fallbacks = Vec::new();
-        for &(path, bytes, index) in &system {
+        for &(path, bytes, index) in system {
             let Some((asc_f, h_f)) = em_metrics(bytes, index) else { continue };
             let shift = asc_p - (asc_f + 0.5 * (h_p - h_f));
             let name = format!("sys:{path}@{key}");
@@ -321,6 +323,8 @@ fn map(path: &str) -> Option<&'static [u8]> {
 /// buttons, pills and fields are.
 pub fn apply_chrome(ctx: &egui::Context, p: &crate::preset::Preset) {
     GLASS.store(p.chrome.glass.clamp(0.0, 2.5).to_bits(), std::sync::atomic::Ordering::Relaxed);
+    let dim = crate::preset::hex(&p.app.text_dim).unwrap_or(TEXT_DIM);
+    DIM.store(u32::from_le_bytes(dim.to_array()), std::sync::atomic::Ordering::Relaxed);
     install_style(ctx);
     install_fonts(ctx, &p.app.font);
     let r = p.chrome.radius.clamp(2.0, 28.0) as u8;
