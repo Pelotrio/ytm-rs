@@ -31,11 +31,11 @@
 
 <table>
   <tr>
-    <td><img src="docs/screenshots/home.jpg" alt="Home feed with mood filters and shelves of playlists"></td>
+    <td><img src="docs/screenshots/artist.jpg" alt="The Weeknd's artist page with a large header image and his top songs, Blinding Lights playing"></td>
     <td><img src="docs/screenshots/settings-themes.jpg" alt="Settings with appearance switches and the theme gallery"></td>
   </tr>
   <tr>
-    <td align="center">Home</td>
+    <td align="center">Artist page</td>
     <td align="center">Settings and themes</td>
   </tr>
   <tr>
