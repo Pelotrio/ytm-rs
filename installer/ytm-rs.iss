@@ -4,7 +4,7 @@
 ; Output: installer\Output\ytm-rs-setup-<version>.exe
 
 #define AppName "ytm-rs"
-#define AppVersion "0.2.7"
+#define AppVersion "0.2.8"
 #define AppExe "ytm-rs.exe"
 
 [Setup]
@@ -43,6 +43,10 @@ Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
+
+[UninstallDelete]
+; Installers downloaded by the in-app updater.
+Type: filesandordirs; Name: "{userappdata}\ytm-rs\data\updates"
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent

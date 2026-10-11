@@ -10,6 +10,10 @@
   </p>
 </div>
 
+<p align="center">
+  <img src="docs/screenshots/now-playing.jpg" alt="Now playing: album art with synced lyrics over an animated album-art background" width="900">
+</p>
+
 ## Features
 
 | Feature                 | What you can do                                                                                                                                         |
@@ -22,6 +26,27 @@
 | **Themes**              | Pick from 26 presets rebuilt from the [Better Lyrics community themes](https://github.com/better-lyrics/themes), such as Apple Music, Spicy, Spinning Record and reCover. Each one restyles the lyrics, background, cover, player bar, fonts and the rest of the app. |
 | **Desktop integration** | Use system media controls, Discord Rich Presence, and screen-reader-accessible controls.                                                                |
 | **Automatic updates**   | The installed app downloads new versions in the background and installs them when you close it, or right away with **Restart to update**.              |
+
+## Screenshots
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/home.jpg" alt="Home feed with mood filters and shelves of playlists"></td>
+    <td><img src="docs/screenshots/settings-themes.jpg" alt="Settings with appearance switches and the theme gallery"></td>
+  </tr>
+  <tr>
+    <td align="center">Home</td>
+    <td align="center">Settings and themes</td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/theme-spinning-record.jpg" alt="Spinning Record theme: the cover as a slowly spinning vinyl disc beside the lyrics"></td>
+    <td><img src="docs/screenshots/theme-recover.jpg" alt="reCover theme: the cover fills the left of the screen and fades into the lyrics"></td>
+  </tr>
+  <tr>
+    <td align="center">Spinning Record theme</td>
+    <td align="center">reCover theme</td>
+  </tr>
+</table>
 
 ## Get started
 

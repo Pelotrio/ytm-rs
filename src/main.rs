@@ -59,6 +59,9 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport,
         persist_window: !background,
+        // Dev hook: YTM_DATA_DIR runs on a separate profile (settings, sign-in, caches),
+        // e.g. a clean signed-out one for screenshots.
+        persistence_path: std::env::var_os("YTM_DATA_DIR").map(|d| std::path::PathBuf::from(d).join("app.ron")),
         // No MSAA/depth/stencil: egui doesn't need them and they cost VRAM.
         multisampling: 0,
         depth_buffer: 0,
@@ -94,9 +97,12 @@ fn main() -> eframe::Result {
             let (audio_tx, audio_rx) = unbounded();
             let audio = audio::spawn(volume, audio_tx, wake);
 
-            let dirs = directories::ProjectDirs::from("", "", "ytm-rs").expect("no home directory");
+            let data_dir = match std::env::var_os("YTM_DATA_DIR") {
+                Some(d) => std::path::PathBuf::from(d),
+                None => directories::ProjectDirs::from("", "", "ytm-rs").expect("no home directory").data_dir().to_path_buf(),
+            };
             let (resp_tx, resp_rx) = unbounded();
-            let backend = backend::Backend::new(dirs.data_dir().to_path_buf(), resp_tx, audio.clone(), Arc::new(wake))?;
+            let backend = backend::Backend::new(data_dir, resp_tx, audio.clone(), Arc::new(wake))?;
 
             egui_extras::install_image_loaders(&ctx);
             ctx.add_bytes_loader(Arc::new(images::HttpImages::new(backend.clone())));

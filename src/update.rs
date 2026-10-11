@@ -148,9 +148,13 @@ impl Updater {
     pub fn install(&self, relaunch: bool) {
         let State::Ready { installer, .. } = self.state() else { return };
         let exe = std::env::current_exe().unwrap_or_default();
+        // Update the copy that's running: an all-users install lives under Program Files
+        // (and the installer will ask for admin rights); otherwise it's per-user.
+        let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
+        let scope = if program_files.is_some_and(|p| exe.starts_with(p)) { "/ALLUSERS" } else { "/CURRENTUSER" };
         // Give this process a moment to save and exit before the installer replaces it.
         let mut script = format!(
-            "ping -n 3 127.0.0.1 >NUL & \"{}\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER",
+            "ping -n 3 127.0.0.1 >NUL & \"{}\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART {scope}",
             installer.display()
         );
         if relaunch {
