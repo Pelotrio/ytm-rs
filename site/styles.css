@@ -231,11 +231,12 @@ h2 {
   --accent: #ff2433;
   position: relative; isolation: isolate; overflow: hidden;
   max-width: 1100px; margin: 0 auto; border-radius: 26px;
+  clip-path: inset(0 round 26px);
   border: 1px solid rgba(255, 255, 255, 0.1); background: #120808;
   box-shadow: 0 40px 120px -40px rgba(0, 0, 0, 0.9), 0 0 0 1px rgba(0, 0, 0, 0.4);
 }
-.player__bg { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -2; }
-.player__scrim { position: absolute; inset: 0; z-index: -1; background: rgba(0, 0, 0, var(--dim, 0.35)); transition: background-color 0.6s; }
+.player__bg { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -2; border-radius: inherit; }
+.player__scrim { position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: rgba(0, 0, 0, var(--dim, 0.35)); transition: background-color 0.6s; }
 .player__top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 22px 0; }
 .player__badge {
   font: 500 11px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; padding: 7px 10px; border-radius: 999px;
@@ -260,10 +261,11 @@ h2 {
 .player__meta > span { color: rgba(255, 255, 255, 0.65); font-size: 15px; }
 .player__lyrics {
   position: relative; height: clamp(360px, 42vw, 470px); overflow: hidden; overflow: clip;
+  margin: 0 -48px;
   -webkit-mask-image: linear-gradient(transparent, #000 14%, #000 80%, transparent);
   mask-image: linear-gradient(transparent, #000 14%, #000 80%, transparent);
 }
-.lyr__track { position: absolute; left: 0; right: 0; top: 0; transition: transform 0.75s var(--ease); will-change: transform; }
+.lyr__track { position: absolute; left: 48px; right: 48px; top: 0; transition: transform 0.75s var(--ease); will-change: transform; }
 .lyr {
   --p: 0; --a: 0.35; --blur: 0px; --scale: 1;
   display: block; width: 100%; text-align: left; padding: 10px 0; margin: 0; border: 0; background: none; cursor: pointer;
@@ -412,7 +414,7 @@ h2 {
 .marquee3d__col { display: flex; flex-direction: column; gap: 18px; animation: mq var(--dur) linear infinite; will-change: transform; }
 .marquee3d__col:nth-child(even) { animation-direction: reverse; }
 .marquee3d__col img { width: 100%; aspect-ratio: 8 / 5; object-fit: cover; border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.12); box-shadow: 0 20px 40px -10px rgba(0, 0, 0, 0.8); }
-@keyframes mq { from { transform: translateY(0); } to { transform: translateY(calc(-50% - 9px)); } }
+@keyframes mq { from { transform: translateY(0); } to { transform: translateY(calc(-25% - 4.5px)); } }
 @media (max-width: 960px) {
   .themes__split { grid-template-columns: 1fr; }
   .marquee3d { height: 420px; order: -1; }
@@ -532,11 +534,9 @@ h2 {
   content: ""; position: absolute; right: 6px; top: 50%; width: 12px; height: 12px; margin-top: -8px;
   border-right: 2px solid var(--ink-2); border-bottom: 2px solid var(--ink-2); transform: rotate(45deg); transition: transform 0.35s var(--ease);
 }
-.faq details[open] summary::after { transform: rotate(-135deg); margin-top: -2px; }
-.faq details p { margin: -8px 0 24px; color: var(--ink-2); max-width: 680px; }
-.faq details::details-content { transition: content-visibility 0.35s allow-discrete, height 0.35s var(--ease); height: 0; overflow: clip; }
-.faq details[open]::details-content { height: auto; }
-@supports (interpolate-size: allow-keywords) { :root { interpolate-size: allow-keywords; } }
+.faq details.is-open summary::after, .faq details:not(.js)[open] summary::after { transform: rotate(-135deg); margin-top: -2px; }
+.faq__a { overflow: hidden; }
+.faq__a p { margin: 0; padding: 0 0 24px; color: var(--ink-2); max-width: 680px; }
 
 /* ---------- footer ---------- */
 .footer { border-top: 1px solid var(--line); padding: 56px var(--gutter) 64px; }

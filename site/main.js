@@ -441,6 +441,31 @@ void main(){
     new ResizeObserver(build).observe(beams);
   }
 
+  /* ---------------- FAQ accordion (animated both ways, one open at a time) ---------------- */
+  const faqs = $$(".faq details");
+  const setFaq = (d, open) => {
+    const body = $(".faq__a", d);
+    const wasShown = d.open;
+    const from = wasShown ? body.getBoundingClientRect().height : 0; // read mid-animation height before cancelling
+    if (d._anim) d._anim.cancel();
+    d.classList.toggle("is-open", open);
+    if (open) d.open = true;
+    const to = open ? body.scrollHeight : 0;
+    if (reduced) { if (!open) d.open = false; return; }
+    d._anim = body.animate([{ height: `${from}px` }, { height: `${to}px` }], { duration: 380, easing: "cubic-bezier(0.16, 1, 0.3, 1)" });
+    d._anim.onfinish = () => { d._anim = null; if (!open) d.open = false; };
+  };
+  faqs.forEach((d) => {
+    d.classList.add("js");
+    d.classList.toggle("is-open", d.open);
+    $("summary", d).addEventListener("click", (e) => {
+      e.preventDefault();
+      const open = !d.classList.contains("is-open");
+      if (open) faqs.forEach((o) => o !== d && o.classList.contains("is-open") && setFaq(o, false));
+      setFaq(d, open);
+    });
+  });
+
   /* ---------------- copy button ---------------- */
   $$("[data-copy]").forEach((btn) => btn.addEventListener("click", async () => {
     const text = $(btn.dataset.copy).innerText.replace(/^> /gm, "");
