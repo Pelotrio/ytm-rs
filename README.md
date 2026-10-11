@@ -31,6 +31,12 @@
 
 <table>
   <tr>
+    <td colspan="2"><img src="docs/screenshots/home.jpg" alt="Home with mood filters and today's biggest hits, a song playing"></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">Home</td>
+  </tr>
+  <tr>
     <td><img src="docs/screenshots/artist.jpg" alt="The Weeknd's artist page with a large header image and his top songs, Blinding Lights playing"></td>
     <td><img src="docs/screenshots/settings-themes.jpg" alt="Settings with appearance switches and the theme gallery"></td>
   </tr>

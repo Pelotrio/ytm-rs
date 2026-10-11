@@ -329,6 +329,10 @@ impl App {
             app.search_text = q.clone();
             app.go(Page::Search(q));
         }
+        // An explicit page replaces the smoke search, so its query shouldn't linger.
+        if matches!(std::env::var("YTM_PAGE").as_deref(), Ok("home" | "explore" | "library" | "settings")) {
+            app.search_text.clear();
+        }
         match std::env::var("YTM_PAGE").as_deref() {
             Ok("home") => app.go(Page::Home),
             Ok("explore") => app.go(Page::Explore),
