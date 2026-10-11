@@ -17,7 +17,12 @@ pub fn page(app: &mut App, ui: &mut Ui, now: f64) {
     ui.set_opacity(0.15 + 0.85 * t);
     let page = app.page.clone();
     let scroll_id = format!("{:?}", std::mem::discriminant(&page));
-    let out = egui::ScrollArea::vertical().id_salt(&scroll_id).auto_shrink(false).show(ui, |ui| {
+    let mut area = egui::ScrollArea::vertical().id_salt(&scroll_id).auto_shrink(false);
+    // Dev hook: YTM_SCROLL=<px> pins the page scroll, for screenshots of lower sections.
+    if let Some(y) = std::env::var("YTM_SCROLL").ok().and_then(|v| v.parse::<f32>().ok()) {
+        area = area.vertical_scroll_offset(y);
+    }
+    let out = area.show(ui, |ui| {
         ui.set_max_width((ui.available_width() - 20.0).max(0.0));
         ui.add_space(18.0 * (1.0 - t));
         match &page {
@@ -554,53 +559,63 @@ fn list(app: &mut App, ui: &mut Ui, tracks: &[Track], now: f64) {
 // ------------------------------------------------------------------ settings
 
 fn settings(app: &mut App, ui: &mut Ui) {
-    page_title(ui, "Settings");
-    let section = |ui: &mut Ui, title: &str, body: &mut dyn FnMut(&mut Ui)| {
-        ui.add_space(18.0);
-        egui::Frame::new().fill(theme::glass(0.06)).corner_radius(theme::panel_radius()).inner_margin(20).show(ui, |ui| {
-            ui.set_width(ui.available_width().min(760.0));
-            ui.label(RichText::new(title).font(theme::bold(18.0)));
-            ui.add_space(10.0);
-            body(ui);
+    // One centred column; every section shares its width.
+    let avail = ui.available_width();
+    let w = avail.min(920.0);
+    ui.horizontal(|ui| {
+        ui.add_space(((avail - w) / 2.0).max(0.0));
+        ui.vertical(|ui| {
+            ui.set_width(w);
+            settings_body(app, ui);
+            ui.add_space(40.0);
         });
-    };
+    });
+}
+
+fn settings_body(app: &mut App, ui: &mut Ui) {
+    page_title(ui, "Settings");
+
+    // ---- account
+    section_label(ui, "Account", None);
     let busy = app.signing_in.load(Ordering::Relaxed);
-    let logged_in = app.logged_in;
-    let name = app.account_name.clone();
-    let mut sign_in = false;
-    let mut sign_out = false;
-    let mut cookie_submit = None;
-    let cookie = &mut app.cookie_input;
-    section(ui, "Account", &mut |ui| {
-        if logged_in {
-            ui.label(format!("Signed in{}", name.as_ref().map(|n| format!(" as {n}")).unwrap_or_default()));
-            ui.add_space(8.0);
-            sign_out = pill(ui, "Sign out", Some(icon::LOG_OUT), false).clicked();
+    let (mut sign_in, mut sign_out, mut cookie_submit) = (false, false, None);
+    settings_card(ui, |ui| {
+        if app.logged_in {
+            let name = app.account_name.clone().unwrap_or_else(|| "YouTube Music".to_owned());
+            setting_row(ui, true, &name, Some("Signed in with Google. Your home feed, library and likes come from this account."), |ui| {
+                sign_out = pill(ui, "Sign out", Some(icon::LOG_OUT), false).clicked();
+            });
         } else {
-            ui.label(RichText::new("Sign in to get your home feed, library and likes.").color(theme::text_dim()));
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                sign_in = !busy && pill(ui, "Sign in with Google", Some(icon::CIRCLE_USER), true).clicked();
+            setting_row(ui, true, "Not signed in", Some("Sign in to get your home feed, library and likes."), |ui| {
                 if busy {
                     ui.spinner();
-                    ui.label(RichText::new("Finish signing in in the window that opened").color(theme::text_dim()));
+                } else {
+                    sign_in = pill(ui, "Sign in with Google", Some(icon::CIRCLE_USER), true).clicked();
                 }
             });
+            divider(ui);
             ui.add_space(10.0);
-            egui::CollapsingHeader::new("Other option: paste cookies").show(ui, |ui| {
+            let cookie = &mut app.cookie_input;
+            egui::CollapsingHeader::new(RichText::new("Sign in with cookies instead").color(theme::text_dim())).show(ui, |ui| {
                 ui.label(
-                    RichText::new(
-                        "Paste the `cookie` request header from a signed-in music.youtube.com tab (DevTools → Network → any request), or a cookies.txt export.",
-                    )
-                    .color(theme::text_dim()),
+                    RichText::new("Paste the cookie request header from a signed-in music.youtube.com tab (DevTools → Network → any request), or a cookies.txt export.")
+                        .font(theme::regular(12.5))
+                        .color(theme::text_dim()),
                 );
+                ui.add_space(6.0);
                 ui.add(egui::TextEdit::multiline(cookie).hint_text("cookie header or cookies.txt").desired_rows(3).desired_width(f32::INFINITY));
-                if ui.add_enabled(!cookie.trim().is_empty(), egui::Button::new("Sign in")).clicked() {
+                ui.add_space(6.0);
+                if !cookie.trim().is_empty() && pill(ui, "Sign in", None, true).clicked() {
                     cookie_submit = Some(std::mem::take(cookie));
                 }
             });
+            ui.add_space(10.0);
         }
     });
+    if busy {
+        ui.add_space(6.0);
+        ui.label(RichText::new("Finish signing in in the window that opened.").font(theme::regular(12.5)).color(theme::text_dim()));
+    }
     if sign_in {
         app.start_sign_in(ui.ctx());
     }
@@ -610,77 +625,199 @@ fn settings(app: &mut App, ui: &mut Ui) {
     if let Some(c) = cookie_submit {
         app.backend.request(crate::backend::Req::SetCookie(c));
     }
-    section(ui, "Playback", &mut |ui| {
-        ui.checkbox(&mut app.autoplay, "Autoplay similar songs when the queue ends");
-    });
-    let was_default = app.default_theme;
-    let was_theme = app.theme_id.clone();
-    section(ui, "Appearance", &mut |ui| {
-        ui.checkbox(&mut app.default_theme, "Classic theme (dark with red accents, no album-art colours)");
-        ui.add_enabled_ui(!app.default_theme, |ui| {
-            ui.checkbox(&mut app.anim_bg, "Animate the album-art background");
-            ui.checkbox(&mut app.reactive_bg, "Background pulses with the music");
+
+    // ---- playback
+    section_label(ui, "Playback", None);
+    settings_card(ui, |ui| {
+        setting_row(ui, true, "Autoplay", Some("Keep playing similar songs when the queue ends."), |ui| {
+            toggle(ui, &mut app.autoplay, "Autoplay");
         });
     });
+
+    // ---- appearance
+    let was_default = app.default_theme;
+    let was_theme = app.theme_id.clone();
+    section_label(ui, "Appearance", None);
+    settings_card(ui, |ui| {
+        setting_row(ui, true, "Classic theme", Some("Plain dark with red accents. Turns off album-art colours and the theme below."), |ui| {
+            toggle(ui, &mut app.default_theme, "Classic theme");
+        });
+        let enabled = !app.default_theme;
+        divider(ui);
+        ui.add_enabled_ui(enabled, |ui| {
+            setting_row(ui, false, "Animated background", Some("The album art slowly drifts behind everything."), |ui| {
+                toggle(ui, &mut app.anim_bg, "Animated background");
+            });
+            divider(ui);
+            setting_row(ui, false, "Pulse with the music", Some("The background swells with the beat."), |ui| {
+                toggle(ui, &mut app.reactive_bg, "Pulse with the music");
+            });
+        });
+    });
+
+    // ---- themes
+    let current = if app.default_theme { "Classic".to_owned() } else { crate::preset::get(&app.theme_id).name.clone() };
+    section_label(ui, "Theme", Some(&current));
+    ui.label(
+        RichText::new("Rebuilt from the Better Lyrics community themes. Each one restyles the background, lyrics, cover, player bar and the rest of the app.")
+            .font(theme::regular(13.0))
+            .color(theme::text_dim()),
+    );
+    ui.add_space(12.0);
     themes(app, ui);
     if (was_default && !app.default_theme) || was_theme != app.theme_id {
         app.request_art();
     }
+
+    // ---- connections
     let mut discord_enabled = app.discord_enabled;
-    section(ui, "Connections", &mut |ui| {
-        ui.checkbox(&mut discord_enabled, "Show what I'm playing on Discord");
+    section_label(ui, "Connections", None);
+    settings_card(ui, |ui| {
+        setting_row(ui, true, "Discord", Some("Show what you're playing on your Discord profile."), |ui| {
+            toggle(ui, &mut discord_enabled, "Discord");
+        });
     });
     if discord_enabled != app.discord_enabled {
         app.set_discord_enabled(discord_enabled);
     }
-    section(ui, "Shortcuts", &mut |ui| {
-        for (k, v) in [
-            ("Space", "Play / pause"),
-            ("Ctrl + → / ←", "Next / previous"),
-            ("Ctrl + ↑ / ↓", "Volume"),
-            ("Ctrl + F", "Search"),
-            ("L", "Lyrics / now playing"),
-            ("F", "Full-screen lyrics (in now playing)"),
-            ("Alt + ← / →, mouse back / forward", "Navigate"),
-            ("Esc", "Close now playing"),
-        ] {
-            ui.horizontal(|ui| {
-                ui.add_sized([250.0, 20.0], egui::Label::new(RichText::new(k).font(theme::semibold(13.5))));
-                ui.label(RichText::new(v).color(theme::text_dim()));
-            });
+
+    // ---- shortcuts
+    section_label(ui, "Keyboard shortcuts", None);
+    settings_card(ui, |ui| {
+        let keys: &[(&str, &[&str])] = &[
+            ("Play / pause", &["Space"]),
+            ("Next / previous song", &["Ctrl", "→ / ←"]),
+            ("Volume up / down", &["Ctrl", "↑ / ↓"]),
+            ("Search", &["Ctrl", "F"]),
+            ("Lyrics and now playing", &["L"]),
+            ("Full-screen lyrics (in now playing)", &["F"]),
+            ("Back / forward", &["Alt", "← / →"]),
+            ("Close now playing", &["Esc"]),
+        ];
+        for (i, (what, combo)) in keys.iter().enumerate() {
+            if i > 0 {
+                divider(ui);
+            }
+            let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
+            ui.painter().text(pos2(rect.left(), rect.center().y), Align2::LEFT_CENTER, *what, theme::regular(14.0), theme::TEXT);
+            let mut x = rect.right();
+            for (j, k) in combo.iter().enumerate().rev() {
+                x = keycap(ui, pos2(x, rect.center().y), k) - 6.0;
+                if j > 0 {
+                    let plus = ui.painter().text(pos2(x, rect.center().y), Align2::RIGHT_CENTER, "+", theme::regular(13.0), theme::text_dim());
+                    x = plus.left() - 6.0;
+                }
+            }
         }
     });
-    section(ui, "About", &mut |ui| {
-        for line in [
-            "Lyrics: Better Lyrics API (Musixmatch, LRCLIB, QQ, KuGou, Better Lyrics TTML)",
-            "Background: port of Kawarp, MIT © Better Lyrics",
-            "Theme presets: adapted from the Better Lyrics theme store; each card credits its creators",
-            "Lyric fonts: DM Sans, Google Sans Flex, Figtree, Instrument Sans (SIL OFL 1.1)",
-            "Inter typeface (SIL OFL 1.1) • Lucide icons (ISC)",
+
+    // ---- about
+    section_label(ui, "About", None);
+    settings_card(ui, |ui| {
+        setting_row(ui, true, &format!("ytm-rs {}", env!("CARGO_PKG_VERSION")), Some("A fast, native YouTube Music client."), |_| {});
+        for (title, desc) in [
+            ("Lyrics", "Better Lyrics API: Musixmatch, LRCLIB, QQ, KuGou and Better Lyrics TTML"),
+            ("Themes", "Adapted from the Better Lyrics theme store; each card credits its creators"),
+            ("Background", "A port of Kawarp, MIT © Better Lyrics"),
+            ("Fonts and icons", "Inter, DM Sans, Google Sans Flex, Figtree, Instrument Sans (SIL OFL 1.1) • Lucide (ISC)"),
         ] {
-            ui.label(RichText::new(line).color(theme::text_dim()));
+            divider(ui);
+            setting_row(ui, false, title, Some(desc), |_| {});
         }
     });
 }
 
+/// Small heading above a settings card, with an optional value on the right.
+fn section_label(ui: &mut Ui, title: &str, value: Option<&str>) {
+    ui.add_space(30.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+    ui.painter().text(pos2(rect.left() + 2.0, rect.center().y), Align2::LEFT_CENTER, title, theme::bold(17.0), theme::TEXT);
+    if let Some(v) = value {
+        ui.painter().text(pos2(rect.right() - 2.0, rect.center().y), Align2::RIGHT_CENTER, v, theme::semibold(13.0), theme::text_dim());
+    }
+    ui.add_space(10.0);
+}
+
+fn settings_card(ui: &mut Ui, body: impl FnOnce(&mut Ui)) {
+    egui::Frame::new()
+        .fill(theme::glass(0.06))
+        .stroke(egui::Stroke::new(1.0, theme::glass(0.05)))
+        .corner_radius(theme::panel_radius())
+        .inner_margin(egui::Margin::symmetric(20, 6))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            body(ui);
+        });
+}
+
+/// A settings row: title and description on the left, the control on the right.
+fn setting_row(ui: &mut Ui, _first: bool, title: &str, desc: Option<&str>, control: impl FnOnce(&mut Ui)) {
+    let w = ui.available_width();
+    let text_w = (w - 230.0).max(200.0);
+    let title_g = widgets::galley(ui, title, theme::semibold(14.5), theme::TEXT, text_w);
+    let desc_g = desc.map(|d| widgets::galley_wrapped(ui, d, theme::regular(12.5), theme::text_dim(), text_w, 3));
+    let text_h = title_g.size().y + desc_g.as_ref().map_or(0.0, |g| g.size().y + 3.0);
+    let h = (text_h + 26.0).max(58.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    let fade = if ui.is_enabled() { 1.0 } else { 0.45 };
+    let top = rect.center().y - text_h / 2.0;
+    ui.painter().galley(pos2(rect.left(), top), title_g.clone(), theme::with_alpha(theme::TEXT, fade));
+    if let Some(g) = desc_g {
+        ui.painter().galley(pos2(rect.left(), top + title_g.size().y + 3.0), g, theme::with_alpha(theme::text_dim(), fade));
+    }
+    let ctl = Rect::from_min_max(pos2(rect.left() + text_w + 20.0, rect.top()), rect.max);
+    let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(ctl).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    control(&mut cui);
+}
+
+fn divider(ui: &mut Ui) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, theme::glass(0.07));
+}
+
+/// On/off switch tinted with the accent.
+fn toggle(ui: &mut Ui, on: &mut bool, name: &str) -> egui::Response {
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(44.0, 26.0), Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    let value = *on;
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), value, name));
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let t = theme::anim_bool(ui.ctx(), resp.id.with("t"), value, 0.16);
+    let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.12);
+    let accent = ui.ctx().data(|d| d.get_temp::<Color32>(egui::Id::new("accent"))).unwrap_or(theme::RED);
+    let fade = if ui.is_enabled() { 1.0 } else { 0.4 };
+    let off = theme::glass(0.16 + 0.06 * h);
+    ui.painter().rect_filled(rect, 13.0, theme::with_alpha(theme::lerp_color(off, accent, t), fade));
+    let knob = pos2(egui::lerp(rect.left() + 13.0..=rect.right() - 13.0, t), rect.center().y);
+    ui.painter().circle_filled(knob + vec2(0.0, 1.0), 10.0, theme::shade(0.25 * fade));
+    ui.painter().circle_filled(knob, 10.0, theme::with_alpha(Color32::WHITE, fade));
+    resp
+}
+
+/// Draw a key cap whose right edge is at `right`; returns its left edge.
+fn keycap(ui: &Ui, right: egui::Pos2, key: &str) -> f32 {
+    let g = widgets::galley(ui, key, theme::semibold(12.5), theme::TEXT, 200.0);
+    let size = vec2((g.size().x + 18.0).max(30.0), 26.0);
+    let rect = Rect::from_min_size(pos2(right.x - size.x, right.y - size.y / 2.0), size);
+    ui.painter().rect_filled(rect, 7.0, theme::glass(0.08));
+    ui.painter().rect_stroke(rect, 7.0, egui::Stroke::new(1.0, theme::glass(0.12)), egui::StrokeKind::Inside);
+    ui.painter().rect_filled(Rect::from_min_max(pos2(rect.left() + 2.0, rect.bottom() - 2.0), pos2(rect.right() - 2.0, rect.bottom())), 2.0, theme::shade(0.25));
+    ui.painter().galley(rect.center() - g.size() / 2.0, g, theme::TEXT);
+    rect.left()
+}
+
 /// Theme preset gallery: one card per preset with its cover, name and creators.
 fn themes(app: &mut App, ui: &mut Ui) {
-    ui.add_space(18.0);
-    egui::Frame::new().fill(theme::glass(0.06)).corner_radius(theme::panel_radius()).inner_margin(20).show(ui, |ui| {
-        let avail = ui.available_width().min(1180.0);
-        ui.set_width(avail);
-        ui.label(RichText::new("Themes").font(theme::bold(18.0)));
-        ui.add_space(2.0);
-        ui.label(
-            RichText::new("Presets rebuilt from the Better Lyrics community themes. They change the background, lyrics, cover and player bar.")
-                .color(theme::text_dim()),
-        );
-        ui.add_space(12.0);
-        let gap = 14.0;
-        let cols = ((avail + gap) / (220.0 + gap)).floor().max(1.0);
-        let w = ((avail + gap) / cols - gap).floor();
-        let mut picked = None;
-        ui.spacing_mut().item_spacing = vec2(gap, gap);
+    let avail = ui.available_width();
+    let gap = 16.0;
+    let cols = ((avail + gap) / (200.0 + gap)).floor().max(1.0);
+    let w = ((avail + gap) / cols - gap).floor();
+    let mut picked = None;
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing = vec2(gap, gap + 4.0);
         ui.horizontal_wrapped(|ui| {
             for p in crate::preset::all() {
                 let selected = !app.default_theme && app.theme_id == p.id;
@@ -689,11 +826,11 @@ fn themes(app: &mut App, ui: &mut Ui) {
                 }
             }
         });
-        if let Some(id) = picked {
-            app.theme_id = id;
-            app.default_theme = false;
-        }
     });
+    if let Some(id) = picked {
+        app.theme_id = id;
+        app.default_theme = false;
+    }
 }
 
 fn theme_card(ui: &mut Ui, p: &crate::preset::Preset, w: f32, selected: bool, accent: Color32) -> egui::Response {
