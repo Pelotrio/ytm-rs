@@ -65,7 +65,15 @@ pub struct Client {
     jwt_file: PathBuf,
     webview_profile: PathBuf,
     jwt: tokio::sync::Mutex<Option<String>>,
+    /// When the Turnstile challenge last failed; it isn't retried for a while, so
+    /// every new song doesn't start another WebView2.
+    challenge_failed: std::sync::Mutex<Option<std::time::Instant>>,
+    /// The last few songs' lyrics, for replays and going back.
+    recent: std::sync::Mutex<std::collections::VecDeque<(String, Lyrics)>>,
 }
+
+const CHALLENGE_RETRY: Duration = Duration::from_secs(15 * 60);
+const RECENT: usize = 8;
 
 pub struct Query<'a> {
     pub video_id: &'a str,
@@ -79,10 +87,32 @@ impl Client {
     pub fn new(http: reqwest::Client, data_dir: &Path) -> Self {
         let jwt_file = data_dir.join("lyrics_jwt");
         let cached = std::fs::read_to_string(&jwt_file).ok().filter(|t| jwt_seconds_left(t) > 3600);
-        Self { http, jwt_file, webview_profile: data_dir.join("webview-lyrics"), jwt: tokio::sync::Mutex::new(cached) }
+        Self {
+            http,
+            jwt_file,
+            webview_profile: data_dir.join("webview-lyrics"),
+            jwt: tokio::sync::Mutex::new(cached),
+            challenge_failed: Default::default(),
+            recent: Default::default(),
+        }
     }
 
     pub async fn fetch(&self, q: &Query<'_>) -> anyhow::Result<Option<Lyrics>> {
+        if let Some((_, l)) = self.recent.lock().unwrap().iter().find(|(id, _)| id == q.video_id) {
+            return Ok(Some(l.clone()));
+        }
+        let found = self.fetch_remote(q).await?;
+        if let Some(l) = &found {
+            let mut recent = self.recent.lock().unwrap();
+            if recent.len() == RECENT {
+                recent.pop_front();
+            }
+            recent.push_back((q.video_id.to_owned(), l.clone()));
+        }
+        Ok(found)
+    }
+
+    async fn fetch_remote(&self, q: &Query<'_>) -> anyhow::Result<Option<Lyrics>> {
         let mut jwt = self.token(false).await?;
         for attempt in 0..2 {
             let mut form = vec![
@@ -121,8 +151,17 @@ impl Client {
         if let Some(t) = slot.as_ref().filter(|t| !force_new && jwt_seconds_left(t) > 60) {
             return Ok(t.clone());
         }
+        if self.challenge_failed.lock().unwrap().is_some_and(|at| at.elapsed() < CHALLENGE_RETRY) {
+            anyhow::bail!("lyrics verification failed recently; retrying later");
+        }
         let profile = self.webview_profile.clone();
-        let turnstile = tokio::task::spawn_blocking(move || crate::turnstile::obtain(profile)).await??;
+        let turnstile = match tokio::task::spawn_blocking(move || crate::turnstile::obtain(profile)).await? {
+            Ok(t) => t,
+            Err(e) => {
+                *self.challenge_failed.lock().unwrap() = Some(std::time::Instant::now());
+                return Err(e);
+            }
+        };
         let resp: Value = self
             .http
             .post(format!("{API}verify-turnstile"))

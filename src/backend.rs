@@ -179,6 +179,9 @@ pub enum Resp {
     Error(String),
 }
 
+/// A video id and its stream buffer.
+type StreamSlot = Arc<std::sync::Mutex<Option<(String, Arc<Shared>)>>>;
+
 #[derive(Clone)]
 pub struct Backend {
     rt: Arc<Runtime>,
@@ -191,10 +194,14 @@ pub struct Backend {
     lyrics: Arc<lyrics::Client>,
     translate: Arc<crate::translate::Client>,
     /// The upcoming track, resolved and downloading ahead of time.
-    prefetched: Arc<std::sync::Mutex<Option<(String, Arc<Shared>)>>>,
+    prefetched: StreamSlot,
+    /// The stream most recently started, kept so a replay of a fully downloaded song
+    /// (repeat one, restart) doesn't download it again.
+    current: StreamSlot,
     jsc: Arc<jsc::Solver>,
-    /// Whether the signed-in account has Premium; checked once per sign-in.
-    premium: Arc<tokio::sync::Mutex<Option<bool>>>,
+    /// Whether the signed-in account has Premium; checked once per sign-in. A failed
+    /// check is retried no sooner than `PREMIUM_RETRY` later.
+    premium: Arc<tokio::sync::Mutex<Result<bool, Option<std::time::Instant>>>>,
     /// High quality: with Premium, every song goes through the signed-in web player
     /// for its 256 kbps stream instead of the anonymous 128 kbps one.
     hq: Arc<std::sync::atomic::AtomicBool>,
@@ -223,7 +230,7 @@ impl Backend {
         let lyrics = Arc::new(lyrics::Client::new(http.clone(), &data_dir));
         let translate = Arc::new(crate::translate::Client::new(http.clone(), &data_dir));
         let jsc = Arc::new(jsc::Solver::new(&data_dir));
-        Ok(Self { rt: Arc::new(rt), rp, http, tx, audio, wake, prefetched: Default::default(), data_dir, lyrics, translate, jsc, premium: Default::default(), hq: Default::default() })
+        Ok(Self { rt: Arc::new(rt), rp, http, tx, audio, wake, prefetched: Default::default(), current: Default::default(), data_dir, lyrics, translate, jsc, premium: Arc::new(tokio::sync::Mutex::new(Err(None))), hq: Default::default() })
     }
 
     pub fn http(&self) -> &reqwest::Client {
@@ -397,6 +404,8 @@ impl Backend {
                     Resp::LyricsExtras { video_id, extras }
                 }
                 Req::Art { key, url } => {
+                    // The backdrop is a 64 px blur; fetch near that, not the 544 px art.
+                    let url = model::sized(&url, 2 * crate::art::SIZE);
                     let bytes = self.http.get(&url).send().await?.error_for_status()?.bytes().await?;
                     let art = tokio::task::spawn_blocking(move || crate::art::process(&bytes)).await??;
                     Resp::Art { key, art }
@@ -426,9 +435,19 @@ impl Backend {
                     Err(e) => Resp::PlayError { generation, msg: format!("{e:#}") },
                 },
                 Req::Prefetch(video_id) => {
-                    if self.prefetched.lock().unwrap().as_ref().is_some_and(|(id, _)| *id == video_id) {
+                    // Let the playing song finish downloading first: it gets the whole
+                    // bandwidth, and a skip in the meantime makes this prefetch moot.
+                    let generation = self.audio.status.wanted_gen.load(Ordering::Relaxed);
+                    let playing = self.current.lock().unwrap().as_ref().map(|(_, s)| s.clone());
+                    if let Some(s) = playing {
+                        s.finished().await;
+                    }
+                    if self.audio.status.wanted_gen.load(Ordering::Relaxed) != generation
+                        || self.prefetched.lock().unwrap().as_ref().is_some_and(|(id, _)| *id == video_id)
+                    {
                         return Ok(None);
                     }
+                    log::debug!("prefetch {video_id}");
                     let shared = self.open_stream(&video_id).await?;
                     if let Some((_, old)) = self.prefetched.lock().unwrap().replace((video_id, shared)) {
                         old.cancel();
@@ -465,14 +484,14 @@ impl Backend {
                 }
                 Req::SetCookie(input) => {
                     self.set_cookie(&input).await?;
-                    *self.premium.lock().await = None;
+                    *self.premium.lock().await = Err(None);
                     self.warm_signed_in();
                     log::info!("signed in");
                     Resp::LoggedIn(true)
                 }
                 Req::Logout => {
                     let _ = self.rp.user_auth_remove_cookie().await;
-                    *self.premium.lock().await = None;
+                    *self.premium.lock().await = Err(None);
                     crate::login::forget(&self.login_profile());
                     Resp::LoggedIn(false)
                 }
@@ -602,23 +621,31 @@ impl Backend {
 
     async fn start_playback(&self, video_id: &str, generation: u64, at: std::time::Duration) -> anyhow::Result<()> {
         let t0 = std::time::Instant::now();
-        let ready = {
-            let mut slot = self.prefetched.lock().unwrap();
-            match slot.take() {
-                Some((id, s)) if id == video_id => Some(s),
-                other => {
-                    *slot = other;
-                    None
+        let prefetched = self.prefetched.lock().unwrap().take();
+        let replay = self.current.lock().unwrap().take().filter(|(id, s)| id == video_id && s.is_complete()).map(|(_, s)| s);
+        let ready = match prefetched {
+            Some((id, s)) if id == video_id => Some(s),
+            // Replaying the current song keeps the next one's prefetch.
+            other if replay.is_some() => {
+                *self.prefetched.lock().unwrap() = other;
+                replay
+            }
+            // Playback went elsewhere: that prefetch is moot.
+            other => {
+                if let Some((_, s)) = other {
+                    s.cancel();
                 }
+                None
             }
         };
         let shared = match ready {
             Some(s) => {
-                log::debug!("play {video_id} (gen {generation}): using prefetched stream");
+                log::debug!("play {video_id} (gen {generation}): using buffered stream");
                 s
             }
             None => self.open_stream(video_id).await?,
         };
+        *self.current.lock().unwrap() = Some((video_id.to_owned(), shared.clone()));
         log::debug!("play {video_id} (gen {generation}): stream open in {:?}", t0.elapsed());
         if self.audio.status.wanted_gen.load(Ordering::Relaxed) != generation {
             shared.cancel();
@@ -643,8 +670,7 @@ impl Backend {
         tokio::task::spawn_blocking(move || match open() {
             Ok(decoder) => {
                 log::debug!("play gen {generation}: decoder ready at {at:?} in {:?}", t0.elapsed());
-                let (shared, duration_ms) = (shared2.clone(), shared2.duration_ms);
-                audio.send(AudioCmd::Start { generation, decoder, shared, duration_ms, at })
+                audio.send(AudioCmd::Start { generation, decoder, shared: shared2, at })
             }
             Err(e) => {
                 let _ = tx.send(Resp::PlayError { generation, msg: format!("decode: {e}") });
@@ -757,18 +783,22 @@ impl Backend {
 
     /// Premium accounts can stream signed-in web player URLs without a PO token.
     async fn is_premium(&self, session: &webmusic::Session) -> bool {
+        const PREMIUM_RETRY: std::time::Duration = std::time::Duration::from_secs(300);
         let mut premium = self.premium.lock().await;
-        if let Some(p) = *premium {
-            return p;
+        match *premium {
+            Ok(p) => return p,
+            Err(Some(at)) if at.elapsed() < PREMIUM_RETRY => return false,
+            Err(_) => {}
         }
         match session.is_premium(&self.http).await {
             Ok(p) => {
                 log::info!("account has Premium: {p}");
-                *premium = Some(p);
+                *premium = Ok(p);
                 p
             }
             Err(e) => {
                 log::warn!("Premium check failed: {e:#}");
+                *premium = Err(Some(std::time::Instant::now()));
                 false
             }
         }

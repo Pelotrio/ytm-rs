@@ -52,6 +52,9 @@ impl Client {
             return None;
         }
         let (roman, trans) = tokio::join!(self.romanize(&uniq), self.translate(&uniq));
+        // Cache whenever both calls answered, even if one had nothing to add (an English
+        // song needs no translation), so a failed half is retried next time.
+        let cache = roman.is_ok() && trans.is_ok();
         let roman = roman.inspect_err(|e| log::warn!("romanization failed: {e:#}")).ok();
         let trans = trans.inspect_err(|e| log::warn!("translation failed: {e:#}")).ok().flatten();
         if roman.is_none() && trans.is_none() {
@@ -67,8 +70,7 @@ impl Client {
             roman: lines.iter().map(|l| pick(&roman, l, true)).collect(),
             trans: lines.iter().map(|l| pick(&trans, l, false)).collect(),
         };
-        // Only cache complete results, so a failed half is retried next time.
-        if roman.is_some() && trans.is_some() {
+        if cache {
             let _ = std::fs::create_dir_all(&self.dir);
             let _ = std::fs::write(&file, serde_json::to_vec(&e).unwrap_or_default());
         }

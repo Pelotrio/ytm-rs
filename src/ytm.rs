@@ -112,7 +112,7 @@ fn upload_rows(shelf: &Value) -> Vec<Track> {
 /// Like or un-like a song for the signed-in account.
 pub async fn set_like(q: &RustyPipeQuery, video_id: &str, like: bool) -> anyhow::Result<()> {
     let endpoint = if like { "like/like" } else { "like/removelike" };
-    q.raw(ClientType::DesktopMusic, endpoint, &json!({ "target": { "videoId": video_id } })).await?;
+    write(q, endpoint, json!({ "target": { "videoId": video_id } })).await?;
     Ok(())
 }
 

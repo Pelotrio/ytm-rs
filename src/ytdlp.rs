@@ -60,7 +60,15 @@ pub async fn resolve(http: &reqwest::Client, data_dir: &Path, video_id: &str) ->
     let bin = ensure(http, data_dir).await?;
     let data_dir = data_dir.to_owned();
     let video_id = video_id.to_owned();
-    tokio::task::spawn_blocking(move || run(&bin, &data_dir, &video_id, &cookie)).await?
+    let mut s = tokio::task::spawn_blocking(move || run(&bin, &data_dir, &video_id, &cookie)).await??;
+    // The range downloader needs the exact size; yt-dlp sometimes only estimates it.
+    if s.size == 0 {
+        let head = http.head(&s.url).header("User-Agent", &s.user_agent).send().await?.error_for_status()?;
+        // Not `content_length()`: for a HEAD response that reports the empty body.
+        let len = head.headers().get(reqwest::header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+        s.size = len.filter(|&n| n > 0).ok_or_else(|| anyhow::anyhow!("unknown stream size"))?;
+    }
+    Ok(s)
 }
 
 fn run(bin: &Path, data_dir: &Path, video_id: &str, cookie: &str) -> anyhow::Result<Stream> {
@@ -101,7 +109,7 @@ fn run(bin: &Path, data_dir: &Path, video_id: &str, cookie: &str) -> anyhow::Res
     let v: Value = serde_json::from_slice(&out.stdout)?;
     Ok(Stream {
         url: v["url"].as_str().ok_or_else(|| anyhow::anyhow!("yt-dlp returned no URL"))?.to_owned(),
-        size: v["filesize"].as_u64().or_else(|| v["filesize_approx"].as_u64()).ok_or_else(|| anyhow::anyhow!("unknown stream size"))?,
+        size: v["filesize"].as_u64().unwrap_or(0),
         duration_ms: v["duration"].as_f64().map_or(0, |d| (d * 1000.0) as u64),
         user_agent: v["http_headers"]["User-Agent"].as_str().unwrap_or_default().to_owned(),
     })

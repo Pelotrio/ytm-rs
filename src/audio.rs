@@ -16,9 +16,10 @@ pub type TrackDecoder = Decoder<StreamReader>;
 
 pub enum AudioCmd {
     /// A decoder is ready for playback generation `generation`; stale generations are dropped.
-    Start { generation: u64, decoder: TrackDecoder, shared: Arc<Shared>, duration_ms: u64, at: Duration },
-    /// A seekable decoder, already positioned at `at`, replacing the current one.
-    Replace { generation: u64, decoder: TrackDecoder, at: Duration },
+    /// A decoder started mid-song (`at` > 0) is the seekable kind.
+    Start { generation: u64, decoder: TrackDecoder, shared: Arc<Shared>, at: Duration },
+    /// A decoder positioned at `at`, replacing the current one; only the latest seek's lands.
+    Replace { generation: u64, seek: u64, decoder: TrackDecoder, at: Duration, seekable: bool },
     Pause,
     Resume,
     Stop,
@@ -214,11 +215,15 @@ fn run(
     // The player counts position from when a source was appended; a swapped-in
     // seeked decoder starts at `offset`.
     let mut offset = Duration::ZERO;
+    // Whether the playing decoder can seek in place (it indexed the whole file).
+    let mut seekable = false;
+    // Latest seek; a slower, older seek's decoder must not land after a newer one.
+    let mut seek_seq: u64 = 0;
     loop {
-        // Poll faster while playing so the position stays fresh; idle otherwise.
-        let timeout = if current != 0 { Duration::from_millis(100) } else { Duration::from_secs(3600) };
+        // Poll while playing so the position stays fresh and the end is noticed; idle otherwise.
+        let timeout = if current != 0 && !player.is_paused() { Duration::from_millis(100) } else { Duration::from_secs(3600) };
         match rx.recv_timeout(timeout) {
-            Ok(AudioCmd::Start { generation, decoder, shared: s, duration_ms, at }) => {
+            Ok(AudioCmd::Start { generation, decoder, shared: s, at }) => {
                 if generation != status.wanted_gen.load(Ordering::Relaxed) {
                     log::debug!("audio: dropping stale generation {generation}");
                     continue;
@@ -230,16 +235,26 @@ fn run(
                 player.set_volume(f32::from_bits(status.volume.load(Ordering::Relaxed)) * gain);
                 player.append(Meter::new(decoder, status.clone()));
                 player.play();
-                status.duration_ms.store(duration_ms, Ordering::Relaxed);
+                // 0 means the stream didn't say; keep the length the UI already knows.
+                if s.duration_ms > 0 {
+                    status.duration_ms.store(s.duration_ms, Ordering::Relaxed);
+                }
+                if let Some(old) = shared.replace(s.clone())
+                    && !Arc::ptr_eq(&old, &s)
+                {
+                    old.cancel();
+                }
                 current = generation;
-                shared = Some(s);
                 offset = at;
+                seekable = !at.is_zero();
                 status.playing.store(true, Ordering::Relaxed);
             }
-            Ok(AudioCmd::Replace { generation, decoder, at }) => {
-                if generation != current {
+            Ok(AudioCmd::Replace { generation, seek, decoder, at, seekable: s }) => {
+                if generation != current || seek != seek_seq {
                     continue;
                 }
+                log::debug!("audio: seek to {at:?} via new decoder (seekable: {s})");
+                seekable = s;
                 let paused = player.is_paused();
                 player.clear();
                 player.append(Meter::new(decoder, status.clone()));
@@ -261,24 +276,42 @@ fn run(
             Ok(AudioCmd::Stop) => {
                 player.clear();
                 current = 0;
-                shared = None;
+                // Also stops a seek still waiting on this download.
+                if let Some(old) = shared.take() {
+                    old.cancel();
+                }
                 status.playing.store(false, Ordering::Relaxed);
                 status.set_position(0);
             }
             Ok(AudioCmd::Seek(pos)) => {
+                seek_seq += 1;
+                if current == 0 {
+                    continue;
+                }
+                // A seekable decoder already indexed the (fully downloaded) file.
+                if seekable && player.try_seek(pos).is_ok() {
+                    log::debug!("audio: seek to {pos:?} in place");
+                    offset = Duration::ZERO;
+                    status.set_position(pos.as_millis() as u64);
+                    continue;
+                }
                 // The playing decoder was opened non-seekable for a fast start. Build a
                 // seekable one over the same buffer off-thread (it needs every fragment
-                // header, so it may wait for the download) and swap it in.
+                // header, so it may wait for the download) and swap it in. Back to the
+                // start, a fresh non-seekable decoder is enough and opens at once.
                 if let Some(s) = shared.clone() {
-                    let (tx, events, generation) = (tx.clone(), events.clone(), current);
+                    let (tx, events, generation, seek) = (tx.clone(), events.clone(), current, seek_seq);
                     std::thread::spawn(move || {
-                        let res = stream::decoder(s, true).map_err(|e| e.to_string()).and_then(|mut d| {
-                            rodio::Source::try_seek(&mut d, pos).map_err(|e| e.to_string())?;
+                        let seekable = !pos.is_zero();
+                        let res = stream::decoder(s, seekable).map_err(|e| e.to_string()).and_then(|mut d| {
+                            if seekable {
+                                rodio::Source::try_seek(&mut d, pos).map_err(|e| e.to_string())?;
+                            }
                             Ok(d)
                         });
                         match res {
                             Ok(decoder) => {
-                                let _ = tx.send(AudioCmd::Replace { generation, decoder, at: pos });
+                                let _ = tx.send(AudioCmd::Replace { generation, seek, decoder, at: pos, seekable });
                             }
                             Err(e) => {
                                 let _ = events.send(AudioEvent::Error(format!("Seek failed: {e}")));

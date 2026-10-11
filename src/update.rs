@@ -158,25 +158,29 @@ impl Updater {
         let size = asset["size"].as_u64().unwrap_or(0);
         std::fs::create_dir_all(&self.dir)?;
         let path = self.dir.join(&want);
-        if std::fs::metadata(&path).map(|m| m.len()) .ok() != Some(size) || size == 0 {
+        if std::fs::metadata(&path).map(|m| m.len()).ok() != Some(size) || size == 0 {
             log::info!("update: downloading {version} ({size} bytes)");
             self.set(State::Downloading { version: version.clone(), percent: 0 });
             let mut resp = http.get(url).send().await?.error_for_status()?;
-            let mut bytes = Vec::with_capacity(size as usize);
+            // Stream to a file beside, then rename, so a half-written file is never taken as ready.
+            let part = path.with_extension("part");
+            let mut file = std::io::BufWriter::new(std::fs::File::create(&part)?);
+            let (mut got, mut shown) = (0u64, 0u8);
             while let Some(chunk) = resp.chunk().await? {
-                bytes.extend_from_slice(&chunk);
-                if size > 0 {
-                    let percent = (bytes.len() as u64 * 100 / size).min(100) as u8;
-                    *self.state.lock().unwrap() = State::Downloading { version: version.clone(), percent };
-                    (self.wake)();
+                std::io::Write::write_all(&mut file, &chunk)?;
+                got += chunk.len() as u64;
+                let percent = if size > 0 { (got * 100 / size).min(100) as u8 } else { 0 };
+                if percent != shown {
+                    shown = percent;
+                    self.set(State::Downloading { version: version.clone(), percent });
                 }
             }
-            if size > 0 && bytes.len() as u64 != size {
-                anyhow::bail!("download incomplete ({} of {size} bytes)", bytes.len());
+            std::io::Write::flush(&mut file)?;
+            drop(file);
+            if size > 0 && got != size {
+                let _ = std::fs::remove_file(&part);
+                anyhow::bail!("download incomplete ({got} of {size} bytes)");
             }
-            // Write beside, then rename, so a half-written file is never taken as ready.
-            let part = path.with_extension("part");
-            std::fs::write(&part, &bytes)?;
             std::fs::rename(&part, &path)?;
         }
         // Old installers are no longer needed.

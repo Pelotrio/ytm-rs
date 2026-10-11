@@ -89,9 +89,18 @@ impl Solver {
     }
 
     pub async fn solve(&self, player: &Player, n: Option<String>, sig: Option<String>) -> anyhow::Result<(Option<String>, Option<String>)> {
+        let path = self.dir.join(format!("{}.js", player.id));
         let (reply, rx) = oneshot::channel();
-        self.send(Job::Solve { path: self.dir.join(format!("{}.js", player.id)), n, sig, reply })?;
-        rx.await?
+        self.send(Job::Solve { path: path.clone(), n: n.clone(), sig: sig.clone(), reply })?;
+        match rx.await {
+            Ok(res) => res,
+            // The worker hit its idle timeout just as the job arrived; a new one takes it.
+            Err(_) => {
+                let (reply, rx) = oneshot::channel();
+                self.send(Job::Solve { path, n, sig, reply })?;
+                rx.await?
+            }
+        }
     }
 
     /// Hand a job to the worker, starting it if it has exited.

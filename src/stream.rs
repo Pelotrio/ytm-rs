@@ -14,6 +14,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use bytes::Bytes;
+
 const BLOCK: u64 = 256 * 1024;
 const WORKERS: usize = 4;
 const RETRIES: u32 = 3;
@@ -25,7 +27,7 @@ const MAX_REFRESHES: u32 = 2;
 pub type Refresh = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>> + Send + Sync>;
 
 struct Inner {
-    blocks: Vec<Option<Box<[u8]>>>,
+    blocks: Vec<Option<Bytes>>,
     in_flight: Vec<bool>,
     /// Block a reader most recently needed; workers prioritize from here.
     want: usize,
@@ -43,6 +45,8 @@ pub struct Shared {
     pub duration_ms: u64,
     /// YouTube's loudness for this stream, in dB above its -14 LUFS target.
     pub loudness_db: Option<f32>,
+    /// Flips to true once the download task has stopped (complete, failed or cancelled).
+    done: tokio::sync::watch::Sender<bool>,
 }
 
 impl Shared {
@@ -61,12 +65,24 @@ impl Shared {
             total,
             duration_ms,
             loudness_db,
+            done: tokio::sync::watch::Sender::new(false),
         })
+    }
+
+    /// Every block is in memory: readers never wait and the buffer can be replayed.
+    pub fn is_complete(&self) -> bool {
+        self.inner.lock().unwrap().blocks.iter().all(Option::is_some)
+    }
+
+    /// Wait until the download stops, however it ends.
+    pub async fn finished(&self) {
+        let _ = self.done.subscribe().wait_for(|d| *d).await;
     }
 
     /// Stop downloading (e.g. a prefetch that was superseded).
     pub fn cancel(&self) {
         self.inner.lock().unwrap().cancelled = true;
+        self.ready.notify_all();
     }
 
     fn claim(&self) -> Option<usize> {
@@ -83,7 +99,7 @@ impl Shared {
         Some(idx)
     }
 
-    fn put(&self, idx: usize, data: Box<[u8]>) {
+    fn put(&self, idx: usize, data: Bytes) {
         let mut inner = self.inner.lock().unwrap();
         inner.blocks[idx] = Some(data);
         inner.in_flight[idx] = false;
@@ -164,6 +180,7 @@ pub async fn download(http: reqwest::Client, url: String, ua: String, shared: Ar
         });
     }
     while set.join_next().await.is_some() {}
+    shared.done.send_replace(true);
 }
 
 fn is_forbidden(e: &anyhow::Error) -> bool {
@@ -172,7 +189,7 @@ fn is_forbidden(e: &anyhow::Error) -> bool {
         .is_some_and(|s| s == reqwest::StatusCode::FORBIDDEN)
 }
 
-async fn fetch(http: &reqwest::Client, url: &str, ua: &str, expect: u64) -> anyhow::Result<Box<[u8]>> {
+async fn fetch(http: &reqwest::Client, url: &str, ua: &str, expect: u64) -> anyhow::Result<Bytes> {
     let bytes = http
         .get(url)
         .header("User-Agent", ua)
@@ -183,7 +200,7 @@ async fn fetch(http: &reqwest::Client, url: &str, ua: &str, expect: u64) -> anyh
         .bytes()
         .await?;
     anyhow::ensure!(bytes.len() as u64 == expect, "short read: {} of {expect} bytes", bytes.len());
-    Ok(Box::from(&bytes[..]))
+    Ok(bytes)
 }
 
 pub struct StreamReader {
@@ -220,6 +237,9 @@ impl Read for StreamReader {
         while inner.blocks[idx].is_none() {
             if let Some(e) = &inner.error {
                 return Err(io::Error::other(e.clone()));
+            }
+            if inner.cancelled {
+                return Err(io::Error::other("download cancelled"));
             }
             inner = self.shared.ready.wait(inner).unwrap();
         }
