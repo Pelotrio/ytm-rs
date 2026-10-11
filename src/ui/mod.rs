@@ -1353,6 +1353,20 @@ impl eframe::App for App {
         if self.page_changed < 0.0 {
             self.page_changed = now;
         }
+        // Dev hook: YTM_NP_TOGGLE_AT=<secs>[,<secs>…] clicks the Lyrics chip at those times.
+        if let Ok(v) = std::env::var("YTM_NP_TOGGLE_AT") {
+            let times: Vec<f64> = v.split(',').filter_map(|t| t.parse().ok()).collect();
+            let id = egui::Id::new("dev-np-toggles");
+            let done: usize = ctx.data(|d| d.get_temp(id)).unwrap_or(0);
+            if let Some(&t) = times.get(done) {
+                if now >= t {
+                    ctx.data_mut(|d| d.insert_temp(id, done + 1));
+                    self.np_tab = if self.np_tab == NpTab::Lyrics { NpTab::Art } else { NpTab::Lyrics };
+                } else {
+                    ctx.request_repaint_after(Duration::from_secs_f64(t - now));
+                }
+            }
+        }
         fit_window_to_monitor(ctx);
         self.sync_discord();
         self.tick_updates(ctx, now);
@@ -1576,9 +1590,49 @@ struct Session {
 
 /// Dev hook: `YTM_SCREENSHOT=out.png` saves the app's own framebuffer after
 /// `YTM_SCREENSHOT_AT` seconds (default 8), independent of OS window capture.
+/// `YTM_SCREENSHOT_BURST=<n>` instead keeps the next n frames from `YTM_SCREENSHOT_AT`
+/// (in memory, so saving doesn't slow them) and then writes `<stem>_<i>_<ms>.png`,
+/// `ms` being each frame's time: a filmstrip of an animation and its frame pacing.
 fn dev_screenshot(ctx: &egui::Context, now: f64) {
     let Some(path) = std::env::var_os("YTM_SCREENSHOT") else { return };
     let at: f64 = std::env::var("YTM_SCREENSHOT_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(8.0);
+    if let Some(n) = std::env::var("YTM_SCREENSHOT_BURST").ok().and_then(|v| v.parse::<usize>().ok()) {
+        static FRAMES: std::sync::Mutex<Vec<(f64, Arc<egui::ColorImage>)>> = std::sync::Mutex::new(Vec::new());
+        static DONE: AtomicBool = AtomicBool::new(false);
+        if DONE.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut frames = FRAMES.lock().unwrap();
+        if let Some(img) = ctx.input(|i| i.events.iter().find_map(|e| match e {
+            egui::Event::Screenshot { image, .. } => Some(image.clone()),
+            _ => None,
+        })) {
+            frames.push((now, img));
+        }
+        if now >= at && frames.len() < n {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+            ctx.request_repaint();
+        } else if now < at {
+            ctx.request_repaint_after(Duration::from_secs_f64(at - now));
+        } else if frames.len() == n {
+            let path = std::path::PathBuf::from(path);
+            let shots = std::mem::take(&mut *frames);
+            DONE.store(true, Ordering::Relaxed);
+            std::thread::spawn(move || {
+                let t0 = shots[0].0;
+                for (i, (t, img)) in shots.iter().enumerate() {
+                    let [w, h] = img.size;
+                    let bytes: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+                    let out = path.with_file_name(format!("{}_{i:03}_{:04}.png", path.file_stem().unwrap_or_default().to_string_lossy(), ((t - t0) * 1000.0) as u32));
+                    if let Some(img) = image::RgbaImage::from_raw(w as u32, h as u32, bytes) {
+                        let _ = img.save(out);
+                    }
+                }
+                log::info!("screenshot saved ({} frames)", shots.len());
+            });
+        }
+        return;
+    }
     let requested = egui::Id::new("dev-shot-requested");
     if now >= at && !ctx.data(|d| d.get_temp::<bool>(requested).unwrap_or(false)) {
         ctx.data_mut(|d| d.insert_temp(requested, true));

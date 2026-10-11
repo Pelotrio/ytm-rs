@@ -202,12 +202,18 @@ pub fn chip(ui: &mut Ui, label: &str, selected: bool) -> Response {
 
 /// Paint a cover image (square-cropped, CDN-resized) with a placeholder underneath.
 pub fn paint_cover(ui: &Ui, rect: Rect, thumbs: &[Thumb], radius: f32, zoom: f32) {
+    let px = (rect.width() * ui.ctx().pixels_per_point()) as u32;
+    paint_cover_px(ui, rect, thumbs, radius, zoom, px);
+}
+
+/// [`paint_cover`] fetching the image at `px` rather than the drawn size. A cover that
+/// animates in size must ask for one fixed size: every new size is a new download,
+/// blank until it arrives.
+pub fn paint_cover_px(ui: &Ui, rect: Rect, thumbs: &[Thumb], radius: f32, zoom: f32, px: u32) {
     if !ui.is_rect_visible(rect) {
         return;
     }
     ui.painter().rect_filled(rect, radius, theme::glass(0.07));
-    let ppp = ui.ctx().pixels_per_point();
-    let px = (rect.width() * ppp) as u32;
     let Some(t) = pick_thumb(thumbs, px.min(544)) else {
         icon_at(ui, rect.center(), icon::MUSIC, rect.width() * 0.3, theme::TEXT_FAINT);
         return;
@@ -238,10 +244,16 @@ pub fn paint_cover_fill(ui: &Ui, rect: Rect, thumbs: &[Thumb], tint: Color32) {
 
 /// Paint the cover as a disc rotated by `angle` (radians): a textured triangle fan,
 /// since egui's image rotation doesn't round corners.
-pub fn paint_disc(ui: &Ui, center: Pos2, r: f32, thumbs: &[Thumb], angle: f32, tint: Color32) {
+/// Start loading a cover at `px` without drawing it, so it's ready when it appears.
+pub fn preload_cover(ctx: &egui::Context, thumbs: &[Thumb], px: u32) {
+    if let Some(t) = pick_thumb(thumbs, px.min(544)) {
+        let _ = egui::Image::new(sized(&t.url, px.max(60))).load_for_size(ctx, Vec2::splat(px as f32));
+    }
+}
+
+/// The cover as a disc, rotated by `angle`; fetched at `px` (see [`paint_cover_px`]).
+pub fn paint_disc(ui: &Ui, center: Pos2, r: f32, thumbs: &[Thumb], angle: f32, tint: Color32, px: u32) {
     ui.painter().circle_filled(center, r, theme::glass(0.07));
-    let ppp = ui.ctx().pixels_per_point();
-    let px = (r * 2.0 * ppp) as u32;
     let Some(t) = pick_thumb(thumbs, px.min(544)) else { return };
     let url = sized(&t.url, px.max(60));
     let Ok(egui::load::TexturePoll::Ready { texture }) = egui::Image::new(url).load_for_size(ui.ctx(), Vec2::splat(r * 2.0)) else {

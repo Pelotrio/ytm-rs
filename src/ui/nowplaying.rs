@@ -5,7 +5,7 @@
 
 use egui::{Align2, Color32, Pos2, Rect, Sense, Ui, Vec2, pos2, vec2};
 
-use super::widgets::{self, icon_button, named, paint_cover, text_at};
+use super::widgets::{self, icon_button, named, text_at};
 use super::{Action, App, NpTab};
 use crate::lyrics::{Line, Lyrics, Sync};
 use crate::shader::Params;
@@ -143,8 +143,24 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
         ui.ctx().data_mut(|d| d.insert_temp(last_id, app.np_tab));
         app.np_tab
     };
-    let shown = theme::ease_in_out(ui.ctx().animate_bool_with_time(egui::Id::new("np-panel"), app.np_tab != NpTab::Art, 0.45));
+    // Linear 0..1 over the transition; each part eases its own slice of it.
+    let shown = ui.ctx().animate_bool_with_time(egui::Id::new("np-panel"), app.np_tab != NpTab::Art, 0.6);
+    if shown > 0.0 && shown < 1.0 {
+        // Every frame while sliding, not the now-playing view's usual 30 fps.
+        ui.ctx().request_repaint();
+    }
+    let ppp = ui.ctx().pixels_per_point();
     let p = if panel_tab == NpTab::Lyrics && no_lyrics { 0.0 } else { shown };
+    // Whichever is leaving slides and fades out over the first 45%, then the other
+    // comes in over the last 70%, both easing out, in either direction.
+    let (panel_vis, art_vis) = if app.np_tab != NpTab::Art {
+        (theme::ease_out((p - 0.3) / 0.7), 1.0 - theme::ease_out(p / 0.45))
+    } else {
+        let q = 1.0 - p;
+        (1.0 - theme::ease_out(q / 0.45), theme::ease_out((q - 0.3) / 0.7))
+    };
+    // The cover gliding between its two places (wide layouts): a gentle S-curve.
+    let glide = p * p * (3.0 - 2.0 * p);
     let narrow = content.width() < 860.0;
     let lyrics_only = narrow || cs.layout == Layout::LyricsOnly;
     // reCover: the backdrop cover sits on the left, so the lyrics take the right side.
@@ -155,12 +171,14 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
     let slide = 72.0;
     let right = if lyrics_only {
         // No cover column next to the panel: the artwork fades in from the left as the panel leaves.
-        if p < 0.999 {
+        let px = (art_side(cs, col_art) * ppp) as u32;
+        if art_vis > 0.001 {
             let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(content));
-            // Staggered with the panel (which fades over the other end of `p`), so the
-            // two don't sit on top of each other mid-way.
-            cui.multiply_opacity(((0.6 - p) / 0.6).clamp(0.0, 1.0));
-            cover_column(app, &mut cui, col_art.translate(vec2(-slide * p, 0.0)), &track, no_lyrics, now);
+            cui.multiply_opacity(art_vis);
+            cover_column(app, &mut cui, col_art.translate(vec2(-slide * (1.0 - art_vis), 0.0)), &track, no_lyrics, now, px);
+        } else {
+            // Hidden behind the lyrics: have it loaded for when they're turned off.
+            widgets::preload_cover(ui.ctx(), &track.thumbs, px);
         }
         if beside_cover { Rect::from_min_max(pos2(content.left() + content.width() * 0.46, content.top()), content.max) } else { content }
     } else {
@@ -172,22 +190,24 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
         } else {
             Rect::from_min_size(content.min, vec2(col_w, content.height()))
         };
-        let col = Rect::from_min_max(col_art.min.lerp(col_panel.min, p), col_art.max.lerp(col_panel.max, p));
-        cover_column(app, ui, col, &track, no_lyrics, now);
+        let col = Rect::from_min_max(col_art.min.lerp(col_panel.min, glide), col_art.max.lerp(col_panel.max, glide));
+        // One image size for the whole glide, the bigger of its two ends.
+        let px = (art_side(cs, col_art).max(art_side(cs, col_panel)) * ppp) as u32;
+        cover_column(app, ui, col, &track, no_lyrics, now, px);
         if cs.side == Side::Right {
             Rect::from_min_max(content.min, pos2(col_panel.left() - 28.0, content.bottom()))
         } else {
             Rect::from_min_max(pos2(col_panel.right() + 28.0, content.top()), content.max)
         }
     };
-    if p <= 0.001 {
+    if panel_vis <= 0.001 {
         return;
     }
     let toward = if !lyrics_only && cs.side == Side::Right { -slide } else { slide };
-    let rect = right.translate(vec2(toward * (1.0 - p), 0.0));
+    let rect = right.translate(vec2(toward * (1.0 - panel_vis), 0.0));
     let mut rui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
     rui.set_clip_rect(content.intersect(ui.clip_rect()));
-    rui.multiply_opacity(if lyrics_only { ((p - 0.4) / 0.6).clamp(0.0, 1.0) } else { p });
+    rui.multiply_opacity(panel_vis);
     match panel_tab {
         NpTab::Lyrics => lyrics_panel(app, &mut rui, rect, now, centered),
         NpTab::UpNext => super::shell::queue_list(app, &mut rui, "np"),
@@ -196,11 +216,18 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
 }
 
 /// Artwork with the title and artists under it, laid out in `col`.
-fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Track, no_lyrics: bool, now: f64) {
+/// Size of the artwork laid out in `col`.
+fn art_side(cs: &crate::preset::CoverStyle, col: Rect) -> f32 {
+    (col.width() * 0.82 * cs.size.clamp(0.5, 1.35)).min(col.height() - 110.0).max(160.0)
+}
+
+/// `px`: the size to fetch the image at (fixed while the column animates).
+#[allow(clippy::too_many_arguments)]
+fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Track, no_lyrics: bool, now: f64, px: u32) {
     use crate::preset::Shape;
     let look = app.look();
     let cs = &look.cover;
-    let side = (col.width() * 0.82 * cs.size.clamp(0.5, 1.35)).min(col.height() - 110.0).max(160.0);
+    let side = art_side(cs, col);
     let art = Rect::from_center_size(pos2(col.center().x, col.top() + side / 2.0 + (col.height() - side - 110.0).max(0.0) * 0.35), Vec2::splat(side));
     let round = cs.shape != Shape::Rounded;
     let radius = if round { side / 2.0 } else { cs.radius.clamp(0.0, side / 2.0) };
@@ -219,7 +246,7 @@ fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Tra
             app.record_angle = (app.record_angle + dt * std::f64::consts::TAU / cs.spin_secs.max(4.0) as f64) % std::f64::consts::TAU;
         }
         let angle = if cs.shape == Shape::Record { app.record_angle as f32 } else { 0.0 };
-        widgets::paint_disc(ui, art.center(), side / 2.0, &track.thumbs, angle, tint);
+        widgets::paint_disc(ui, art.center(), side / 2.0, &track.thumbs, angle, tint, px);
         if cs.shape == Shape::Record {
             // Vinyl: faint grooves and a spindle hole.
             let p = ui.painter();
@@ -230,7 +257,7 @@ fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Tra
             p.circle_filled(art.center(), side * 0.022, Color32::from_rgb(10, 10, 12));
         }
     } else {
-        paint_cover(ui, art, &track.thumbs, radius, 1.0);
+        widgets::paint_cover_px(ui, art, &track.thumbs, radius, 1.0, px);
         if cs.brightness < 0.99 {
             ui.painter().rect_filled(art, cr, theme::shade(1.0 - cs.brightness));
         }
