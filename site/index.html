@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ytm-rs: a fast, native YouTube Music desktop app for Windows</title>
+<meta name="description" content="ytm-rs is a free, open-source YouTube Music desktop client written in Rust. A 9 MB installer with synced lyrics, romanization, 26 themes and no Electron.">
+<meta name="keywords" content="YouTube Music desktop app, YouTube Music client, YouTube Music Windows, native YouTube Music player, Rust music player, egui, synced lyrics, romanized lyrics, Electron alternative, open source">
+<link rel="canonical" href="https://grapedjuice.github.io/ytm-rs/">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="author" content="grapedjuice">
+<meta name="theme-color" content="#0b0707">
+<meta name="color-scheme" content="dark">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="ytm-rs">
+<meta property="og:title" content="ytm-rs: YouTube Music, without the browser">
+<meta property="og:description" content="A native YouTube Music desktop app written in Rust. 9 MB installer, synced lyrics with romanization, 26 themes, free and open source.">
+<meta property="og:url" content="https://grapedjuice.github.io/ytm-rs/">
+<meta property="og:image" content="https://grapedjuice.github.io/ytm-rs/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="ytm-rs, a native YouTube Music app, showing synced Japanese lyrics with romanization">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="ytm-rs: YouTube Music, without the browser">
+<meta name="twitter:description" content="A native YouTube Music desktop app written in Rust. 9 MB installer, synced lyrics, 26 themes, open source.">
+<meta name="twitter:image" content="https://grapedjuice.github.io/ytm-rs/og.png">
+
+<link rel="icon" href="favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="site.webmanifest">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@600;700;800;900&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@500;700&display=swap&text=%E3%81%84%E3%81%86%E3%81%8C%E3%81%8F%E3%81%91%E3%81%95%E3%81%9A%E3%81%9D%E3%81%9F%E3%81%A0%E3%81%A3%E3%81%A4%E3%81%A6%E3%81%A7%E3%81%A8%E3%81%AA%E3%81%AB%E3%81%AE%E3%81%AF%E3%81%B2%E3%81%BE%E3%82%82%E3%82%89%E3%82%8A%E3%82%8B%E5%87%BA%E5%90%9B%E5%A3%B0%E5%A4%96%E5%A4%9C%E6%96%87%E6%9C%9D%E6%9D%A5%E6%AD%8C%E7%94%BB%E7%AA%93%E7%B6%9A%E8%90%BD%E8%B5%B0%E8%BB%BD%E9%87%8D%E9%9D%A2%E9%9F%B3%E9%B3%B4A">
+<link rel="stylesheet" href="vendor/lenis.css">
+<link rel="stylesheet" href="styles.css">
+<link rel="preload" as="image" href="img/shots/now-playing-1600.webp" imagesrcset="img/shots/now-playing-800.webp 800w, img/shots/now-playing-1600.webp 1600w" imagesizes="(max-width: 1100px) 100vw, 1100px">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://grapedjuice.github.io/ytm-rs/#app",
+      "name": "ytm-rs",
+      "alternateName": "ytm-rs YouTube Music client",
+      "description": "A fast, lightweight, native YouTube Music desktop client written in Rust with egui and rodio. Synced lyrics with romanization and translation, 26 themes, uploads, Discord Rich Presence and automatic updates.",
+      "applicationCategory": "MultimediaApplication",
+      "applicationSubCategory": "Music player",
+      "operatingSystem": "Windows",
+      "softwareVersion": "0.2.10",
+      "fileSize": "9MB",
+      "url": "https://grapedjuice.github.io/ytm-rs/",
+      "downloadUrl": "https://github.com/grapedjuice/ytm-rs/releases/latest",
+      "installUrl": "https://github.com/grapedjuice/ytm-rs/releases/latest",
+      "license": "https://www.gnu.org/licenses/gpl-3.0.html",
+      "isAccessibleForFree": true,
+      "image": "https://grapedjuice.github.io/ytm-rs/og.png",
+      "screenshot": [
+        "https://grapedjuice.github.io/ytm-rs/img/shots/jp-1600.webp",
+        "https://grapedjuice.github.io/ytm-rs/img/shots/home-1600.webp",
+        "https://grapedjuice.github.io/ytm-rs/img/shots/spinning-record-1600.webp"
+      ],
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "author": { "@type": "Person", "name": "grapedjuice", "url": "https://github.com/grapedjuice" },
+      "sameAs": ["https://github.com/grapedjuice/ytm-rs"]
+    },
+    {
+      "@type": "SoftwareSourceCode",
+      "name": "ytm-rs",
+      "codeRepository": "https://github.com/grapedjuice/ytm-rs",
+      "programmingLanguage": "Rust",
+      "license": "https://www.gnu.org/licenses/gpl-3.0.html",
+      "targetProduct": { "@id": "https://grapedjuice.github.io/ytm-rs/#app" }
+    },
+    {
+      "@type": "WebSite",
+      "name": "ytm-rs",
+      "url": "https://grapedjuice.github.io/ytm-rs/"
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        { "@type": "Question", "name": "Is ytm-rs free?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. ytm-rs is free and open source under the GPL-3.0 license. There are no ads, accounts or paid tiers in the app itself." } },
+        { "@type": "Question", "name": "Is ytm-rs an official YouTube Music app?", "acceptedAnswer": { "@type": "Answer", "text": "No. ytm-rs is an unofficial client built by an independent developer. It talks to the same services music.youtube.com uses, so changes on YouTube's side can occasionally affect playback, sign-in or lyrics." } },
+        { "@type": "Question", "name": "Do I need YouTube Premium to use ytm-rs?", "acceptedAnswer": { "@type": "Answer", "text": "No. You can browse, search and play without signing in. Signing in unlocks your home feed, library, likes and history. Premium-only songs play natively if your account has Premium." } },
+        { "@type": "Question", "name": "Does ytm-rs run on macOS or Linux?", "acceptedAnswer": { "@type": "Answer", "text": "Releases are built and tested for Windows. The app is written with cross-platform Rust libraries, but macOS and Linux builds aren't published or tested yet." } },
+        { "@type": "Question", "name": "Where do the synced lyrics come from?", "acceptedAnswer": { "@type": "Answer", "text": "Synced lyrics come from the Better Lyrics API, with YouTube Music's own plain lyrics as a fallback. Romanization and English translations for Japanese, Korean, Chinese and other non-Latin lyrics come from Google Translate." } },
+        { "@type": "Question", "name": "How does ytm-rs update?", "acceptedAnswer": { "@type": "Answer", "text": "The installed app checks GitHub for new releases, downloads them in the background and installs when you close it. You can also restart to update right away, or turn updates off in Settings." } }
+      ]
+    }
+  ]
+}
+</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="nav" id="nav">
+  <a class="nav__brand" href="#top" aria-label="ytm-rs home">
+    <img src="icon-192.png" alt="" width="28" height="28">
+    <span>ytm-rs</span>
+  </a>
+  <nav class="nav__links" aria-label="Sections">
+    <a href="#lyrics">Lyrics</a>
+    <a href="#features">Features</a>
+    <a href="#themes">Themes</a>
+    <a href="#engine">Under the hood</a>
+    <a href="#faq">FAQ</a>
+  </nav>
+  <div class="nav__actions">
+    <a class="gh-pill" href="https://github.com/grapedjuice/ytm-rs" rel="noopener" aria-label="ytm-rs on GitHub">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      <span class="gh-pill__label">Star</span>
+      <span class="gh-pill__count" data-stars>8</span>
+    </a>
+    <a class="btn btn--sm btn--primary" href="#download">Download</a>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- ============ HERO ============ -->
+<section class="hero" id="top" aria-labelledby="hero-title">
+  <canvas class="hero__bg" data-warp="hero" aria-hidden="true"></canvas>
+  <div class="hero__grain" aria-hidden="true"></div>
+  <div class="hero__inner">
+    <a class="chip" href="https://github.com/grapedjuice/ytm-rs/releases/latest" rel="noopener">
+      <span class="chip__dot"></span>
+      <span data-version>v0.2.10</span> is out
+      <span class="chip__sep"></span>
+      <span class="chip__more">Release notes →</span>
+    </a>
+    <h1 class="hero__title karaoke" id="hero-title">
+      <span class="kline"><span class="kw">YouTube</span> <span class="kw">Music,</span></span>
+      <span class="kline"><span class="kw">without</span> <span class="kw">the</span> <span class="kw">browser.</span></span>
+    </h1>
+    <p class="hero__sub">
+      ytm-rs is a native YouTube Music app for Windows, written in Rust. It comes as a 9&nbsp;MB installer with synced lyrics, romanization and 26 themes, and draws nothing at all when you aren't looking.
+    </p>
+    <div class="hero__cta">
+      <a class="btn btn--primary btn--lg" href="#download" data-dl>
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M3 5.5 10.4 4.5v7H3zM11.4 4.36 21 3v8.5h-9.6zM3 12.5h7.4v7L3 18.5zM11.4 12.5H21V21l-9.6-1.36z"/></svg>
+        Download for Windows
+      </a>
+      <a class="btn btn--ghost btn--lg" href="https://github.com/grapedjuice/ytm-rs" rel="noopener">View source</a>
+    </div>
+    <p class="hero__meta">Free and open source · GPL-3.0 · No account needed to listen</p>
+  </div>
+
+  <div class="scrollframe" data-scrollframe>
+    <div class="scrollframe__stage">
+      <figure class="device" data-device>
+        <div class="device__bar" aria-hidden="true"><i></i><i></i><i></i><span>ytm-rs</span></div>
+        <img src="img/shots/now-playing-1600.webp" srcset="img/shots/now-playing-800.webp 800w, img/shots/now-playing-1600.webp 1600w" sizes="(max-width: 1100px) 100vw, 1100px" width="1600" height="881" alt="ytm-rs now playing Blinding Lights by The Weeknd, with synced lyrics over an animated album-art background" fetchpriority="high">
+      </figure>
+    </div>
+  </div>
+</section>
+
+<!-- ============ STATS ============ -->
+<section class="stats" aria-label="By the numbers">
+  <div class="stats__grid">
+    <div class="stat"><span class="stat__num"><b data-tick="9">0</b><small>MB</small></span><span class="stat__label">installer</span></div>
+    <div class="stat"><span class="stat__num"><b data-tick="140" data-prefix="~">0</b><small>MB</small></span><span class="stat__label">memory while playing</span></div>
+    <div class="stat"><span class="stat__num"><b data-tick="0">0</b><small>fps</small></span><span class="stat__label">drawn when idle</span></div>
+    <div class="stat"><span class="stat__num"><b data-tick="26">0</b></span><span class="stat__label">community themes</span></div>
+  </div>
+  <p class="stats__note">Measured with v0.2.10 on Windows 11: private memory with a song playing, and frames drawn with the window idle.</p>
+</section>
+
+<!-- ============ MANIFESTO ============ -->
+<section class="reveal" data-reveal aria-label="Why ytm-rs exists">
+  <div class="reveal__sticky">
+    <p class="reveal__text" data-reveal-text>Your music app shouldn't be a web browser in disguise. ytm-rs draws every pixel itself, decodes audio itself, and talks to YouTube Music directly. It opens fast, stays small, and sleeps when you look away.</p>
+  </div>
+</section>
+
+<!-- ============ LYRICS DEMO ============ -->
+<section class="section lyrics" id="lyrics" aria-labelledby="lyrics-title">
+  <div class="section__head">
+    <p class="eyebrow">Synced lyrics</p>
+    <h2 id="lyrics-title">Lyrics that keep up with you.</h2>
+    <p class="lede">Lines light up as they're sung. Click one to jump there. Japanese, Korean, Chinese and other non-Latin lyrics get romanization and an English translation underneath. Try it below. The styles use the same numbers as the app's theme presets.</p>
+  </div>
+
+  <div class="player" data-player data-theme="classic">
+    <canvas class="player__bg" data-warp="player" aria-hidden="true"></canvas>
+    <div class="player__scrim" aria-hidden="true"></div>
+    <div class="player__top">
+      <span class="player__badge">Live demo</span>
+      <div class="player__toggles">
+        <button class="pill" type="button" data-toggle="romaji" aria-pressed="true">文A Romaji</button>
+        <button class="pill" type="button" data-toggle="trans" aria-pressed="true">Translation</button>
+      </div>
+    </div>
+    <div class="player__body">
+      <div class="player__art">
+        <canvas class="player__cover" data-cover width="512" height="512" role="img" aria-label="Album cover for the demo song Mado no Soto"></canvas>
+        <div class="player__meta">
+          <strong lang="ja">窓の外 <span lang="en">· Mado no Soto</span></strong>
+          <span>ytm-rs demo song</span>
+        </div>
+      </div>
+      <div class="player__lyrics" data-lyrics aria-live="off">
+        <div class="lyr__track" data-track></div>
+      </div>
+    </div>
+    <div class="player__bar">
+      <button class="playbtn" type="button" data-play aria-label="Pause">
+        <svg class="i-pause" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>
+        <svg class="i-play" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M8 5.5v13l11-6.5z"/></svg>
+      </button>
+      <span class="player__time" data-time>0:00</span>
+      <div class="player__progress" data-progress role="slider" aria-label="Seek" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0"><i data-fill></i></div>
+      <span class="player__time" data-dur>0:30</span>
+    </div>
+  </div>
+
+  <div class="themepick" role="radiogroup" aria-label="Lyric style">
+    <button type="button" role="radio" aria-checked="true" data-style="classic"><b>Classic</b><span>ytm-rs</span></button>
+    <button type="button" role="radio" aria-checked="false" data-style="apple"><b>Apple Music</b><span>tposejank</span></button>
+    <button type="button" role="radio" aria-checked="false" data-style="glow"><b>Lyric Glow</b><span>MatiuxXcd</span></button>
+    <button type="button" role="radio" aria-checked="false" data-style="burn"><b>Burn</b><span>semicolonhope</span></button>
+    <button type="button" role="radio" aria-checked="false" data-style="karaoke"><b>Opacity Karaoke</b><span>semicolonhope</span></button>
+    <button type="button" role="radio" aria-checked="false" data-style="spotlight"><b>Spotlight</b><span>boidushya</span></button>
+  </div>
+  <p class="fineprint">The demo song is original, written for this page. In the app, lyrics come from Better Lyrics and translations from Google Translate.</p>
+</section>
+
+<!-- ============ FEATURES ============ -->
+<section class="section" id="features" aria-labelledby="features-title">
+  <div class="section__head">
+    <p class="eyebrow">Everything you use YouTube Music for</p>
+    <h2 id="features-title">The whole app, in one small app.</h2>
+  </div>
+
+  <div class="bento">
+    <article class="card card--wide card--shot" data-glow>
+      <div class="card__copy">
+        <span class="card__icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5V21h-6v-6H9v6H3z"/></svg></span>
+        <h3>Your feed, your mixes</h3>
+        <p>Listen again, Quick picks, My Supermix, Discover Mix and mood filters, straight from your YouTube Music home. Keep scrolling and more loads in.</p>
+      </div>
+      <img src="img/shots/home-1600.webp" srcset="img/shots/home-800.webp 800w, img/shots/home-1600.webp 1600w" sizes="(max-width: 900px) 100vw, 720px" width="1600" height="452" alt="ytm-rs home page with mood filters and a row of today's biggest hits" loading="lazy">
+    </article>
+
+    <article class="card" data-glow>
+      <span class="card__icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16M4 10h10M4 15h16M4 20h8"/></svg></span>
+      <h3>Read along in any language</h3>
+      <p>Synced lyrics, with romanization and English translation under Japanese, Korean and Chinese lines. Click a line to seek. Hide them to see just the art.</p>
+    </article>
+
+    <article class="card" data-glow>
+      <span class="card__icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0-5 5m5-5 5 5M4 20h16"/></svg></span>
+      <h3>Upload your own files</h3>
+      <p>Drop MP3, M4A, FLAC, OGG or WMA files on the window. They go to your YouTube Music library, tags and cover art included.</p>
+    </article>
+
+    <article class="card" data-glow>
+      <span class="card__icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12h3l3-7 4 14 3-7h5"/></svg></span>
+      <h3>Even volume, quick skips</h3>
+      <p>Loudness normalization from YouTube's own measurements. The next song downloads ahead of time, so skipping is instant. Queue, radio, shuffle, repeat and autoplay are all here.</p>
+    </article>
+
+    <article class="card" data-glow>
+      <span class="card__icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></span>
+      <h3>Feels like part of Windows</h3>
+      <p>Media keys and the Windows media flyout, Discord Rich Presence, and controls named for screen readers.</p>
+    </article>
+
+    <article class="card" data-glow>
+      <span class="card__icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4"/></svg></span>
+      <h3>Updates itself</h3>
+      <p>New versions download in the background and install when you close the app. Each update shows its release notes, written by a person.</p>
+    </article>
+
+    <article class="card card--wide" data-glow>
+      <span class="card__icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+      <h3>Premium and age-restricted songs</h3>
+      <p>Songs YouTube keeps behind your account play through your signed-in session. With Premium they play natively. Without it, age-restricted tracks fall back to yt-dlp, so they still play.</p>
+    </article>
+  </div>
+</section>
+
+<!-- ============ THEMES ============ -->
+<section class="section themes" id="themes" aria-labelledby="themes-title">
+  <div class="themes__split">
+    <div class="themes__copy">
+      <p class="eyebrow">Themes</p>
+      <h2 id="themes-title">26 themes, rebuilt natively.</h2>
+      <p class="lede">The Better Lyrics community made these as CSS for the browser. ytm-rs translates each one into native rendering: its lyrics, warped backdrop, cover, player bar, fonts and the rest of the app. Every theme credits its creators.</p>
+      <ul class="themes__names" aria-label="Included themes">
+        <li><b>Apple Music</b><span>tposejank</span></li>
+        <li><b>Apple Music Refine</b><span>ankit008-mishra</span></li>
+        <li><b>AppleTify</b><span>a-dogann</span></li>
+        <li><b>Better-YTM</b><span>WolftheE</span></li>
+        <li><b>Burn</b><span>semicolonhope</span></li>
+        <li><b>Clarity</b><span>Al Farrizi</span></li>
+        <li><b>Colorful Vocals</b><span>adaliea</span></li>
+        <li><b>Darky</b><span>ankit008-mishra</span></li>
+        <li><b>Dynamic Background</b><span>chengggit</span></li>
+        <li><b>EqualTweaks</b><span>thejosuep</span></li>
+        <li><b>Even Better Lyrics Plus</b><span>boidushya, noah</span></li>
+        <li><b>Expressive</b><span>decipher3114</span></li>
+        <li><b>Glassy Blur</b><span>ankit008-mishra</span></li>
+        <li><b>Lucid</b><span>drago-oo</span></li>
+        <li><b>Lyric Glow</b><span>MatiuxXcd</span></li>
+        <li><b>Minimal</b><span>semicolonhope</span></li>
+        <li><b>Minimalism Music</b><span>notacoderlols</span></li>
+        <li><b>ModernPlayer</b><span>snw-mint</span></li>
+        <li><b>Opacity Based Karaoke</b><span>semicolonhope</span></li>
+        <li><b>reCover</b><span>mukeenanyafiq</span></li>
+        <li><b>Spicy for YouTube Music</b><span>olafix52</span></li>
+        <li><b>Spinning Record</b><span>Xtremerspro</span></li>
+        <li><b>Spotifont</b><span>mukeenanyafiq</span></li>
+        <li><b>Spotlight</b><span>boidushya</span></li>
+        <li><b>Sustain</b><span>boidushya</span></li>
+        <li><b>YouTube TV</b><span>mukeenanyafiq</span></li>
+      </ul>
+    </div>
+    <div class="marquee3d" aria-hidden="true">
+      <div class="marquee3d__plane">
+        <div class="marquee3d__col" style="--dur:38s">
+          <img src="img/themes/apple-music.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/burn.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/dynamic-background.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/glassy-blur.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/minimalism-music.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/spicy-for-ytm.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/sustain.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/apple-music.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/burn.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/dynamic-background.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/glassy-blur.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/minimalism-music.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/spicy-for-ytm.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/sustain.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+        </div>
+        <div class="marquee3d__col" style="--dur:52s">
+          <img src="img/themes/apple-music-v3.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/clarity-theme.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/thejosueps-equal-tweaks-id.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/lucid.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/modern-player.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/spinning-record.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/youtube-tv-theme.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/apple-music-v3.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/clarity-theme.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/thejosueps-equal-tweaks-id.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/lucid.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/modern-player.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/spinning-record.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/youtube-tv-theme.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+        </div>
+        <div class="marquee3d__col" style="--dur:44s">
+          <img src="img/themes/ad-nextgen.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/colorful-vocals.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/eblp.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/lyric-glow.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/opacity-based-karaoke.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/spotifont.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/ad-nextgen.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/colorful-vocals.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/eblp.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/lyric-glow.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/opacity-based-karaoke.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/spotifont.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+        </div>
+        <div class="marquee3d__col" style="--dur:58s">
+          <img src="img/themes/wolfthee-theme-bytm.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/darky.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/expressive.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/minimal.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/recover-theme.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/spotlight.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/wolfthee-theme-bytm.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/darky.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/expressive.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/minimal.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/recover-theme.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+          <img src="img/themes/spotlight.webp" alt="" width="480" height="300" loading="lazy" decoding="async">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="showcase" data-showcase>
+    <div class="showcase__tabs" role="tablist" aria-label="Theme screenshots">
+      <button role="tab" aria-selected="true" data-shot="spinning-record">Spinning Record</button>
+      <button role="tab" aria-selected="false" data-shot="recover">reCover</button>
+      <button role="tab" aria-selected="false" data-shot="apple-music-v3">Apple Music v3</button>
+      <button role="tab" aria-selected="false" data-shot="burn">Burn</button>
+      <button role="tab" aria-selected="false" data-shot="expressive">Expressive</button>
+      <button role="tab" aria-selected="false" data-shot="spotlight">Spotlight</button>
+      <button role="tab" aria-selected="false" data-shot="colorful-vocals">Colorful Vocals</button>
+    </div>
+    <div class="showcase__frame">
+      <img data-shot-img="spinning-record" class="is-on" src="img/shots/spinning-record-1600.webp" srcset="img/shots/spinning-record-800.webp 800w, img/shots/spinning-record-1600.webp 1600w" sizes="(max-width: 1100px) 100vw, 1100px" width="1600" height="900" loading="lazy" alt="Spinning Record theme: the album cover turns slowly as a vinyl disc beside Japanese lyrics">
+      <img data-shot-img="recover" src="img/shots/recover-1600.webp" srcset="img/shots/recover-800.webp 800w, img/shots/recover-1600.webp 1600w" sizes="(max-width: 1100px) 100vw, 1100px" width="1600" height="900" loading="lazy" alt="reCover theme: the cover fills the left side and fades into the lyrics">
+      <img data-shot-img="apple-music-v3" src="img/shots/apple-music-v3-1600.webp" srcset="img/shots/apple-music-v3-800.webp 800w, img/shots/apple-music-v3-1600.webp 1600w" sizes="(max-width: 1100px) 100vw, 1100px" width="1600" height="900" loading="lazy" alt="Apple Music v3 theme with large lyrics over a vivid warped backdrop">
+      <img data-shot-img="burn" src="img/shots/burn-1600.webp" srcset="img/shots/burn-800.webp 800w, img/shots/burn-1600.webp 1600w" sizes="(max-width: 1100px) 100vw, 1100px" width="1600" height="900" loading="lazy" alt="Burn theme: bright white lyrics over a full-bleed darkened cover">
+      <img data-shot-img="expressive" src="img/shots/expressive-1600.webp" srcset="img/shots/expressive-800.webp 800w, img/shots/expressive-1600.webp 1600w" sizes="(max-width: 1100px) 100vw, 1100px" width="1600" height="900" loading="lazy" alt="Expressive theme with a centred cover and lyrics">
+      <img data-shot-img="spotlight" src="img/shots/spotlight-1600.webp" srcset="img/shots/spotlight-800.webp 800w, img/shots/spotlight-1600.webp 1600w" sizes="(max-width: 1100px) 100vw, 1100px" width="1600" height="900" loading="lazy" alt="Spotlight theme: past lines blur away while the current lines stay sharp">
+      <img data-shot-img="colorful-vocals" src="img/shots/colorful-vocals-1600.webp" srcset="img/shots/colorful-vocals-800.webp 800w, img/shots/colorful-vocals-1600.webp 1600w" sizes="(max-width: 1100px) 100vw, 1100px" width="1600" height="900" loading="lazy" alt="Colorful Vocals theme: lyrics tinted in the song's colour">
+    </div>
+  </div>
+</section>
+
+<!-- ============ ENGINE ============ -->
+<section class="section engine" id="engine" aria-labelledby="engine-title">
+  <div class="section__head">
+    <p class="eyebrow">Under the hood</p>
+    <h2 id="engine-title">No Chromium anywhere in the player.</h2>
+    <p class="lede">The interface is <a href="https://github.com/emilk/egui" rel="noopener">egui</a> on OpenGL. Audio is <a href="https://github.com/RustAudio/rodio" rel="noopener">rodio</a> and Symphonia. Browsing goes through <a href="https://crates.io/crates/rustypipe" rel="noopener">rustypipe</a> and YouTube's own internal API. It all compiles into one 22&nbsp;MB executable.</p>
+  </div>
+
+  <div class="beams" data-beams>
+    <svg class="beams__svg" data-beams-svg aria-hidden="true">
+    </svg>
+    <div class="beams__col">
+      <div class="node" data-node="in"><span class="node__dot"></span><div><b>YouTube Music</b><small>innertube API</small></div></div>
+      <div class="node" data-node="in"><span class="node__dot"></span><div><b>Better Lyrics</b><small>synced lyrics</small></div></div>
+      <div class="node" data-node="in"><span class="node__dot"></span><div><b>Google Translate</b><small>romaji + English</small></div></div>
+    </div>
+    <div class="beams__hub" data-node="hub">
+      <img src="icon-192.png" alt="" width="64" height="64">
+      <b>ytm-rs</b>
+      <small>Rust · tokio</small>
+    </div>
+    <div class="beams__col">
+      <div class="node" data-node="out"><span class="node__dot"></span><div><b>egui + OpenGL</b><small>every pixel</small></div></div>
+      <div class="node" data-node="out"><span class="node__dot"></span><div><b>rodio + Symphonia</b><small>AAC decoding</small></div></div>
+      <div class="node" data-node="out"><span class="node__dot"></span><div><b>Windows media controls</b><small>SMTC · Discord</small></div></div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <article class="note">
+      <span class="note__k">streams</span>
+      <h3>An unusual client</h3>
+      <p>Playback asks YouTube's player endpoint as the visionOS client. It hands back plain stream URLs that allow any byte range, so there's no signature puzzle to solve first. If YouTube returns a 403 halfway through a song, the stream gets a fresh URL and keeps going.</p>
+    </article>
+    <article class="note">
+      <span class="note__k">quickjs</span>
+      <h3>16 minutes down to 5 seconds</h3>
+      <p>Signed-in Premium streams need YouTube's player JavaScript solved. ytm-rs runs yt-dlp's EJS solver in an embedded QuickJS. The older engine took 16 minutes to prepare one player. rquickjs 0.14 takes about 5 seconds, once per player version.</p>
+    </article>
+    <article class="note">
+      <span class="note__k">audio</span>
+      <h3>Plays before it finishes downloading</h3>
+      <p>Opening an MP4 for seeking normally means reading every fragment first. ytm-rs starts on a streaming decoder right away, then swaps in a seekable one built over the same buffer the moment you seek.</p>
+    </article>
+    <article class="note">
+      <span class="note__k">frames</span>
+      <h3>Frames on a budget</h3>
+      <p>egui lays out the whole window on every frame, so frames cost CPU. Browsing runs at 15 fps and now playing at 30. When nothing moves, nothing gets drawn.</p>
+    </article>
+    <article class="note">
+      <span class="note__k">shader</span>
+      <h3>Kawarp, ported</h3>
+      <p>The warped album-art background is a native shader port of Kawarp from Better Lyrics, and it reacts to the music. The backgrounds on this page run a WebGL version of the same idea.</p>
+    </article>
+    <article class="note">
+      <span class="note__k">lyrics</span>
+      <h3>Real blur, real glow</h3>
+      <p>Theme effects are rendered properly instead of stacked fake copies, so thin CJK strokes stay clean. Fallback fonts are shifted onto the same baseline as Latin text.</p>
+    </article>
+  </div>
+</section>
+
+<!-- ============ GALLERY ============ -->
+<section class="section gallery" aria-labelledby="gallery-title">
+  <div class="section__head">
+    <p class="eyebrow">A closer look</p>
+    <h2 id="gallery-title">Browse, dig in, make it yours.</h2>
+  </div>
+  <div class="gallery__grid">
+    <figure class="gallery__item gallery__item--wide">
+      <img src="img/shots/jp-1600.webp" srcset="img/shots/jp-800.webp 800w, img/shots/jp-1600.webp 1600w" sizes="(max-width: 1180px) 100vw, 1180px" width="1600" height="900" loading="lazy" alt="Now playing Hitori Goto by Asagaya Romantics, with Japanese synced lyrics, romaji and an English translation under each line">
+      <figcaption>Romaji and an English translation under every line</figcaption>
+    </figure>
+    <figure class="gallery__item">
+      <img src="img/shots/artist-1600.webp" srcset="img/shots/artist-800.webp 800w, img/shots/artist-1600.webp 1600w" sizes="(max-width: 900px) 100vw, 50vw" width="1600" height="881" loading="lazy" alt="Artist page for The Weeknd with a large header image and top songs">
+      <figcaption>Artist pages</figcaption>
+    </figure>
+    <figure class="gallery__item">
+      <img src="img/shots/settings-themes-1600.webp" srcset="img/shots/settings-themes-800.webp 800w, img/shots/settings-themes-1600.webp 1600w" sizes="(max-width: 900px) 100vw, 50vw" width="1600" height="881" loading="lazy" alt="Settings page with appearance switches and the theme gallery">
+      <figcaption>Settings and the theme gallery</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ============ DOWNLOAD ============ -->
+<section class="section download" id="download" aria-labelledby="download-title">
+  <div class="dl">
+    <div class="dl__beam" aria-hidden="true"></div>
+    <img class="dl__icon" src="icon-512.png" alt="" width="96" height="96" loading="lazy">
+    <h2 id="download-title">Get ytm-rs</h2>
+    <p class="dl__ver"><span data-version>v0.2.10</span> · <span data-size>8.5 MB</span> · Windows · <span data-date>October 2026</span></p>
+    <div class="dl__cta">
+      <a class="btn btn--primary btn--lg" href="https://github.com/grapedjuice/ytm-rs/releases/latest" data-dl-direct rel="noopener">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 3v11.17l4.59-4.58L18 11l-6 6-6-6 1.41-1.41L11 14.17V3zM5 19h14v2H5z"/></svg>
+        Download installer
+      </a>
+      <a class="btn btn--ghost btn--lg" href="https://github.com/grapedjuice/ytm-rs/releases" rel="noopener">All releases</a>
+    </div>
+    <p class="dl__small">Installs for your user only, no administrator needed. It adds a Start menu shortcut, and you can uninstall it from Windows Settings.</p>
+
+    <div class="build">
+      <div class="build__head"><span>Build from source</span><button type="button" class="copy" data-copy="#build-cmd">Copy</button></div>
+      <pre id="build-cmd"><code><span class="c-p">&gt;</span> git clone https://github.com/grapedjuice/ytm-rs.git
+<span class="c-p">&gt;</span> cd ytm-rs
+<span class="c-p">&gt;</span> cargo build --release</code></pre>
+      <p>Needs the Rust toolchain and the MSVC C++ build tools. The app lands in <code>target\release\ytm-rs.exe</code>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FAQ ============ -->
+<section class="section faq" id="faq" aria-labelledby="faq-title">
+  <div class="section__head">
+    <p class="eyebrow">FAQ</p>
+    <h2 id="faq-title">Questions, answered.</h2>
+  </div>
+  <div class="faq__list">
+    <details name="faq" open><summary>Is ytm-rs free?</summary><p>Yes. ytm-rs is free and open source under the GPL-3.0 license. The app has no ads, accounts or paid tiers of its own.</p></details>
+    <details name="faq"><summary>Is it an official YouTube Music app?</summary><p>No. ytm-rs is an unofficial client built by an independent developer. It talks to the same services music.youtube.com uses, so changes on YouTube's side can occasionally affect playback, sign-in or lyrics.</p></details>
+    <details name="faq"><summary>Do I need YouTube Premium?</summary><p>No. You can browse, search and play without signing in. Signing in unlocks your home feed, library, likes and history. Premium-only songs play natively if your account has Premium.</p></details>
+    <details name="faq"><summary>Does it run on macOS or Linux?</summary><p>Releases are built and tested for Windows. The app is written with cross-platform Rust libraries, but macOS and Linux builds aren't published or tested yet.</p></details>
+    <details name="faq"><summary>How does signing in work?</summary><p>Open Settings → Sign in with Google. Google's own sign-in page opens in a temporary system WebView2 window, and the session stays on your computer. The player itself never runs in a webview.</p></details>
+    <details name="faq"><summary>Where do the lyrics come from?</summary><p>Synced lyrics come from the Better Lyrics API, with YouTube Music's own plain lyrics as a fallback. Romanization and English translations come from Google Translate. They're machine-made, so expect rough spots.</p></details>
+    <details name="faq"><summary>How does it update?</summary><p>The installed app checks GitHub for new releases, downloads them in the background and installs when you close it. Choose Restart to update to install right away, or turn updates off in Settings → Updates.</p></details>
+  </div>
+</section>
+
+</main>
+
+<footer class="footer">
+  <div class="footer__inner">
+    <div class="footer__brand">
+      <img src="icon-192.png" alt="" width="32" height="32" loading="lazy">
+      <div><b>ytm-rs</b><span>YouTube Music, without the browser.</span></div>
+    </div>
+    <nav class="footer__links" aria-label="Project links">
+      <a href="https://github.com/grapedjuice/ytm-rs" rel="noopener">GitHub</a>
+      <a href="https://github.com/grapedjuice/ytm-rs/releases" rel="noopener">Releases</a>
+      <a href="https://github.com/grapedjuice/ytm-rs/issues" rel="noopener">Report a bug</a>
+      <a href="https://github.com/grapedjuice/ytm-rs/blob/main/LICENSE" rel="noopener">GPL-3.0</a>
+    </nav>
+    <p class="footer__fine">ytm-rs is an independent, unofficial client. It isn't affiliated with or endorsed by YouTube or Google. Themes are adapted from the <a href="https://github.com/better-lyrics/themes" rel="noopener">Better Lyrics theme store</a>, with credit to each creator. Album art in screenshots belongs to its owners.</p>
+  </div>
+</footer>
+
+<script src="vendor/lenis.min.js" defer></script>
+<script src="main.js" defer></script>
+</body>
+</html>

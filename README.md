@@ -4,7 +4,8 @@
   <p><strong>YouTube Music in a fast, native desktop app.</strong></p>
   <p>Built with Rust, egui, and rodio. No Electron or browser-based player.</p>
   <p>
-    <a href="https://github.com/grapedjuice/ytm-rs/releases/latest">Download for Windows</a>
+    <a href="https://grapedjuice.github.io/ytm-rs/">Website</a>
+    · <a href="https://github.com/grapedjuice/ytm-rs/releases/latest">Download for Windows</a>
     · <a href="#features">Features</a>
     · <a href="#build-from-source">Build from source</a>
   </p>
