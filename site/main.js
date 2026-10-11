@@ -139,37 +139,55 @@
     return c;
   }
 
-  // the demo song's cover: a night window, drawn once and reused as the warp texture
+  // the demo song's cover: cherry blossoms against a spring dusk, drawn once and reused as the warp texture
   function drawDemoCover(c) {
     const g = c.getContext("2d"), S = c.width;
+    let seed = 11; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
     const sky = g.createLinearGradient(0, 0, 0, S);
-    sky.addColorStop(0, "#0d1440"); sky.addColorStop(0.55, "#5a2a7a"); sky.addColorStop(0.85, "#ff6a5c"); sky.addColorStop(1, "#ffb36b");
+    sky.addColorStop(0, "#5b4a8c"); sky.addColorStop(0.45, "#c98bb3"); sky.addColorStop(0.75, "#f7c1b8"); sky.addColorStop(1, "#ffe1c4");
     g.fillStyle = sky; g.fillRect(0, 0, S, S);
-    // stars
-    let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
-    for (let i = 0; i < 90; i++) {
-      g.fillStyle = `rgba(255,255,255,${0.25 + rnd() * 0.6})`;
-      const r = rnd() * 1.6 + 0.4; g.beginPath(); g.arc(rnd() * S, rnd() * S * 0.55, r, 0, 7); g.fill();
+    // low sun and haze (kasumi)
+    const sun = g.createRadialGradient(S * 0.3, S * 0.7, 0, S * 0.3, S * 0.7, S * 0.42);
+    sun.addColorStop(0, "rgba(255,244,226,.95)"); sun.addColorStop(0.18, "rgba(255,236,214,.7)"); sun.addColorStop(1, "rgba(255,220,200,0)");
+    g.fillStyle = sun; g.fillRect(0, 0, S, S);
+    // distant hills fading into mist
+    [["rgba(120,92,140,.55)", 0.78, 0.07], ["rgba(96,70,118,.7)", 0.86, 0.05]].forEach(([col, base, amp], k) => {
+      g.fillStyle = col; g.beginPath(); g.moveTo(0, S);
+      for (let x = 0; x <= S; x += 8) g.lineTo(x, S * (base - amp * Math.sin(x / S * 5 + k * 2) - amp * 0.5 * Math.sin(x / S * 13 + k)));
+      g.lineTo(S, S); g.fill();
+    });
+    // branches
+    const branches = [];
+    const branch = (x, y, ang, len, w, depth) => {
+      const x2 = x + Math.cos(ang) * len, y2 = y + Math.sin(ang) * len;
+      g.strokeStyle = "#2a1620"; g.lineWidth = w; g.lineCap = "round";
+      g.beginPath(); g.moveTo(x, y); g.quadraticCurveTo((x + x2) / 2 + (rnd() - 0.5) * len * 0.3, (y + y2) / 2 + (rnd() - 0.5) * len * 0.3, x2, y2); g.stroke();
+      branches.push([x2, y2, depth]);
+      if (depth > 0) { branch(x2, y2, ang - 0.35 - rnd() * 0.4, len * 0.72, w * 0.62, depth - 1); branch(x2, y2, ang + 0.3 + rnd() * 0.4, len * 0.66, w * 0.58, depth - 1); }
+    };
+    branch(S * 1.04, S * 0.06, Math.PI * 0.86, S * 0.3, S * 0.032, 4);
+    branch(S * 1.02, S * 0.42, Math.PI * 1.04, S * 0.2, S * 0.02, 3);
+    // blossoms clustered on the twigs
+    const flower = (x, y, r, col) => {
+      g.fillStyle = col;
+      for (let i = 0; i < 5; i++) { const a = i / 5 * Math.PI * 2 + r; g.beginPath(); g.ellipse(x + Math.cos(a) * r * 0.55, y + Math.sin(a) * r * 0.55, r * 0.5, r * 0.36, a, 0, 7); g.fill(); }
+      g.fillStyle = "#c2416a"; g.beginPath(); g.arc(x, y, r * 0.16, 0, 7); g.fill();
+    };
+    branches.forEach(([x, y, d]) => {
+      const n = d < 2 ? 7 : 3;
+      for (let i = 0; i < n; i++) {
+        const r = S * (0.018 + rnd() * 0.016);
+        flower(x + (rnd() - 0.5) * S * 0.09, y + (rnd() - 0.5) * S * 0.07, r, ["#ffd9e6", "#ffc3d6", "#ffe9f0", "#f9a8c4"][Math.floor(rnd() * 4)]);
+      }
+    });
+    // drifting petals
+    for (let i = 0; i < 26; i++) {
+      g.fillStyle = `rgba(255,${200 + rnd() * 40 | 0},${215 + rnd() * 30 | 0},${0.55 + rnd() * 0.4})`;
+      g.beginPath(); g.ellipse(rnd() * S * 0.8, S * 0.25 + rnd() * S * 0.7, S * 0.011, S * 0.006, rnd() * 3, 0, 7); g.fill();
     }
-    // moon with halo
-    const halo = g.createRadialGradient(S * 0.66, S * 0.34, 0, S * 0.66, S * 0.34, S * 0.3);
-    halo.addColorStop(0, "rgba(255,235,210,.55)"); halo.addColorStop(1, "rgba(255,235,210,0)");
-    g.fillStyle = halo; g.fillRect(0, 0, S, S);
-    g.fillStyle = "#fff1dc"; g.beginPath(); g.arc(S * 0.66, S * 0.34, S * 0.085, 0, 7); g.fill();
-    // city line
-    g.fillStyle = "#1a0c22";
-    let x = 0; seed = 3;
-    while (x < S) { const w = 18 + rnd() * 40, h = S * (0.1 + rnd() * 0.16); g.fillRect(x, S - h, w, h); x += w + 2; }
-    g.fillStyle = "rgba(255,200,120,.85)";
-    for (let i = 0; i < 40; i++) g.fillRect(rnd() * S, S - rnd() * S * 0.2, 3, 4);
-    // window frame
-    g.strokeStyle = "#12070f"; g.lineWidth = S * 0.035;
-    g.strokeRect(S * 0.08, S * 0.08, S * 0.84, S * 0.84);
-    g.beginPath(); g.moveTo(S / 2, S * 0.08); g.lineTo(S / 2, S * 0.92); g.moveTo(S * 0.08, S * 0.5); g.lineTo(S * 0.92, S * 0.5); g.stroke();
-    g.fillStyle = "rgba(255,255,255,.07)"; g.fillRect(S * 0.1, S * 0.1, S * 0.38, S * 0.38);
     // title
-    g.fillStyle = "rgba(255,255,255,.92)"; g.font = `700 ${S * 0.05}px "Noto Sans JP", "Yu Gothic UI", sans-serif`;
-    g.fillText("窓の外", S * 0.12, S * 0.17);
+    g.fillStyle = "rgba(42,22,32,.88)"; g.font = `700 ${S * 0.055}px "Noto Sans JP", "Yu Gothic UI", sans-serif`;
+    g.fillText("さくら さくら", S * 0.07, S * 0.93);
     return c;
   }
 
@@ -247,13 +265,15 @@ void main(){
   if (heroCanvas) makeWarp(heroCanvas, heroArt(), { sat: 1.35, scale: 0.14, speed: 1.4 });
 
   /* ---------------- lyrics demo ---------------- */
+  // さくら さくら: traditional Japanese folk song, lyrics first published 1888 (public domain)
   const LINES = [
-    { t: 1.6, jp: "窓の外は まだ夜のまま", ro: "mado no soto wa mada yoru no mama", tr: "Outside the window, it's still night" },
-    { t: 5.8, jp: "君の声だけ 鳴り続けてる", ro: "kimi no koe dake naritsuzuketeru", tr: "Only your voice keeps on playing" },
-    { t: 10.0, jp: "重たい画面は もういらない", ro: "omotai gamen wa mō iranai", tr: "I don't need the heavy screens anymore" },
-    { t: 14.2, jp: "軽くなって 走り出そう", ro: "karuku natte hashiridasō", tr: "Let's get lighter and start running" },
-    { t: 18.4, jp: "ひとつの音も 落とさずに", ro: "hitotsu no oto mo otosazu ni", tr: "Without dropping a single note" },
-    { t: 22.6, jp: "朝が来るまで 歌っていて", ro: "asa ga kuru made utatte ite", tr: "Keep singing until the morning comes" },
+    { t: 1.4, jp: "さくら さくら", ro: "sakura sakura", tr: "Cherry blossoms, cherry blossoms" },
+    { t: 5.2, jp: "弥生の空は", ro: "yayoi no sora wa", tr: "Across the sky of early spring" },
+    { t: 8.6, jp: "見わたす限り", ro: "miwatasu kagiri", tr: "As far as the eye can see" },
+    { t: 12.0, jp: "かすみか雲か", ro: "kasumi ka kumo ka", tr: "Is it mist, or is it clouds?" },
+    { t: 15.6, jp: "匂いぞ出ずる", ro: "nioi zo izuru", tr: "Their fragrance fills the air" },
+    { t: 19.2, jp: "いざや いざや", ro: "izaya izaya", tr: "Come now, come now" },
+    { t: 22.6, jp: "見にゆかん", ro: "mi ni yukan", tr: "Let's go and see them" },
   ];
   const DUR = 30;
   // numbers from assets/themes/presets.json in the app (alpha, falloff, past, blur, scope)

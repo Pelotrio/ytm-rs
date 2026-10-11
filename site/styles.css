@@ -382,16 +382,15 @@ h2 {
 .card__icon svg { width: 20px; height: 20px; fill: none; stroke: #ffd2c4; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .card h3 { margin: 0 0 8px; font: 700 21px/1.2 var(--display); letter-spacing: -0.01em; }
 .card p { margin: 0; color: var(--ink-2); font-size: 15.5px; line-height: 1.6; }
-.card--shot { display: grid; grid-template-columns: 0.8fr 1.2fr; gap: 28px; overflow: hidden; padding: 28px 0 0 28px; min-height: 360px; }
-.card--shot .card__copy { padding-bottom: 28px; align-self: center; }
-.card__window { align-self: end; position: relative; height: 300px; border-radius: 14px 0 0 0; overflow: hidden; border: 1px solid var(--line-2); border-right: 0; border-bottom: 0; box-shadow: -24px -10px 60px -24px rgba(0, 0, 0, 0.9); }
-.card__window img { width: 100%; height: 100%; object-fit: cover; object-position: left top; transition: transform 0.8s var(--ease); transform-origin: left top; }
-.card--shot:hover .card__window img { transform: scale(1.03); }
+.card--shot { display: grid; grid-template-columns: 0.75fr 1.25fr; gap: 32px; align-items: center; }
+.card__window {
+  border-radius: 12px; overflow: hidden; aspect-ratio: 3 / 2;
+  border: 1px solid var(--line-2); box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.9);
+}
+.card__window img { width: 100%; height: 100%; object-fit: cover; }
 @media (max-width: 900px) {
   .bento { grid-template-columns: 1fr 1fr; }
-  .card--shot { grid-template-columns: 1fr; gap: 0; }
-  .card--shot .card__copy { padding-right: 28px; }
-  .card__window { height: 240px; margin-left: 0; }
+  .card--shot { grid-template-columns: 1fr; gap: 24px; }
 }
 @media (max-width: 620px) {
   .bento { grid-template-columns: 1fr; }
