@@ -17,9 +17,11 @@
 | **Your music feed**     | Browse your personalized YouTube Music home feed, including Listen again, Quick picks, mixes, and mood filters. Keep scrolling for more.                |
 | **Explore and search**  | Find new releases from US charting artists and artists in your music feed, browse charts, and search for songs, albums, and playlists.              |
 | **Your library**        | Access liked songs, saved albums and playlists, and listening history after signing in.                                                                 |
-| **Playback controls**   | Manage the queue, start radio from a song, and use shuffle, repeat, and autoplay. The next track is prefetched for quicker skips.                       |
+| **Playback controls**   | Manage the queue, start radio from a song, and use shuffle, repeat, and autoplay. The next track is prefetched for quicker skips. Volume normalization turns loud songs down to an even level, the way YouTube Music does. |
 | **Lyrics and visuals**  | Follow synced lyrics when available, click a line to seek, switch to full-screen lyrics, and turn on the animated, music-reactive album-art background. |
+| **Themes**              | Pick from 26 presets rebuilt from the [Better Lyrics community themes](https://github.com/better-lyrics/themes), such as Apple Music, Spicy, Spinning Record and reCover. Each one restyles the lyrics, background, cover, player bar, fonts and the rest of the app. |
 | **Desktop integration** | Use system media controls, Discord Rich Presence, and screen-reader-accessible controls.                                                                |
+| **Automatic updates**   | The installed app downloads new versions in the background and installs them when you close it, or right away with **Restart to update**.              |
 
 ## Get started
 
@@ -27,9 +29,15 @@
 
 Download the latest `ytm-rs-setup-<version>.exe` from [GitHub Releases](https://github.com/grapedjuice/ytm-rs/releases/latest) and run it. The installer works for the current user without administrator access and adds a Start menu shortcut and an entry in Windows Settings for uninstalling.
 
+Once installed, ytm-rs keeps itself up to date. You can turn this off in **Settings → Updates**.
+
 ### Sign in
 
 Open **Settings → Sign in with Google** in the app. Signing in unlocks your music feed, library, likes, and history. You can also browse and search without signing in.
+
+### Pick a theme
+
+Open **Settings → Theme** and click a card. Each card shows the original theme's cover and credits its creators. Turn on **Classic theme** under Appearance for the plain dark look with red accents.
 
 ## Build from source
 
@@ -48,6 +56,7 @@ The built application is at `target\release\ytm-rs.exe`.
 - The app interface and audio playback are native. Google sign-in and lyrics verification use temporary system webview windows; on Windows, these use WebView2.
 - Synced lyrics come from the Better Lyrics API. If they are unavailable, the app can fall back to YouTube Music's plain lyrics. Lyrics availability depends on the track and the providers.
 - Premium-only and age-restricted songs play through your signed-in account. With YouTube Premium they play natively; without it, age-restricted songs fall back to `yt-dlp`, which needs Node.js.
+- Themes are native translations of CSS themes, not the CSS itself, so some details differ from the originals. Fonts that can't be redistributed (SF Pro, Spotify's) are replaced with the closest open fonts.
 - ytm-rs is an unofficial client. Changes to YouTube Music or third-party services can affect playback, sign-in, or lyrics.
 
 ## License
@@ -56,6 +65,6 @@ The built application is at `target\release\ytm-rs.exe`.
 
 ## Built with
 
-[egui](https://github.com/emilk/egui) for the interface, [rodio](https://github.com/RustAudio/rodio) and Symphonia for audio, and [rustypipe](https://crates.io/crates/rustypipe) for YouTube Music browsing. Signed-in stream URLs are decoded with yt-dlp's [EJS](https://github.com/yt-dlp/ejs) solver running in QuickJS. The animated background is based on Kawarp from Better Lyrics. The app also uses Inter and Lucide icons.
+[egui](https://github.com/emilk/egui) for the interface, [rodio](https://github.com/RustAudio/rodio) and Symphonia for audio, and [rustypipe](https://crates.io/crates/rustypipe) for YouTube Music browsing. Signed-in stream URLs are decoded with yt-dlp's [EJS](https://github.com/yt-dlp/ejs) solver running in QuickJS. The animated background is based on Kawarp from Better Lyrics, and the theme presets are adapted from the Better Lyrics theme store, with credit to each theme's creators. The app also uses Inter, DM Sans, Google Sans Flex, Figtree and Instrument Sans (SIL OFL 1.1) and Lucide icons.
 
 Found a bug or have an idea? [Open an issue](https://github.com/grapedjuice/ytm-rs/issues).
