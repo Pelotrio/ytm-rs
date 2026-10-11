@@ -3,6 +3,7 @@
 //! Layout: animated album-art background (shader.rs) → sidebar, top bar and page
 //! content → player bar → now-playing overlay (slides up) → toasts.
 
+mod notes;
 mod nowplaying;
 mod pages;
 mod shell;
@@ -218,6 +219,10 @@ pub struct App {
     /// When the last automatic update check ran (app time, s).
     update_checked: Option<f64>,
     update_announced: bool,
+    /// Release notes dialog (update ready, or "See all notes").
+    notes_dialog: Option<notes::NotesDialog>,
+    /// Version whose "Updated to" card is showing, on the first launch after an update.
+    whats_new: Option<String>,
     /// The user picked "Restart to update": install on exit, then relaunch.
     restart_for_update: bool,
     actions: Vec<Action>,
@@ -291,6 +296,14 @@ impl App {
             auto_update: get("auto_update").is_none_or(|v| v == "1"),
             update_checked: None,
             update_announced: false,
+            notes_dialog: None,
+            // First launch of a newer version than last time: show what changed.
+            // YTM_WHATS_NEW=1 shows the card for this version regardless.
+            whats_new: {
+                let current = crate::update::current_version();
+                let last = get("last_version");
+                (std::env::var_os("YTM_WHATS_NEW").is_some() || last.is_some_and(|v| crate::update::newer(&current, &v))).then_some(current)
+            },
             restart_for_update: false,
             radio_pending: false,
             seek_drag: None,
@@ -717,7 +730,7 @@ impl App {
             && !self.update_announced
         {
             self.update_announced = true;
-            self.toast(format!("ytm-rs {version} is ready. It installs when you close the app."));
+            self.notes_dialog = Some(notes::NotesDialog { version, ready: true });
         }
     }
 
@@ -1446,6 +1459,8 @@ impl eframe::App for App {
         }
         nowplaying::overlay(self, &ctx, now);
         self.draw_dialog(&ctx);
+        notes::card(self, &ctx);
+        notes::dialog(self, &ctx);
         if let Some(url) = self.share_pending.take() { ctx.copy_text(url); }
         shell::suggestions(self, &ctx);
         shell::toast(self, &ctx, now);
@@ -1509,6 +1524,10 @@ impl eframe::App for App {
         storage.set_string("autoplay", b(self.autoplay));
         storage.set_string("normalize", b(self.normalize));
         storage.set_string("auto_update", b(self.auto_update));
+        // Pretend versions (dev hook) mustn't decide the real "what's new".
+        if std::env::var_os("YTM_UPDATE_AS").is_none() {
+            storage.set_string("last_version", crate::update::current_version());
+        }
         storage.set_string("discord_enabled", b(self.discord_enabled));
         storage.set_string("default_theme", b(self.default_theme));
         if std::env::var_os("YTM_THEME").is_none() {

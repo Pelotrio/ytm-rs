@@ -5,6 +5,10 @@
 //! silently when the app closes, or right away when the user picks "Restart to
 //! update". Dev builds (not installed) never update themselves.
 //!
+//! Release notes (the release's Markdown body) are kept per version: the one a check
+//! finds, and any other on request ([`Updater::notes`]), for the update dialog, the
+//! card shown after updating and Settings.
+//!
 //! Dev hooks: `YTM_UPDATE_FORCE=1` treats any build as installed; `YTM_UPDATE_AS=<ver>`
 //! pretends to be that version; `YTM_UPDATE_DRYRUN=1` logs the install command
 //! instead of running it.
@@ -13,6 +17,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 const LATEST: &str = "https://api.github.com/repos/grapedjuice/ytm-rs/releases/latest";
+const BY_TAG: &str = "https://api.github.com/repos/grapedjuice/ytm-rs/releases/tags/v";
+pub const RELEASES: &str = "https://github.com/grapedjuice/ytm-rs/releases";
+
+/// Release notes by version: `None` while fetching or when there are none.
+type Notes = Arc<Mutex<std::collections::HashMap<String, Option<String>>>>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum State {
@@ -29,6 +38,7 @@ pub struct Updater {
     state: Arc<Mutex<State>>,
     dir: PathBuf,
     wake: Arc<dyn Fn() + Send + Sync>,
+    notes: Notes,
 }
 
 pub fn current_version() -> String {
@@ -57,7 +67,7 @@ pub fn newer(a: &str, b: &str) -> bool {
 
 impl Updater {
     pub fn new(data_dir: &Path, wake: impl Fn() + Send + Sync + 'static) -> Self {
-        Self { state: Arc::new(Mutex::new(State::Idle)), dir: data_dir.join("updates"), wake: Arc::new(wake) }
+        Self { state: Arc::new(Mutex::new(State::Idle)), dir: data_dir.join("updates"), wake: Arc::new(wake), notes: Default::default() }
     }
 
     pub fn state(&self) -> State {
@@ -67,6 +77,39 @@ impl Updater {
     fn set(&self, s: State) {
         *self.state.lock().unwrap() = s;
         (self.wake)();
+    }
+
+    /// Release notes (Markdown) for `version`, fetched in the background the first time
+    /// they're asked for; `None` until they arrive, or if the release has none.
+    pub fn notes(&self, version: &str) -> Option<String> {
+        let version = version.trim_start_matches('v').to_owned();
+        {
+            let mut notes = self.notes.lock().unwrap();
+            if let Some(n) = notes.get(&version) {
+                return n.clone();
+            }
+            notes.insert(version.clone(), None);
+        }
+        let this = self.clone();
+        std::thread::spawn(move || {
+            let fetch = async {
+                let http = client()?;
+                let release: serde_json::Value = http.get(format!("{BY_TAG}{version}")).send().await?.error_for_status()?.json().await?;
+                anyhow::Ok(release["body"].as_str().map(str::to_owned))
+            };
+            let body = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt.block_on(fetch).unwrap_or_else(|e| {
+                    log::warn!("update: notes for {version}: {e:#}");
+                    None
+                }),
+                Err(_) => None,
+            };
+            if body.is_some() {
+                this.notes.lock().unwrap().insert(version.clone(), body);
+                (this.wake)();
+            }
+        });
+        None
     }
 
     /// Check for a newer release and download it, in the background.
@@ -92,9 +135,12 @@ impl Updater {
     }
 
     async fn run(&self) -> anyhow::Result<State> {
-        let http = reqwest::Client::builder().user_agent(concat!("ytm-rs/", env!("CARGO_PKG_VERSION"))).build()?;
+        let http = client()?;
         let release: serde_json::Value = http.get(LATEST).send().await?.error_for_status()?.json().await?;
         let tag = release["tag_name"].as_str().unwrap_or_default();
+        if let Some(body) = release["body"].as_str() {
+            self.notes.lock().unwrap().insert(tag.trim_start_matches('v').to_owned(), Some(body.to_owned()));
+        }
         let current = current_version();
         if !newer(tag, &current) {
             log::info!("update: {current} is current (latest {tag})");
@@ -177,6 +223,10 @@ impl Updater {
             }
         }
     }
+}
+
+fn client() -> anyhow::Result<reqwest::Client> {
+    Ok(reqwest::Client::builder().user_agent(concat!("ytm-rs/", env!("CARGO_PKG_VERSION"))).connect_timeout(std::time::Duration::from_secs(10)).build()?)
 }
 
 #[cfg(test)]

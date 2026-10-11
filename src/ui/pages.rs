@@ -749,6 +749,37 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
                 _ => check = pill(ui, "Check now", None, false).clicked(),
             }
         });
+        // Release notes for the version that's ready, else the one running.
+        let (notes_v, ready) = match &state {
+            Some(State::Ready { version, .. }) => (version.clone(), true),
+            _ => (crate::update::current_version(), false),
+        };
+        if let Some(md) = app.updater.as_ref().and_then(|u| u.notes(&notes_v)) {
+            divider(ui);
+            let id = egui::Id::new(("whats-new-open", &notes_v));
+            let mut open = ui.data(|d| d.get_temp(id)).unwrap_or(ready);
+            ui.add_space(12.0);
+            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
+            let resp = widgets::named(resp, "What's new").on_hover_cursor(egui::CursorIcon::PointingHand);
+            widgets::icon_at(ui, pos2(rect.left() + 8.0, rect.center().y), if open { icon::CHEVRON_DOWN } else { icon::CHEVRON_RIGHT }, 16.0, theme::TEXT);
+            ui.painter().text(pos2(rect.left() + 24.0, rect.center().y), Align2::LEFT_CENTER, format!("What's new in {notes_v}"), theme::semibold(14.0), theme::TEXT);
+            if resp.clicked() {
+                open = !open;
+                ui.data_mut(|d| d.insert_temp(id, open));
+            }
+            if open {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(24.0);
+                    ui.vertical(|ui| {
+                        crate::ui::notes::show(ui, &crate::ui::notes::parse(&md), 13.5);
+                        ui.add_space(6.0);
+                        ui.hyperlink_to(RichText::new("Full release notes on GitHub").font(theme::regular(13.0)).color(Color32::from_rgb(62, 166, 255)), crate::update::RELEASES);
+                    });
+                });
+            }
+            ui.add_space(12.0);
+        }
     });
     if check && let Some(u) = &app.updater {
         u.check();
