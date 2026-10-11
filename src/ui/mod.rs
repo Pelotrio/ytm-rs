@@ -378,10 +378,8 @@ impl App {
     fn go(&mut self, page: Page) {
         self.np_open = false;
         if page == self.page {
-            // Clicking Home again refreshes the feed.
-            if page == Page::Home {
-                self.page_loaded();
-            }
+            // Clicking the page you're on refreshes it.
+            self.page_loaded();
             return;
         }
         let prev = std::mem::replace(&mut self.page, page);
@@ -406,34 +404,38 @@ impl App {
         }
     }
 
-    /// Start the page transition and request data the page doesn't have yet.
+    /// Start the page transition and (re)load the page's data. Every page refreshes on
+    /// each visit (things change outside the app: likes, other devices, new releases),
+    /// showing the cached copy meanwhile.
     fn page_loaded(&mut self) {
         self.page_changed = -1.0; // stamped with the frame time on the next pass
         let req = match &self.page {
-            // The feed changes as you listen: refresh on every visit, showing the cached copy meanwhile.
             Page::Home if !self.home_loading => {
                 self.home_loading = true;
                 Some(Req::Home(None))
             }
-            Page::Explore if self.explore.is_none() => Some(Req::Explore(self.preferred_artist_ids())),
+            Page::Explore => Some(Req::Explore(self.preferred_artist_ids())),
             Page::Search(q) if self.search.as_ref().is_none_or(|s| &s.query != q) => Some(Req::Search(q.clone())),
-            Page::Album(id) if self.collection.as_ref().is_none_or(|c| &c.id != id) => Some(Req::Album(id.clone())),
-            Page::Playlist(id) if self.collection.as_ref().is_none_or(|c| &c.id != id) => {
-                Some(Req::Playlist(id.clone()))
-            }
-            Page::Artist(id) if self.artist.as_ref().is_none_or(|a| &a.id != id) => Some(Req::Artist(id.clone())),
-            // The library changes outside the app (likes, other devices): refresh on every
-            // visit, showing the cached copy meanwhile.
+            Page::Album(id) => Some(Req::Album(id.clone())),
+            Page::Playlist(id) => Some(Req::Playlist(id.clone())),
+            Page::Artist(id) => Some(Req::Artist(id.clone())),
             Page::Library(LibTab::History) if self.logged_in => Some(Req::History),
             Page::Library(LibTab::Uploads) if self.logged_in => Some(Req::Uploads),
             Page::Library(_) if self.logged_in => Some(Req::Library),
             _ => None,
         };
-        self.loading = req.is_some()
-            && !matches!(self.page, Page::Library(LibTab::History) if self.history.is_some())
-            && !matches!(self.page, Page::Library(LibTab::Uploads) if self.uploads.is_some())
-            && !matches!(self.page, Page::Library(t) if !matches!(t, LibTab::History | LibTab::Uploads) && self.library.is_some())
-            && !(self.page == Page::Home && self.home.is_some());
+        // The spinner is only for a page with nothing to show yet.
+        let cached = match &self.page {
+            Page::Home => self.home.is_some(),
+            Page::Explore => self.explore.is_some(),
+            Page::Album(id) | Page::Playlist(id) => self.collection.as_ref().is_some_and(|c| &c.id == id),
+            Page::Artist(id) => self.artist.as_ref().is_some_and(|a| &a.id == id),
+            Page::Library(LibTab::History) => self.history.is_some(),
+            Page::Library(LibTab::Uploads) => self.uploads.is_some(),
+            Page::Library(_) => self.library.is_some(),
+            _ => false,
+        };
+        self.loading = req.is_some() && !cached;
         if let Some(r) = req {
             self.backend.request(r);
         }

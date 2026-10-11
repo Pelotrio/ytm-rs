@@ -85,7 +85,12 @@ pub fn linked_text(
 }
 
 pub fn icon_at(ui: &Ui, center: Pos2, glyph: char, size: f32, color: Color32) {
-    ui.painter().text(center, Align2::CENTER_CENTER, glyph, theme::icon_font(size), color);
+    // Centred on the drawn shape: egui places these glyphs flush left in their box
+    // (dropping the font's side bearing) and a little high, so box-centring is off.
+    let g = ui.painter().layout_no_wrap(glyph.to_string(), theme::icon_font(size), color);
+    let ink = g.mesh_bounds;
+    let pos = if ink.is_positive() { center - ink.center().to_vec2() } else { center - g.size() / 2.0 };
+    ui.painter().galley(pos, g, color);
 }
 
 /// Heart drawn from its parametric curve: an outline, filled by `fill` (0..1). The

@@ -483,8 +483,8 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
         for (t, label) in [(LibTab::Playlists, "Playlists"), (LibTab::Songs, "Liked songs"), (LibTab::Albums, "Albums"), (LibTab::History, "History"), (LibTab::Uploads, "Uploads")] {
-            if chip(ui, label, tab == t).clicked() && tab != t {
-                // Tabs swap in place (no history entry).
+            if chip(ui, label, tab == t).clicked() {
+                // Tabs swap in place (no history entry); the current one refreshes.
                 app.page = Page::Library(t);
                 app.page_loaded();
             }
