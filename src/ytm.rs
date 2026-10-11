@@ -47,6 +47,68 @@ pub async fn home_more(q: &RustyPipeQuery, token: &str) -> anyhow::Result<HomePa
     Ok(HomePage { chips: vec![], shelves: shelves(&sec["contents"]), continuation: continuation(sec) })
 }
 
+/// A playlist page read straight from `browse`. rustypipe rejects YouTube Music's
+/// mixes (My Supermix, Discover Mix, ...): their header doesn't parse, so it takes
+/// them for album playlists and then fails on the mixed albums.
+pub struct RawPlaylist {
+    pub title: String,
+    pub subtitle: String,
+    pub description: Option<String>,
+    pub thumbs: Vec<Thumb>,
+    pub tracks: Vec<Track>,
+}
+
+pub async fn playlist(q: &RustyPipeQuery, id: &str) -> anyhow::Result<RawPlaylist> {
+    let body = json!({ "browseId": format!("VL{id}") });
+    let v: Value = serde_json::from_str(&q.raw(ClientType::DesktopMusic, "browse", &body).await?)?;
+    parse_playlist(&v).ok_or_else(|| anyhow::anyhow!("YouTube Music returned an empty playlist"))
+}
+
+fn parse_playlist(v: &Value) -> Option<RawPlaylist> {
+    let two = &v["contents"]["twoColumnBrowseResultsRenderer"];
+    let h = &two["tabs"][0]["tabRenderer"]["content"]["sectionListRenderer"]["contents"][0]["musicResponsiveHeaderRenderer"];
+    let items = two["secondaryContents"]["sectionListRenderer"]["contents"][0]["musicPlaylistShelfRenderer"]["contents"].as_array()?;
+    let tracks: Vec<Track> = items.iter().filter_map(|i| list_item(&i["musicResponsiveListItemRenderer"])).collect();
+    if tracks.is_empty() {
+        return None;
+    }
+    Some(RawPlaylist {
+        title: text(&h["title"])?,
+        subtitle: text(&h["subtitle"]).unwrap_or_default(),
+        description: text(&h["description"]["musicDescriptionShelfRenderer"]["description"]),
+        thumbs: thumbs(&h["thumbnail"]["musicThumbnailRenderer"]),
+        tracks,
+    })
+}
+
+/// Songs the account uploaded (Library > Uploads on music.youtube.com).
+pub async fn uploads(q: &RustyPipeQuery) -> anyhow::Result<Vec<Track>> {
+    let body = json!({ "browseId": "FEmusic_library_privately_owned_tracks" });
+    let v: Value = serde_json::from_str(&q.raw(ClientType::DesktopMusic, "browse", &body).await?)?;
+    let tabs = v["contents"]["singleColumnBrowseResultsRenderer"]["tabs"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let shelf = tabs
+        .iter()
+        .flat_map(|t| t["tabRenderer"]["content"]["sectionListRenderer"]["contents"].as_array().map(Vec::as_slice).unwrap_or_default())
+        .map(|c| &c["musicShelfRenderer"])
+        .find(|s| !s.is_null());
+    let Some(shelf) = shelf else { return Ok(Vec::new()) };
+    let mut tracks = upload_rows(shelf);
+    let mut token = continuation(shelf);
+    for _ in 0..20 {
+        let Some(t) = token.take() else { break };
+        let v: Value = serde_json::from_str(&q.raw(ClientType::DesktopMusic, "browse", &json!({ "continuation": t })).await?)?;
+        let more = &v["continuationContents"]["musicShelfContinuation"];
+        tracks.extend(upload_rows(more));
+        token = continuation(more);
+    }
+    Ok(tracks)
+}
+
+fn upload_rows(shelf: &Value) -> Vec<Track> {
+    let items = shelf["contents"].as_array().map(Vec::as_slice).unwrap_or_default();
+    items.iter().filter_map(|i| list_item(&i["musicResponsiveListItemRenderer"])).collect()
+}
+
 /// Like or un-like a song for the signed-in account.
 pub async fn set_like(q: &RustyPipeQuery, video_id: &str, like: bool) -> anyhow::Result<()> {
     let endpoint = if like { "like/like" } else { "like/removelike" };
@@ -206,7 +268,11 @@ fn list_item(r: &Value) -> Option<Track> {
             artists.push(Link { name: name.to_owned(), id: None });
         }
     }
-    Some(Track { id, title, artists, album, duration: None, thumbs: thumbs(&r["thumbnail"]["musicThumbnailRenderer"]), track_nr: None, plays: None })
+    // Playlist rows carry the length ("3:45") in a fixed column.
+    let duration = r["fixedColumns"][0]["musicResponsiveListItemFixedColumnRenderer"]["text"]["runs"][0]["text"]
+        .as_str()
+        .and_then(|t| t.split(':').try_fold(0u32, |acc, p| Some(acc * 60 + p.parse::<u32>().ok()?)));
+    Some(Track { id, title, artists, album, duration, thumbs: thumbs(&r["thumbnail"]["musicThumbnailRenderer"]), track_nr: None, plays: None })
 }
 
 fn runs(v: &Value) -> impl Iterator<Item = &Value> {

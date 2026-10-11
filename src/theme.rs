@@ -148,6 +148,7 @@ pub mod icon {
     pub const CIRCLE_USER: char = '\u{e461}';
     pub const EXPAND: char = '\u{e21a}';
     pub const SHRINK: char = '\u{e220}';
+    pub const UPLOAD: char = '\u{e19e}';
 }
 
 const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");

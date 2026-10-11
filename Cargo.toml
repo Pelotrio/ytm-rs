@@ -32,6 +32,7 @@ souvlaki = "0.8.3"
 tao = "0.37.1"
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "time"] }
 wry = "0.57.0"
+rfd = "0.17.2"
 
 [profile.release]
 opt-level = 3

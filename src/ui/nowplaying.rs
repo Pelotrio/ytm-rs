@@ -101,11 +101,12 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
         let liked = app.liked.contains(&track.id);
         egui::Popup::menu(&more).show(|ui| widgets::song_menu(ui, &track, liked, &mut app.actions));
         ui.add_space(8.0);
+        // Clicking the active chip again turns it off, leaving just the artwork.
         if widgets::chip(ui, "Up next", app.np_tab == NpTab::UpNext).clicked() {
-            app.np_tab = NpTab::UpNext;
+            app.np_tab = if app.np_tab == NpTab::UpNext { NpTab::Art } else { NpTab::UpNext };
         }
         if widgets::chip(ui, "Lyrics", app.np_tab == NpTab::Lyrics).clicked() {
-            app.np_tab = NpTab::Lyrics;
+            app.np_tab = if app.np_tab == NpTab::Lyrics { NpTab::Art } else { NpTab::Lyrics };
         }
         if app.np_tab == NpTab::Lyrics {
             ui.add_space(4.0);
@@ -123,10 +124,13 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
     });
 
     let content = Rect::from_min_max(pos2(area.left(), header.bottom() + 12.0), area.max);
+    // No lyrics for this song: show the artwork instead of an empty panel.
+    let no_lyrics = matches!(&app.lyrics, Some((_, None)));
+    let art_only = app.np_tab == NpTab::Art || (app.np_tab == NpTab::Lyrics && no_lyrics);
     let narrow = content.width() < 860.0;
-    let lyrics_only = narrow || cs.layout == Layout::LyricsOnly;
+    let lyrics_only = !art_only && (narrow || cs.layout == Layout::LyricsOnly);
     // reCover: the backdrop cover sits on the left, so the lyrics take the right side.
-    let beside_cover = !narrow && cs.layout == Layout::LyricsOnly && look.background.mode == crate::preset::BgMode::CoverFullbleed;
+    let beside_cover = lyrics_only && !narrow && cs.layout == Layout::LyricsOnly && look.background.mode == crate::preset::BgMode::CoverFullbleed;
     let centered = lyrics_only && !beside_cover;
     let right = if beside_cover {
         Rect::from_min_max(pos2(content.left() + content.width() * 0.46, content.top()), content.max)
@@ -136,7 +140,9 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
         // Cover column: artwork and track info, on the preset's side.
         let frac = if cs.layout == Layout::CoverHero { 0.5 } else { 0.42 };
         let col_w = content.width() * frac;
-        let col = if cs.side == Side::Right {
+        let col = if art_only {
+            Rect::from_center_size(content.center(), vec2(content.width().min(content.height() * 0.9), content.height()))
+        } else if cs.side == Side::Right {
             Rect::from_min_size(pos2(content.right() - col_w, content.top()), vec2(col_w, content.height()))
         } else {
             Rect::from_min_size(content.min, vec2(col_w, content.height()))
@@ -191,16 +197,30 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
         // Each artist opens their own page (features included).
         let line = track.artist_line();
         widgets::linked_text(ui, pos2(art.left(), title_y + 40.0), &line, &track.artists, theme::regular(17.0), theme::text_dim(), w, &mut app.actions);
+        if art_only && app.np_tab == NpTab::Lyrics {
+            // A brief note, faded out after a few seconds.
+            let since = ui.ctx().memory_mut(|m| *m.data.get_temp_mut_or_insert_with(egui::Id::new(("no-lyrics", &track.id)), || now));
+            let a = (1.0 - ((now - since - 3.0) / 1.0) as f32).clamp(0.0, 1.0);
+            if a > 0.0 {
+                let c = theme::with_alpha(theme::text_dim(), a * 0.8);
+                text_at(ui, pos2(art.left(), title_y + 68.0), "No lyrics for this song", theme::regular(14.0), c, w);
+                ui.ctx().request_repaint();
+            }
+        }
         if cs.side == Side::Right {
             Rect::from_min_max(content.min, pos2(col.left() - 28.0, content.bottom()))
         } else {
             Rect::from_min_max(pos2(col.right() + 28.0, content.top()), content.max)
         }
     };
+    if art_only {
+        return;
+    }
     let mut rui = ui.new_child(egui::UiBuilder::new().max_rect(right));
     match app.np_tab {
         NpTab::Lyrics => lyrics_panel(app, &mut rui, right, now, centered),
         NpTab::UpNext => super::shell::queue_list(app, &mut rui, "np"),
+        NpTab::Art => {}
     }
 }
 

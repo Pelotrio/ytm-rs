@@ -26,6 +26,9 @@ use crate::model::{Chip, Shelf, ShelfKind, Target, Track};
 use crate::shader::Background;
 use crate::theme;
 
+/// File types YouTube Music accepts for upload.
+const UPLOAD_EXTS: &[&str] = &["mp3", "m4a", "flac", "ogg", "wma"];
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum Page {
     Home,
@@ -44,6 +47,7 @@ pub enum LibTab {
     Songs,
     Albums,
     History,
+    Uploads,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -57,6 +61,8 @@ pub enum Repeat {
 pub enum NpTab {
     Lyrics,
     UpNext,
+    /// Neither panel: just the artwork.
+    Art,
 }
 
 /// User intents collected while drawing; applied after the frame's UI pass.
@@ -144,6 +150,9 @@ pub struct App {
     artist: Option<ArtistPage>,
     library: Option<Library>,
     history: Option<Vec<Track>>,
+    uploads: Option<Vec<Track>>,
+    /// Files chosen in the upload dialog, handed over from its thread.
+    picked_uploads: Arc<std::sync::Mutex<Option<Vec<std::path::PathBuf>>>>,
     liked: HashSet<String>,
     account_name: Option<String>,
     account_avatar: Option<String>,
@@ -262,6 +271,8 @@ impl App {
             artist: None,
             library: None,
             history: None,
+            uploads: None,
+            picked_uploads: Default::default(),
             liked: HashSet::new(),
             account_name: None,
             account_avatar: None,
@@ -299,7 +310,7 @@ impl App {
             wheel_pending: egui::Vec2::ZERO,
             wheel_mods: egui::Modifiers::NONE,
             np_open: false,
-            np_tab: NpTab::Lyrics,
+            np_tab: if get("np_art").is_some_and(|v| v == "1") { NpTab::Art } else { NpTab::Lyrics },
             queue_open: false,
             fullscreen: false,
             lyrics: None,
@@ -337,18 +348,23 @@ impl App {
             app.go(Page::Search(q));
         }
         // An explicit page replaces the smoke search, so its query shouldn't linger.
-        if matches!(std::env::var("YTM_PAGE").as_deref(), Ok("home" | "explore" | "library" | "settings")) {
+        if matches!(std::env::var("YTM_PAGE").as_deref(), Ok("home" | "explore" | "library" | "uploads" | "settings")) {
             app.search_text.clear();
         }
         match std::env::var("YTM_PAGE").as_deref() {
             Ok("home") => app.go(Page::Home),
             Ok("explore") => app.go(Page::Explore),
             Ok("library") => app.go(Page::Library(LibTab::Playlists)),
+            Ok("uploads") => app.go(Page::Library(LibTab::Uploads)),
             Ok("settings") => app.go(Page::Settings),
             Ok(p) if p.starts_with("album:") => app.go(Page::Album(p[6..].to_owned())),
             Ok(p) if p.starts_with("artist:") => app.go(Page::Artist(p[7..].to_owned())),
             Ok(p) if p.starts_with("playlist:") => app.go(Page::Playlist(p[9..].to_owned())),
             _ => {}
+        }
+        // YTM_UPLOAD=<file> uploads that file as if it had been picked.
+        if let Some(f) = std::env::var_os("YTM_UPLOAD") {
+            *app.picked_uploads.lock().unwrap() = Some(vec![f.into()]);
         }
         if std::env::var("YTM_NOWPLAYING").is_ok() {
             app.np_open = true;
@@ -362,6 +378,10 @@ impl App {
     fn go(&mut self, page: Page) {
         self.np_open = false;
         if page == self.page {
+            // Clicking Home again refreshes the feed.
+            if page == Page::Home {
+                self.page_loaded();
+            }
             return;
         }
         let prev = std::mem::replace(&mut self.page, page);
@@ -390,7 +410,11 @@ impl App {
     fn page_loaded(&mut self) {
         self.page_changed = -1.0; // stamped with the frame time on the next pass
         let req = match &self.page {
-            Page::Home if self.home.is_none() && !self.home_loading => Some(Req::Home(None)),
+            // The feed changes as you listen: refresh on every visit, showing the cached copy meanwhile.
+            Page::Home if !self.home_loading => {
+                self.home_loading = true;
+                Some(Req::Home(None))
+            }
             Page::Explore if self.explore.is_none() => Some(Req::Explore(self.preferred_artist_ids())),
             Page::Search(q) if self.search.as_ref().is_none_or(|s| &s.query != q) => Some(Req::Search(q.clone())),
             Page::Album(id) if self.collection.as_ref().is_none_or(|c| &c.id != id) => Some(Req::Album(id.clone())),
@@ -401,12 +425,15 @@ impl App {
             // The library changes outside the app (likes, other devices): refresh on every
             // visit, showing the cached copy meanwhile.
             Page::Library(LibTab::History) if self.logged_in => Some(Req::History),
+            Page::Library(LibTab::Uploads) if self.logged_in => Some(Req::Uploads),
             Page::Library(_) if self.logged_in => Some(Req::Library),
             _ => None,
         };
         self.loading = req.is_some()
             && !matches!(self.page, Page::Library(LibTab::History) if self.history.is_some())
-            && !matches!(self.page, Page::Library(t) if t != LibTab::History && self.library.is_some());
+            && !matches!(self.page, Page::Library(LibTab::Uploads) if self.uploads.is_some())
+            && !matches!(self.page, Page::Library(t) if !matches!(t, LibTab::History | LibTab::Uploads) && self.library.is_some())
+            && !(self.page == Page::Home && self.home.is_some());
         if let Some(r) = req {
             self.backend.request(r);
         }
@@ -972,6 +999,20 @@ impl App {
                 self.history = Some(h);
                 self.loading = false;
             }
+            Resp::Uploads(t) => {
+                self.uploads = Some(t);
+                if self.page == Page::Library(LibTab::Uploads) {
+                    self.loading = false;
+                }
+            }
+            Resp::Uploaded { done, failed } => {
+                let songs = |n: usize| if n == 1 { "1 song".to_owned() } else { format!("{n} songs") };
+                self.toast(match (done, failed.len()) {
+                    (_, 0) => format!("Uploaded {}. It can take a minute for YouTube Music to process them.", songs(done)),
+                    (0, _) => format!("Upload failed: {}", failed.join(", ")),
+                    _ => format!("Uploaded {}; failed: {}", songs(done), failed.join(", ")),
+                });
+            }
             Resp::Lyrics { video_id, lyrics } => {
                 if self.current_id() == Some(video_id.as_str()) {
                     self.lyrics = Some((video_id, lyrics));
@@ -1066,6 +1107,7 @@ impl App {
                 self.account_avatar = None;
                 self.library = None;
                 self.history = None;
+                self.uploads = None;
                 self.home = None;
                 self.home_loading = true;
                 self.backend.request(Req::Home(None));
@@ -1147,6 +1189,34 @@ impl App {
     fn set_fullscreen(&mut self, ctx: &egui::Context, on: bool) {
         self.fullscreen = on;
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+    }
+
+    /// Open the system file picker for songs to upload; it runs on its own thread.
+    fn pick_uploads(&self, ctx: &egui::Context) {
+        let (slot, ctx) = (self.picked_uploads.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let files = rfd::FileDialog::new().set_title("Upload music").add_filter("Audio", UPLOAD_EXTS).pick_files();
+            if let Some(files) = files {
+                *slot.lock().unwrap() = Some(files);
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    fn upload_files(&mut self, files: Vec<std::path::PathBuf>) {
+        let (ok, skipped): (Vec<_>, Vec<_>) = files.into_iter().partition(|f| {
+            f.extension().and_then(|e| e.to_str()).is_some_and(|e| UPLOAD_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+        });
+        if !self.logged_in {
+            self.toast("Sign in to upload music");
+        } else if ok.is_empty() {
+            if !skipped.is_empty() {
+                self.toast("YouTube Music only takes MP3, M4A, FLAC, OGG and WMA files");
+            }
+        } else {
+            self.toast(if ok.len() == 1 { "Uploading 1 song…".to_owned() } else { format!("Uploading {} songs…", ok.len()) });
+            self.backend.request(Req::Upload(ok));
+        }
     }
 
     fn start_sign_in(&self, ctx: &egui::Context) {
@@ -1253,6 +1323,12 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let now = ctx.input(|i| i.time);
         self.pump(now);
+        // Upload: files from the picker, or dropped onto the window.
+        let mut files = self.picked_uploads.lock().unwrap().take().unwrap_or_default();
+        files.extend(ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_owned()).filter(|p| !p.as_os_str().is_empty()).collect::<Vec<_>>()));
+        if !files.is_empty() {
+            self.upload_files(files);
+        }
         for a in std::mem::take(&mut self.actions) {
             self.apply(a);
         }
@@ -1440,6 +1516,7 @@ impl eframe::App for App {
         storage.set_string("reactive_bg", b(self.reactive_bg));
         storage.set_string("show_roman", b(self.show_roman));
         storage.set_string("show_trans", b(self.show_trans));
+        storage.set_string("np_art", b(self.np_tab == NpTab::Art));
         // Background test runs leave the user's real "last song" alone unless asked.
         let test_run = std::env::var_os("YTM_BACKGROUND").is_some() && std::env::var_os("YTM_SAVE_SESSION").is_none();
         if let Some(s) = self.session_json().filter(|_| !test_run) {

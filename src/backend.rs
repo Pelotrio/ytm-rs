@@ -36,6 +36,10 @@ pub enum Req {
     Playlist(String),
     Library,
     History,
+    /// Songs the account uploaded to YouTube Music.
+    Uploads,
+    /// Upload audio files to the account's library.
+    Upload(Vec<PathBuf>),
     Lyrics(Track),
     /// Process cover art for the background; `key` is echoed back.
     Art { key: String, url: String },
@@ -71,6 +75,8 @@ impl Req {
             Req::Playlist(_) => "Loading playlist",
             Req::Library => "Loading library",
             Req::History => "Loading history",
+            Req::Uploads => "Loading uploads",
+            Req::Upload(_) => "Upload",
             Req::Lyrics(_) => "Lyrics",
             Req::Art { .. } => "Art",
             Req::Radio(_) => "Loading radio",
@@ -155,6 +161,9 @@ pub enum Resp {
     Artist(ArtistPage),
     Library(Library),
     History(Vec<Track>),
+    Uploads(Vec<Track>),
+    /// Upload finished: how many files went up, and which failed.
+    Uploaded { done: usize, failed: Vec<String> },
     Lyrics { video_id: String, lyrics: Option<Lyrics> },
     /// Romanization/translation for the lyrics, arriving after them.
     LyricsExtras { video_id: String, extras: crate::translate::Extras },
@@ -344,6 +353,35 @@ impl Backend {
                         h.items.iter().map(|i| Track::from(&i.item)).filter(|t| seen.insert(t.id.clone())).collect(),
                     )
                 }
+                Req::Uploads => Resp::Uploads(ytm::uploads(&q.authenticated()).await?),
+                Req::Upload(files) => {
+                    let session = webmusic::Session::load(&self.data_dir).ok_or_else(|| anyhow::anyhow!("sign in to upload music"))?;
+                    let (mut done, mut failed) = (0, Vec::new());
+                    for f in &files {
+                        let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        match session.upload(&self.http, f).await {
+                            Ok(()) => done += 1,
+                            Err(e) => {
+                                log::warn!("upload {name}: {e:#}");
+                                failed.push(name);
+                            }
+                        }
+                    }
+                    if done > 0 {
+                        // YouTube Music needs a little while to process new uploads.
+                        let this = self.clone();
+                        self.rt.spawn(async move {
+                            for wait in [20, 40, 60] {
+                                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                                if let Ok(t) = ytm::uploads(&this.rp.query().authenticated()).await {
+                                    let _ = this.tx.send(Resp::Uploads(t));
+                                    this.wake();
+                                }
+                            }
+                        });
+                    }
+                    Resp::Uploaded { done, failed }
+                }
                 Req::Lyrics(track) => {
                     let video_id = track.id.clone();
                     let lyrics = self.lyrics_for(&track).await;
@@ -477,7 +515,24 @@ impl Backend {
     async fn playlist(&self, id: &str) -> anyhow::Result<Collection> {
         let q = self.rp.query();
         let q = if self.is_logged_in() { q.authenticated() } else { q };
-        let mut pl = q.music_playlist(id).await?;
+        let mut pl = match q.music_playlist(id).await {
+            Ok(pl) => pl,
+            // Mixes: rustypipe can't parse them, read the page ourselves.
+            Err(e) => {
+                let Ok(raw) = ytm::playlist(&q, id).await else { return Err(e.into()) };
+                return Ok(Collection {
+                    artists: Vec::new(),
+                    save_id: None,
+                    id: id.to_owned(),
+                    is_album: false,
+                    title: raw.title,
+                    subtitle: raw.subtitle,
+                    description: raw.description,
+                    thumbs: raw.thumbs,
+                    tracks: raw.tracks,
+                });
+            }
+        };
         // Pull a few more pages so long playlists are usable without paging UI.
         let _ = pl.tracks.extend_limit(&q, 500).await;
         let mut sub = Vec::new();
