@@ -278,7 +278,7 @@ void main(){
     const cover = drawDemoCover($("[data-cover]", player));
     const warp = makeWarp($('[data-warp="player"]', player), cover, { sat: 1.25, scale: 0.12, speed: 1.6 });
 
-    track.innerHTML = LINES.map((l, i) => `<button type="button" class="lyr" data-i="${i}" aria-label="Jump to line ${i + 1}: ${l.tr}"><span class="lyr__jp" lang="ja" data-text="${l.jp}">${l.jp}</span><span class="lyr__ro">${l.ro}</span><span class="lyr__tr">${l.tr}</span></button>`).join("");
+    track.innerHTML = LINES.map((l, i) => `<button type="button" class="lyr" data-i="${i}" aria-label="Jump to line ${i + 1}: ${l.tr}"><span class="lyr__jp" lang="ja" data-text="${l.jp}"><span class="lyr__fill">${l.jp}</span></span><span class="lyr__ro">${l.ro}</span><span class="lyr__tr">${l.tr}</span></button>`).join("");
     const rows = $$(".lyr", track);
     player.classList.add("show-romaji", "show-trans");
 

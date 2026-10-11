@@ -273,7 +273,7 @@ h2 {
   transform: scale(var(--scale)); transform-origin: 0 50%;
   transition: opacity 0.6s var(--ease), filter 0.6s var(--ease), transform 0.6s var(--ease);
 }
-.lyr:hover { --a: 0.75 !important; }
+.lyr:not(.is-active):hover { --a: 0.75 !important; }
 .lyr__jp {
   display: block; font: 700 clamp(22px, 2.6vw, 34px)/1.3 var(--jp); letter-spacing: 0.01em; color: #fff;
 }
@@ -281,13 +281,14 @@ h2 {
 .lyr__tr { display: block; margin-top: 2px; font: 400 clamp(14px, 1.35vw, 16px)/1.35 var(--sans); color: rgba(255, 255, 255, 0.72); }
 .lyr__jp { position: relative; }
 .lyr.is-active .lyr__jp::before {
-  content: attr(data-text); position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  content: attr(data-text); position: absolute; inset: 0; pointer-events: none;
   color: transparent; text-shadow: var(--glow, none);
 }
 .player:not(.show-romaji) .lyr__ro, .player:not(.show-trans) .lyr__tr { display: none; }
 .lyr.is-active { --a: 1; }
 /* active line fill (word-by-word sweep) */
-.lyr.is-active .lyr__jp {
+.lyr__fill { position: relative; }
+.lyr.is-active .lyr__fill {
   color: transparent;
   background: linear-gradient(90deg, var(--sung, #fff) calc(var(--p) * 100% - 4%), var(--unsung, rgba(255, 255, 255, 0.4)) calc(var(--p) * 100% + 4%));
   -webkit-background-clip: text; background-clip: text;
