@@ -18,14 +18,14 @@
 
 | Feature                 | What you can do                                                                                                                                         |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Your music feed**     | Browse your personalized YouTube Music home feed, including Listen again, Quick picks, mixes, and mood filters. Keep scrolling for more.                |
+| **Your music feed**     | Browse your personalized YouTube Music home feed, including Listen again, Quick picks, your mixes (My Supermix, Discover Mix and more), and mood filters. Keep scrolling for more. Pages refresh each time you open them.                |
 | **Explore and search**  | Find new releases from US charting artists and artists in your music feed, browse charts, and search for songs, albums, and playlists.              |
-| **Your library**        | Access liked songs, saved albums and playlists, and listening history after signing in.                                                                 |
+| **Your library**        | Access liked songs, saved albums and playlists, listening history and your uploads after signing in. Upload your own songs from the Uploads tab or by dropping audio files on the window. |
 | **Playback controls**   | Manage the queue, start radio from a song, and use shuffle, repeat, and autoplay. The next track is prefetched for quicker skips. Volume normalization turns loud songs down to an even level, the way YouTube Music does. |
-| **Lyrics and visuals**  | Follow synced lyrics when available, click a line to seek, show romanization and English translations under Japanese, Korean, Chinese and other non-Latin lyrics, switch to full-screen lyrics, and turn on the animated, music-reactive album-art background. |
+| **Lyrics and visuals**  | Follow synced lyrics when available, click a line to seek, show romanization and English translations under Japanese, Korean, Chinese and other non-Latin lyrics, switch to full-screen lyrics, hide lyrics to see just the artwork, and turn on the animated, music-reactive album-art background. |
 | **Themes**              | Pick from 26 presets rebuilt from the [Better Lyrics community themes](https://github.com/better-lyrics/themes), such as Apple Music, Spicy, Spinning Record and reCover. Each one restyles the lyrics, background, cover, player bar, fonts and the rest of the app. |
 | **Desktop integration** | Use system media controls, Discord Rich Presence, and screen-reader-accessible controls.                                                                |
-| **Automatic updates**   | The installed app downloads new versions in the background and installs them when you close it, or right away with **Restart to update**.              |
+| **Automatic updates**   | The installed app downloads new versions in the background and installs them when you close it, or right away with **Restart to update**. It shows each release's notes when an update is ready and after it installs.              |
 
 ## Screenshots
 
@@ -65,6 +65,10 @@ Once installed, ytm-rs keeps itself up to date. You can turn this off in **Setti
 ### Sign in
 
 Open **Settings → Sign in with Google** in the app. Signing in unlocks your music feed, library, likes, and history. You can also browse and search without signing in.
+
+### Upload your music
+
+Open **Library → Uploads** and click **Upload music**, or drop MP3, M4A, FLAC, OGG or WMA files anywhere on the window. They go to your YouTube Music library, the same as uploading on music.youtube.com. The title, artist, album and cover come from the file's tags, so tag your files before uploading.
 
 ### Pick a theme
 
