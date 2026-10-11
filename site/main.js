@@ -486,6 +486,7 @@ void main(){
       .then((data) => { try { sessionStorage.setItem(key, JSON.stringify({ at: Date.now(), data })); } catch {} return data; });
   };
   // stars are fetched fresh (GitHub caches 60 s) and again when you come back to the tab, e.g. after starring
+  try { sessionStorage.removeItem("ytmrs-repo"); } catch {} // stale count saved by an older version of this script
   let starsAt = 0;
   const loadStars = () => {
     if (Date.now() - starsAt < 30000) return;
