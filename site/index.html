@@ -89,7 +89,7 @@
         { "@type": "Question", "name": "Is ytm-rs an official YouTube Music app?", "acceptedAnswer": { "@type": "Answer", "text": "No. ytm-rs is an unofficial client built by an independent developer. It talks to the same services music.youtube.com uses, so changes on YouTube's side can occasionally affect playback, sign-in or lyrics." } },
         { "@type": "Question", "name": "Do I need YouTube Premium to use ytm-rs?", "acceptedAnswer": { "@type": "Answer", "text": "No. You can browse, search and play without signing in. Signing in unlocks your home feed, library, likes and history. Premium-only songs play natively if your account has Premium." } },
         { "@type": "Question", "name": "Does ytm-rs run on macOS or Linux?", "acceptedAnswer": { "@type": "Answer", "text": "Releases are built and tested for Windows. The app is written with cross-platform Rust libraries, but macOS and Linux builds aren't published or tested yet." } },
-        { "@type": "Question", "name": "Where do the synced lyrics come from?", "acceptedAnswer": { "@type": "Answer", "text": "Synced lyrics come from the Better Lyrics API, with YouTube Music's own plain lyrics as a fallback. Romanization and English translations for Japanese, Korean, Chinese and other non-Latin lyrics come from Google Translate." } },
+        { "@type": "Question", "name": "Where do the synced lyrics come from?", "acceptedAnswer": { "@type": "Answer", "text": "Synced lyrics come from the Better Lyrics API. Romanization and English translations for Japanese, Korean, Chinese and other non-Latin lyrics come from Google Translate." } },
         { "@type": "Question", "name": "How does ytm-rs update?", "acceptedAnswer": { "@type": "Answer", "text": "The installed app checks GitHub for new releases, downloads them in the background and installs when you close it. You can also restart to update right away, or turn updates off in Settings." } }
       ]
     }
@@ -470,7 +470,7 @@
   <div class="section__head">
     <p class="eyebrow">Under the hood</p>
     <h2 id="engine-title">No Chromium anywhere in the player.</h2>
-    <p class="lede">The interface is <a href="https://github.com/emilk/egui" rel="noopener">egui</a> on OpenGL. Audio is <a href="https://github.com/RustAudio/rodio" rel="noopener">rodio</a> and Symphonia. Browsing goes through <a href="https://crates.io/crates/rustypipe" rel="noopener">rustypipe</a> and YouTube's own internal API. It all compiles into one 22&nbsp;MB executable.</p>
+    <p class="lede">The interface is <a href="https://github.com/emilk/egui" rel="noopener">egui</a> on OpenGL. Audio is <a href="https://github.com/RustAudio/rodio" rel="noopener">rodio</a> and Symphonia. Browsing goes straight to YouTube Music's own internal API. It all compiles into one 17&nbsp;MB executable.</p>
   </div>
 
   <div class="beams" data-beams>
@@ -587,7 +587,7 @@
     <details><summary>Do I need YouTube Premium?</summary><div class="faq__a"><p>No. You can browse, search and play without signing in. Signing in unlocks your home feed, library, likes and history. Premium-only songs play natively if your account has Premium.</p></div></details>
     <details><summary>Does it run on macOS or Linux?</summary><div class="faq__a"><p>Releases are built and tested for Windows. The app is written with cross-platform Rust libraries, but macOS and Linux builds aren't published or tested yet.</p></div></details>
     <details><summary>How does signing in work?</summary><div class="faq__a"><p>Open Settings → Sign in with Google. Google's own sign-in page opens in a temporary system WebView2 window, and the session stays on your computer. The player itself never runs in a webview.</p></div></details>
-    <details><summary>Where do the lyrics come from?</summary><div class="faq__a"><p>Synced lyrics come from the Better Lyrics API, with YouTube Music's own plain lyrics as a fallback. Romanization and English translations come from Google Translate. They're machine-made, so expect rough spots.</p></div></details>
+    <details><summary>Where do the lyrics come from?</summary><div class="faq__a"><p>Synced lyrics come from the Better Lyrics API. Romanization and English translations come from Google Translate. They're machine-made, so expect rough spots.</p></div></details>
     <details><summary>How does it update?</summary><div class="faq__a"><p>The installed app checks GitHub for new releases, downloads them in the background and installs when you close it. Choose Restart to update to install right away, or turn updates off in Settings → Updates.</p></div></details>
   </div>
 </section>

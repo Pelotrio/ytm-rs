@@ -90,17 +90,17 @@ The built application is at `target\release\ytm-rs.exe`.
 ## Notes
 
 - The app interface and audio playback are native. Google sign-in and lyrics verification use temporary system webview windows; on Windows, these use WebView2.
-- Synced lyrics come from the Better Lyrics API. If they are unavailable, the app can fall back to YouTube Music's plain lyrics. Lyrics availability depends on the track and the providers. Romanization and translations come from Google Translate and are machine-made, so expect rough spots.
+- Synced lyrics come from the Better Lyrics API. Lyrics availability depends on the track and the providers. Romanization and translations come from Google Translate and are machine-made, so expect rough spots.
 - Premium-only and age-restricted songs play through your signed-in account. With YouTube Premium they play natively; without it, age-restricted songs fall back to `yt-dlp`, which needs Node.js.
 - Themes are native translations of CSS themes, not the CSS itself, so some details differ from the originals. Fonts that can't be redistributed (SF Pro, Spotify's) are replaced with the closest open fonts.
 - ytm-rs is an unofficial client. Changes to YouTube Music or third-party services can affect playback, sign-in, or lyrics.
 
 ## License
 
-[GPL-3.0](LICENSE). ytm-rs uses rustypipe, which is GPL-3.0.
+[GPL-3.0](LICENSE).
 
 ## Built with
 
-[egui](https://github.com/emilk/egui) for the interface, [rodio](https://github.com/RustAudio/rodio) and Symphonia for audio, and [rustypipe](https://crates.io/crates/rustypipe) for YouTube Music browsing. Signed-in stream URLs are decoded with yt-dlp's [EJS](https://github.com/yt-dlp/ejs) solver running in QuickJS. The animated background is based on Kawarp from Better Lyrics, and the theme presets are adapted from the Better Lyrics theme store, with credit to each theme's creators. The app also uses Inter, DM Sans, Google Sans Flex, Figtree and Instrument Sans (SIL OFL 1.1) and Lucide icons.
+[egui](https://github.com/emilk/egui) for the interface, [rodio](https://github.com/RustAudio/rodio) and Symphonia for audio. Browsing, search and your library come straight from YouTube Music's own web API, the one music.youtube.com uses. Signed-in stream URLs are decoded with yt-dlp's [EJS](https://github.com/yt-dlp/ejs) solver running in QuickJS. The animated background is based on Kawarp from Better Lyrics, and the theme presets are adapted from the Better Lyrics theme store, with credit to each theme's creators. The app also uses Inter, DM Sans, Google Sans Flex, Figtree and Instrument Sans (SIL OFL 1.1) and Lucide icons.
 
 Found a bug or have an idea? [Open an issue](https://github.com/grapedjuice/ytm-rs/issues).
