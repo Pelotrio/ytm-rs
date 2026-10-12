@@ -895,8 +895,8 @@ impl View {
                 let a = theme::anim(&ctx, ("lyr-credits", f.key), a, 0.35);
                 let o = transform_origin(block_rect, b.align, content.x);
                 let g = ctx.fonts_mut(|fv| fv.layout(text.clone(), font.clone(), Color32::WHITE, line_w - cfg.size * 0.5));
-                let p = o + (pos2(content.x, top + cfg.padding) - o) * cfg.scale;
-                painter.galley_with_override_text_color(p, g, theme::with_alpha(Color32::WHITE, a));
+                let xf = Xf { origin: o, scale: cfg.scale, content };
+                paint_galley(&painter, &g, pos2(0.0, cfg.padding), &xf, theme::with_alpha(Color32::WHITE, a), atlas);
                 continue;
             }
             let li = b.line.unwrap();
@@ -1036,10 +1036,9 @@ impl View {
                             let wrap = d.rect.width() + 1.0;
                             let g = ctx.fonts_mut(|fv| fv.layout(text.clone(), font.clone(), Color32::WHITE, wrap));
                             let pad = if d.pill { vec2(cfg.rem() * 0.75 + 1.0, cfg.rem() * 0.25 + 1.0) } else { Vec2::ZERO };
-                            let p = dxf.point(d.rect.min + pad);
-                            let g = scale_galley(&ctx, g, text, font, scale, wrap);
-                            // `--blyrics-translated-color`: white at 0.6.
-                            painter.galley_with_override_text_color(p, g, theme::with_alpha(Color32::WHITE, 0.6 * a));
+                            // `--blyrics-translated-color`: white at 0.6. Drawn through the
+                            // line's transform at the one laid-out size.
+                            paint_galley(&painter, &g, d.rect.min + pad, &dxf, theme::with_alpha(Color32::WHITE, 0.6 * a), atlas);
                         }
                     }
                 }
@@ -1191,13 +1190,25 @@ impl Xf {
     }
 }
 
-fn scale_galley(ctx: &egui::Context, g: Arc<Galley>, text: &str, font: &FontId, scale: f32, wrap: f32) -> Arc<Galley> {
-    if (scale - 1.0).abs() < 0.002 {
-        return g;
+/// A laid-out galley drawn through a line transform, as glyph quads on the font texture.
+fn paint_galley(painter: &egui::Painter, g: &Galley, at: Pos2, xf: &Xf, color: Color32, atlas: [usize; 2]) {
+    let mut mesh = Mesh::with_texture(TextureId::default());
+    let none: [f32; 0] = [];
+    for row in &g.rows {
+        for gl in &row.row.glyphs {
+            let uv = gl.uv_rect;
+            if uv.is_nothing() {
+                continue;
+            }
+            let r = Rect::from_min_size(at + row.pos.to_vec2() + gl.pos.to_vec2() + uv.offset, uv.size);
+            let uvr = Rect::from_min_max(
+                pos2(uv.min[0] as f32 / atlas[0] as f32, uv.min[1] as f32 / atlas[1] as f32),
+                pos2(uv.max[0] as f32 / atlas[0] as f32, uv.max[1] as f32 / atlas[1] as f32),
+            );
+            push_quad(&mut mesh, xf.rect(r), uvr, color, &|_| 1.0, &none);
+        }
     }
-    // Quantized so a line growing doesn't lay text out at a new size every frame.
-    let s = (scale * 100.0).round() / 100.0;
-    ctx.fonts_mut(|fv| fv.layout(text.to_owned(), FontId::new(font.size * s, font.family.clone()), Color32::WHITE, wrap * s))
+    painter.add(Shape::mesh(mesh));
 }
 
 // ------------------------------------------------------------------ words
@@ -1360,17 +1371,15 @@ struct GlyphQuad {
 }
 
 /// A word's glyphs this frame, in content coordinates (before the line transform):
-/// letter floats applied, then the group's wobble. `raster`: the line's resting scale
-/// (0.95 or 1), at which the text is laid out so it stays pixel-sharp.
-fn word_glyphs(ctx: &egui::Context, w: &Word, lit: &LitState, cfg: &Cfg, wob: Option<(f32, f32, f32)>, atlas: [usize; 2], raster: f32) -> Vec<GlyphQuad> {
-    let font = FontId::new(w.font.size * raster, w.font.family.clone());
-    let g = ctx.fonts_mut(|fv| fv.layout_no_wrap(w.text.clone(), font, Color32::WHITE));
+/// letter floats applied, then the group's wobble. Laid out once, at the font's size,
+/// and scaled with the line: a second size would put a second copy of every glyph in
+/// the shared font atlas, which only ever grows.
+fn word_glyphs(ctx: &egui::Context, w: &Word, lit: &LitState, cfg: &Cfg, wob: Option<(f32, f32, f32)>, atlas: [usize; 2]) -> Vec<GlyphQuad> {
+    let g = ctx.fonts_mut(|fv| fv.layout_no_wrap(w.text.clone(), w.font.clone(), Color32::WHITE));
     let n: usize = g.rows.iter().map(|r| r.row.glyphs.len()).sum();
     let waves = if w.letters && lit.live && lit.exit.is_none() { Some(letter_waves(n, w.dur.max(0.0), cfg.wave_duration)) } else { None };
     let e = lit.t - w.start;
     let em = w.font.size;
-    // Galley units -> content units.
-    let unscale = |v: Vec2| v / raster;
     let mut out = Vec::with_capacity(n);
     let mut k = 0;
     for row in &g.rows {
@@ -1381,12 +1390,11 @@ fn word_glyphs(ctx: &egui::Context, w: &Word, lit: &LitState, cfg: &Cfg, wob: Op
             if uv.is_nothing() {
                 continue;
             }
-            let min = w.pos + unscale(row.pos.to_vec2() + gl.pos.to_vec2() + uv.offset);
-            let mut r = Rect::from_min_size(min, unscale(uv.size));
+            let mut r = Rect::from_min_size(w.pos + row.pos.to_vec2() + gl.pos.to_vec2() + uv.offset, uv.size);
             if let Some(waves) = &waves {
                 let (lift, s) = letter_float(e, waves[idx], w.long, cfg);
                 // Letters scale about their own centre (`.blyrics--letter` box).
-                let c = pos2(w.pos.x + (row.pos.x + gl.pos.x + gl.advance_width * 0.5) / raster, r.center().y);
+                let c = pos2(w.pos.x + row.pos.x + gl.pos.x + gl.advance_width * 0.5, r.center().y);
                 r = Rect::from_min_max(c + (r.min - c) * s, c + (r.max - c) * s).translate(vec2(0.0, -lift * em));
             }
             if let Some((cx, tx, sx)) = wob {
@@ -1465,9 +1473,6 @@ fn paint_words(
     glow: &mut Vec<GlowJob>,
     key: (u64, usize, u32),
 ) {
-    // Text at the line's resting scale is laid out at that size (sharp); while the scale
-    // animates, the glyphs are drawn scaled.
-    let raster = if (xf.scale - cfg.scale).abs() < 1e-3 || (xf.scale - cfg.active_scale).abs() < 1e-3 { xf.scale } else { 1.0 };
     let no_cut: [f32; 0] = [];
     let mut base = Mesh::with_texture(TextureId::default());
     let mut per_word = Vec::with_capacity(words.len());
@@ -1484,7 +1489,7 @@ fn paint_words(
         } else {
             None
         };
-        let quads = word_glyphs(ctx, w, lit, cfg, wob, atlas, raster);
+        let quads = word_glyphs(ctx, w, lit, cfg, wob, atlas);
         let dim_c = if w.bg { dim * 0.78 } else { dim } * opacity;
         for q in &quads {
             push_quad(&mut base, xf.rect(q.rect), q.uv, theme::with_alpha(Color32::WHITE, dim_c), &|_| 1.0, &no_cut);

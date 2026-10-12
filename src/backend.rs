@@ -473,10 +473,15 @@ impl Backend {
             album: t.album.as_ref().map(|a| a.name.as_str()),
             duration: t.duration.or_else(|| self.audio.status.duration().map(|d| d.as_secs() as u32)),
         };
-        self.lyrics.fetch(&query).await.unwrap_or_else(|e| {
+        let mut set = self.lyrics.fetch(&query).await.unwrap_or_else(|e| {
             log::warn!("lyrics failed: {e:#}");
             LyricsSet::default()
-        })
+        });
+        // Dev hook: YTM_LYRICS_FAIL=<source key>[,<key>…] makes those sources come back empty.
+        if let Ok(fail) = std::env::var("YTM_LYRICS_FAIL") {
+            set.sources.retain(|l| !fail.split(',').any(|k| k.trim() == l.provider.key()));
+        }
+        set
     }
 
     /// Sign in with the youtube.com cookies the Google sign-in window hands over.

@@ -200,11 +200,6 @@ impl LyricsSet {
     pub fn get(&self, p: Provider) -> Option<&Lyrics> {
         self.sources.iter().find(|l| l.provider == p)
     }
-
-    /// The first available source in `order` (the listener's priority list).
-    pub fn pick(&self, order: &[Provider]) -> Option<&Lyrics> {
-        order.iter().find_map(|p| self.get(*p))
-    }
 }
 
 // ------------------------------------------------------------------- API client

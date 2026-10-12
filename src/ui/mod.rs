@@ -543,7 +543,7 @@ impl App {
     /// The lyrics shown for the current song: the song's pick, then the listener's order.
     fn lyric_choice(&self) -> Option<&Lyrics> {
         let (id, set) = self.lyrics.as_ref()?;
-        set.pick(&self.lyric_prefs.order_for(id))
+        set.get(self.lyric_prefs.choose(id, set)?)
     }
 
     /// Lyrics have loaded, and no enabled source has any.
@@ -1135,9 +1135,16 @@ impl App {
             }
             Resp::Lyrics { video_id, lyrics } => {
                 if self.current_id() == Some(video_id.as_str()) {
+                    let available = self.lyric_prefs.available(&lyrics);
+                    let shown = self.lyric_prefs.choose(&video_id, &lyrics);
+                    let missing: Vec<&str> = self.lyric_prefs.order.iter().filter(|(p, on)| *on && !available.contains(p)).map(|(p, _)| p.key()).collect();
                     log::info!(
-                        "lyrics: {}",
-                        lyrics.sources.iter().map(|l| format!("{} ({} lines)", l.provider.key(), l.lines.len())).collect::<Vec<_>>().join(", ")
+                        "lyrics: showing {} ({}/{}); available: {}; no lyrics from: {}",
+                        shown.map_or("nothing", |p| p.key()),
+                        shown.and_then(|p| available.iter().position(|x| *x == p)).map_or(0, |i| i + 1),
+                        available.len(),
+                        available.iter().map(|p| p.key()).collect::<Vec<_>>().join(", "),
+                        missing.join(", ")
                     );
                     self.lyrics = Some((video_id, lyrics));
                 }
@@ -1676,7 +1683,10 @@ impl eframe::App for App {
         storage.set_string("reactive_bg", b(self.reactive_bg));
         storage.set_string("show_roman", b(self.show_roman));
         storage.set_string("show_trans", b(self.show_trans));
-        self.lyric_prefs.save(storage);
+        // Background test runs mustn't change the listener's sources or per-song picks.
+        if std::env::var_os("YTM_BACKGROUND").is_none() || std::env::var_os("YTM_SAVE_SESSION").is_some() {
+            self.lyric_prefs.save(storage);
+        }
         storage.set_string("np_art", b(self.np_tab == NpTab::Art));
         // Background test runs leave the user's real "last song" alone unless asked.
         let test_run = std::env::var_os("YTM_BACKGROUND").is_some() && std::env::var_os("YTM_SAVE_SESSION").is_none();

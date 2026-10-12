@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::lyrics::{Line, Provider};
+use crate::lyrics::{Line, Lyrics, LyricsSet, Provider};
 
 /// Offsets are seconds taken off the lyrics clock: positive shows lyrics later.
 pub struct Prefs {
@@ -97,14 +97,26 @@ impl Prefs {
         storage.set_string("lyric_pins", serde_json::to_string(&pins).unwrap_or_default());
     }
 
-    /// Enabled sources in priority order, the song's pick first (`orderByPin`).
-    pub fn order_for(&self, video_id: &str) -> Vec<Provider> {
-        let mut out: Vec<Provider> = self.order.iter().filter(|(_, on)| *on).map(|(p, _)| *p).collect();
-        if let Some(pin) = self.pins.get(video_id) {
-            out.retain(|p| p != pin);
-            out.insert(0, *pin);
+    /// Sources that have lyrics for this song, in the listener's order (switched-off ones
+    /// left out). This is what the source counter counts through.
+    pub fn available(&self, set: &LyricsSet) -> Vec<Provider> {
+        self.order.iter().filter(|(p, on)| *on && set.get(*p).is_some_and(usable)).map(|(p, _)| *p).collect()
+    }
+
+    /// The source to show: the song's pick when it has lyrics, else the first in the
+    /// listener's order that does (`orderByPin`, then fall through on failure).
+    pub fn choose(&self, video_id: &str, set: &LyricsSet) -> Option<Provider> {
+        let available = self.available(set);
+        self.pins.get(video_id).filter(|p| available.contains(p)).copied().or_else(|| available.first().copied())
+    }
+
+    /// Pick a source for one song (`pinForPick`: the listener's own first choice needs no pin).
+    pub fn pick(&mut self, video_id: &str, set: &LyricsSet, p: Provider) {
+        if self.available(set).first() == Some(&p) {
+            self.pins.remove(video_id);
+        } else {
+            self.pins.insert(video_id.to_owned(), p);
         }
-        out
     }
 
     pub fn song_offset(&self, video_id: &str, source: Provider) -> f32 {
@@ -126,6 +138,11 @@ impl Prefs {
     pub fn offset(&self, video_id: &str, source: Provider, richsync: bool) -> f64 {
         (self.global_offset + self.song_offset(video_id, source) + if richsync { self.word_trim } else { self.line_trim }) as f64
     }
+}
+
+/// Lyrics worth showing: some line is sung (the extension's `hideInstrumentalOnly`).
+pub fn usable(l: &Lyrics) -> bool {
+    l.lines.iter().any(|x| !x.instrumental && !x.text.trim().is_empty())
 }
 
 /// `findBestLanguageMatch`: a translation shipped with the lyrics in the listener's language.
@@ -180,7 +197,59 @@ mod tests {
         let i = |q: Provider| p.order.iter().position(|(x, _)| *x == q).unwrap();
         assert!(i(Provider::LrclibSynced) < i(Provider::BLyricsRich));
         assert!(!p.order[i(Provider::BLyricsRich)].1);
-        assert!(!p.order_for("x").contains(&Provider::BLyricsRich));
+    }
+
+    fn set(of: &[Provider]) -> LyricsSet {
+        use crate::lyrics::Sync;
+        let line = Line { start: 1000, dur: 1000, text: "la".into(), ..Default::default() };
+        LyricsSet { sources: of.iter().map(|p| Lyrics { lines: vec![line.clone()], sync: Sync::Line, provider: *p, language: None, songwriters: vec![] }).collect() }
+    }
+
+    #[test]
+    fn falls_back_through_the_order() {
+        let p = Prefs::load(&|_| None);
+        // The best source failed: the next one in order shows.
+        let s = set(&[Provider::MusixmatchRich, Provider::LrclibSynced]);
+        assert_eq!(p.choose("v", &s), Some(Provider::MusixmatchRich));
+        // A source switched off is skipped.
+        let mut p2 = Prefs::load(&|_| None);
+        p2.order.iter_mut().find(|(x, _)| *x == Provider::MusixmatchRich).unwrap().1 = false;
+        assert_eq!(p2.choose("v", &s), Some(Provider::LrclibSynced));
+        // Lyrics with nothing sung don't count.
+        let mut s2 = set(&[Provider::BLyricsRich, Provider::LrclibSynced]);
+        s2.sources[0].lines[0].instrumental = true;
+        assert_eq!(p.choose("v", &s2), Some(Provider::LrclibSynced));
+        assert_eq!(p.choose("v", &LyricsSet::default()), None);
+    }
+
+    #[test]
+    fn a_pick_wins_while_it_has_lyrics() {
+        let mut p = Prefs::load(&|_| None);
+        let s = set(&[Provider::BLyricsRich, Provider::LrclibSynced, Provider::MusixmatchSynced]);
+        p.pick("v", &s, Provider::MusixmatchSynced);
+        assert_eq!(p.choose("v", &s), Some(Provider::MusixmatchSynced));
+        // Picking the first choice again needs no pin.
+        p.pick("v", &s, Provider::BLyricsRich);
+        assert!(p.pins.is_empty());
+        // A pick whose lyrics failed this time falls back.
+        p.pick("v", &s, Provider::MusixmatchSynced);
+        let without = set(&[Provider::BLyricsRich, Provider::LrclibSynced]);
+        assert_eq!(p.choose("v", &without), Some(Provider::BLyricsRich));
+    }
+
+    #[test]
+    fn counter_counts_the_shown_source() {
+        let mut p = Prefs::load(&|_| None);
+        let s = set(&[Provider::BLyricsRich, Provider::PortatoRich, Provider::LrclibSynced]);
+        let at = |p: &Prefs| {
+            let a = p.available(&s);
+            (a.iter().position(|x| Some(*x) == p.choose("v", &s)).unwrap() + 1, a.len())
+        };
+        assert_eq!(at(&p), (1, 3));
+        p.pick("v", &s, Provider::PortatoRich);
+        assert_eq!(at(&p), (2, 3));
+        p.pick("v", &s, Provider::LrclibSynced);
+        assert_eq!(at(&p), (3, 3));
     }
 
     #[test]
