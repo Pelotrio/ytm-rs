@@ -22,6 +22,7 @@ mod update;
 mod webmusic;
 mod ytdlp;
 mod ytm;
+mod ytmapi;
 
 use std::sync::{Arc, OnceLock};
 
@@ -147,7 +148,7 @@ fn hwnd(_: &eframe::CreationContext) -> Option<*mut std::ffi::c_void> {
 /// next to the settings (overwritten each launch).
 fn init_logging() {
     let mut builder = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("warn,rustypipe=off,tracing::span=off,ytm_rs=info"),
+        env_logger::Env::default().default_filter_or("warn,ytm_rs=info"),
     );
     if !cfg!(debug_assertions) {
         if let Some(dirs) = directories::ProjectDirs::from("", "", "ytm-rs") {

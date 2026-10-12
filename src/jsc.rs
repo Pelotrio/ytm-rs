@@ -1,6 +1,6 @@
 //! Solves the challenges on signed-in stream URLs (the `sig` signature and the `n`
-//! throttling parameter) with yt-dlp's EJS solver, run in QuickJS: the engine rustypipe
-//! already links, so no Node or yt-dlp process is involved.
+//! throttling parameter) with yt-dlp's EJS solver, run in an embedded QuickJS, so no
+//! Node or yt-dlp process is involved.
 //!
 //! The player script is preprocessed once per player version and cached on disk, along
 //! with its compiled bytecode (source and debug info stripped). Loading that takes a

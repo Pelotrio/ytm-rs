@@ -19,21 +19,56 @@ use crate::jsc::Solver;
 pub const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 const VERSION: &str = "1.20260707.12.00";
 
-/// The signed-in session as stored by rustypipe.
+/// The signed-in Google session: the youtube.com cookies the sign-in window captured,
+/// plus which signed-in account and channel they are for.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Session {
     pub cookie: String,
     session_index: u32,
+    /// Brand channel to act as (X-Goog-PageId), when it isn't the account's own.
+    #[serde(default)]
+    page_id: Option<String>,
 }
 
+const FILE: &str = "account.json";
+/// Where versions up to 0.2.11 kept the session (rustypipe's cache).
+const LEGACY: &str = "rustypipe_cache.json";
+
 impl Session {
-    /// `None` when signed out.
+    pub fn new(cookie: String, session_index: u32, page_id: Option<String>) -> Self {
+        Self { cookie, session_index, page_id }
+    }
+
+    /// `None` when signed out. A session saved by an older version is carried over.
     pub fn load(data_dir: &Path) -> Option<Self> {
-        let cache: Value = serde_json::from_str(&std::fs::read_to_string(data_dir.join("rustypipe_cache.json")).ok()?).ok()?;
+        if let Some(s) = std::fs::read(data_dir.join(FILE)).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+            return Some(s);
+        }
+        let cache: Value = serde_json::from_str(&std::fs::read_to_string(data_dir.join(LEGACY)).ok()?).ok()?;
         let auth = &cache["auth_cookie"];
-        Some(Self {
-            cookie: auth["cookie"].as_str()?.to_owned(),
-            session_index: auth["session_index"].as_u64().unwrap_or(0) as u32,
-        })
+        let index = auth["session_index"].as_u64().or_else(|| auth["session_index"].as_str()?.parse().ok()).unwrap_or(0);
+        let s = Self::new(auth["cookie"].as_str()?.to_owned(), index as u32, auth["channel_syncid"].as_str().map(str::to_owned));
+        log::info!("signed-in session carried over from the previous version");
+        s.save(data_dir);
+        Some(s)
+    }
+
+    pub fn save(&self, data_dir: &Path) {
+        if let Err(e) = std::fs::write(data_dir.join(FILE), serde_json::to_vec(self).unwrap_or_default()) {
+            log::warn!("couldn't save the session: {e}");
+        }
+    }
+
+    /// Sign out: forget the session, including an older version's copy of it.
+    pub fn remove(data_dir: &Path) {
+        let _ = std::fs::remove_file(data_dir.join(FILE));
+        let legacy = data_dir.join(LEGACY);
+        if let Some(mut cache) = std::fs::read(&legacy).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            && let Some(obj) = cache.as_object_mut().filter(|o| o.contains_key("auth_cookie"))
+        {
+            obj.remove("auth_cookie");
+            let _ = std::fs::write(&legacy, serde_json::to_vec(&cache).unwrap_or_default());
+        }
     }
 
     fn get(&self, name: &str) -> Option<&str> {
@@ -56,18 +91,29 @@ impl Session {
         Ok(parts.join(" "))
     }
 
+    /// Add the signed-in headers for a request to `origin`.
+    pub fn sign(&self, req: reqwest::RequestBuilder, origin: &str) -> anyhow::Result<reqwest::RequestBuilder> {
+        let mut req = req
+            .header("Cookie", &self.cookie)
+            .header("Authorization", self.authorization(origin)?)
+            .header("X-Goog-AuthUser", self.session_index.to_string());
+        if let Some(p) = &self.page_id {
+            req = req.header("X-Goog-PageId", p);
+        }
+        Ok(req)
+    }
+
     async fn post(&self, http: &reqwest::Client, origin: &str, endpoint: &str, client: (&str, &str, &str), body: Value) -> anyhow::Result<Value> {
         let (number, version, ua) = client;
-        Ok(http
+        let req = http
             .post(format!("{origin}/youtubei/v1/{endpoint}?prettyPrint=false"))
             .header("User-Agent", ua)
             .header("X-YouTube-Client-Name", number)
             .header("X-YouTube-Client-Version", version)
             .header("Origin", origin)
-            .header("X-Origin", origin)
-            .header("Cookie", &self.cookie)
-            .header("Authorization", self.authorization(origin)?)
-            .header("X-Goog-AuthUser", self.session_index.to_string())
+            .header("X-Origin", origin);
+        Ok(self
+            .sign(req, origin)?
             .timeout(std::time::Duration::from_secs(10))
             .json(&body)
             .send()
@@ -86,15 +132,13 @@ impl Session {
         let bytes = tokio::task::spawn_blocking(move || std::fs::read(p)).await??;
         anyhow::ensure!(bytes.len() <= 300 * 1024 * 1024, "{name} is larger than 300 MB");
         let req = |url: &str| -> anyhow::Result<reqwest::RequestBuilder> {
-            Ok(http
+            let req = http
                 .post(url)
                 .header("User-Agent", UA)
                 .header("Origin", ORIGIN)
                 .header("X-Origin", ORIGIN)
-                .header("Cookie", &self.cookie)
-                .header("Authorization", self.authorization(ORIGIN)?)
-                .header("X-Goog-AuthUser", self.session_index.to_string())
-                .header("Content-Type", "application/x-www-form-urlencoded;charset=utf-8"))
+                .header("Content-Type", "application/x-www-form-urlencoded;charset=utf-8");
+            self.sign(req, ORIGIN)
         };
         let start = req(&format!("https://upload.youtube.com/upload/usermusic/http?authuser={}", self.session_index))?
             .header("X-Goog-Upload-Command", "start")
@@ -182,5 +226,32 @@ impl Session {
         }
         url.query_pairs_mut().clear().extend_pairs(pairs);
         Ok(Stream { url: url.into(), size, duration_ms, loudness_db })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn carries_over_and_forgets_an_older_versions_session() {
+        let dir = std::env::temp_dir().join(format!("ytm-rs-session-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = json!({
+            "clients": {"desktop_music": {"data": {"version": "1.0"}}},
+            "auth_cookie": {"cookie": "SAPISID=abc; SID=x", "session_index": "1", "channel_syncid": "brand"}
+        });
+        std::fs::write(dir.join(LEGACY), legacy.to_string()).unwrap();
+
+        let s = Session::load(&dir).unwrap();
+        assert_eq!((s.cookie.as_str(), s.session_index, s.page_id.as_deref()), ("SAPISID=abc; SID=x", 1, Some("brand")));
+        assert!(dir.join(FILE).exists());
+        assert!(s.authorization("https://music.youtube.com").unwrap().starts_with("SAPISIDHASH "));
+
+        Session::remove(&dir);
+        assert!(Session::load(&dir).is_none());
+        let left: Value = serde_json::from_slice(&std::fs::read(dir.join(LEGACY)).unwrap()).unwrap();
+        assert!(left.get("auth_cookie").is_none() && left.get("clients").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

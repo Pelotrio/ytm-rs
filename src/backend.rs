@@ -1,19 +1,14 @@
-//! Network side: a small tokio runtime owning the RustyPipe client.
+//! Network side: a small tokio runtime talking to YouTube Music (`ytmapi`/`ytm`).
 //!
 //! The UI sends `Req`s and drains `Resp`s once per frame; every response wakes the UI.
 //! Playback resolution also lives here: resolve stream → start progressive download →
 //! build the decoder on a blocking thread → hand it to the audio engine.
-//! rustypipe types are converted to the app's own models (model.rs) at this boundary.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crossbeam_channel::Sender;
-use rustypipe::client::RustyPipe;
-use rustypipe::model::richtext::ToPlaintext;
-use rustypipe::model::{AlbumItem, ArtistItem, AudioCodec, MusicPlaylistItem};
-use rustypipe::param::{Country, StreamFilter};
 use tokio::runtime::Runtime;
 
 use crate::art::Art;
@@ -21,7 +16,7 @@ use crate::audio::{AudioCmd, AudioHandle};
 use crate::lyrics::{self, Lyrics};
 use crate::model::{self, Card, Target, Thumb, Track, sized};
 use crate::stream::{self, Shared};
-use crate::{innertube, jsc, webmusic, ytdlp, ytm};
+use crate::{innertube, jsc, webmusic, ytdlp, ytm, ytmapi};
 
 pub enum Req {
     /// Home feed, optionally filtered by a mood chip's params.
@@ -185,7 +180,7 @@ type StreamSlot = Arc<std::sync::Mutex<Option<(String, Arc<Shared>)>>>;
 #[derive(Clone)]
 pub struct Backend {
     rt: Arc<Runtime>,
-    rp: RustyPipe,
+    api: Arc<ytmapi::Api>,
     http: reqwest::Client,
     tx: Sender<Resp>,
     audio: AudioHandle,
@@ -220,8 +215,7 @@ impl Backend {
             .enable_all()
             .build()?;
         std::fs::create_dir_all(&storage)?;
-        let data_dir = storage.clone();
-        let rp = RustyPipe::builder().storage_dir(storage).timezone_local().no_reporter().build()?;
+        let data_dir = storage;
         let http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(5))
             .pool_idle_timeout(std::time::Duration::from_secs(30))
@@ -230,7 +224,8 @@ impl Backend {
         let lyrics = Arc::new(lyrics::Client::new(http.clone(), &data_dir));
         let translate = Arc::new(crate::translate::Client::new(http.clone(), &data_dir));
         let jsc = Arc::new(jsc::Solver::new(&data_dir));
-        Ok(Self { rt: Arc::new(rt), rp, http, tx, audio, wake, prefetched: Default::default(), current: Default::default(), data_dir, lyrics, translate, jsc, premium: Arc::new(tokio::sync::Mutex::new(Err(None))), hq: Default::default() })
+        let api = Arc::new(ytmapi::Api::new(http.clone(), &data_dir));
+        Ok(Self { rt: Arc::new(rt), api, http, tx, audio, wake, prefetched: Default::default(), current: Default::default(), data_dir, lyrics, translate, jsc, premium: Arc::new(tokio::sync::Mutex::new(Err(None))), hq: Default::default() })
     }
 
     pub fn http(&self) -> &reqwest::Client {
@@ -255,8 +250,8 @@ impl Backend {
         let task = self.rt.spawn(async move { this.handle(req).await });
         let this = self.clone();
         self.rt.spawn(async move {
-            // rustypipe has unwraps on network paths (visitor data on a 302); a panic
-            // there fails just this request, reported like any other error.
+            // A panic in a handler (or a library it calls) fails just this request,
+            // reported like any other error.
             let resp = match task.await {
                 Ok(resp) => resp,
                 Err(e) if e.is_panic() => {
@@ -276,96 +271,62 @@ impl Backend {
     }
 
     async fn handle(&self, req: Req) -> Option<Resp> {
-        let q = self.rp.query();
+        let api = &*self.api;
+        // Personalised pages ask as the account when signed in, like music.youtube.com.
+        let me = self.is_logged_in();
         let (what, quiet) = (req.name(), req.quiet());
         let res: anyhow::Result<Option<Resp>> = async {
             Ok(Some(match req {
-                Req::Home(params) => {
-                    let q = if self.is_logged_in() { q.authenticated() } else { q };
-                    let page = ytm::home(&q, params.as_deref()).await?;
-                    Resp::Home(page)
-                }
-                Req::HomeMore(token) => {
-                    let q = if self.is_logged_in() { q.authenticated() } else { q };
-                    Resp::HomeMore(ytm::home_more(&q, &token).await?)
-                }
+                Req::Home(params) => Resp::Home(ytm::home(api, params.as_deref(), me).await?),
+                Req::HomeMore(token) => Resp::HomeMore(ytm::home_more(api, &token, me).await?),
                 Req::MoreQuickPicks(seed) => {
-                    let q = if self.is_logged_in() { q.authenticated() } else { q };
-                    let radio = q.music_radio_track(&seed).await?;
-                    Resp::QuickPicksMore { seed, tracks: model::tracks(&radio.items) }
+                    let tracks = ytm::radio(api, &seed, me, 0).await?;
+                    Resp::QuickPicksMore { seed, tracks }
                 }
                 Req::Explore(preferred_artists) => {
-                    let releases = if self.is_logged_in() { q.clone().authenticated() } else { q.clone() };
-                    let (charts, new) = tokio::join!(
-                        q.music_charts(Some(Country::Us)), releases.music_new_albums(),
-                    );
+                    let (charts, new) = tokio::join!(ytm::charts(api), ytm::new_albums(api, me));
                     let charts = charts?;
                     Resp::Explore(Explore {
                         new_albums: popular_new_albums(&new.unwrap_or_default(), &charts.artists, &preferred_artists),
-                        charts: charts.playlists.iter().map(playlist_card).collect(),
-                        top: model::tracks(if charts.top_tracks.is_empty() { &charts.trending_tracks } else { &charts.top_tracks }),
+                        charts: charts.playlists,
+                        top: charts.top,
                     })
                 }
                 Req::Search(query) => {
                     let (t, al, ar, pl) = tokio::join!(
-                        q.music_search_tracks(&query),
-                        q.music_search_albums(&query),
-                        q.music_search_artists(&query),
-                        q.music_search_playlists(&query, false),
+                        ytm::search_songs(api, &query),
+                        ytm::search_cards(api, &query, ytm::Filter::Albums),
+                        ytm::search_cards(api, &query, ytm::Filter::Artists),
+                        ytm::search_cards(api, &query, ytm::Filter::Playlists),
                     );
                     Resp::Search(SearchResults {
-                        tracks: model::tracks(&t?.items.items),
-                        albums: al.map(|r| r.items.items.iter().map(album_card).collect()).unwrap_or_default(),
-                        artists: ar.map(|r| r.items.items.iter().map(artist_card).collect()).unwrap_or_default(),
-                        playlists: pl.map(|r| r.items.items.iter().map(playlist_card).collect()).unwrap_or_default(),
+                        tracks: t?,
+                        albums: al.unwrap_or_default(),
+                        artists: ar.unwrap_or_default(),
+                        playlists: pl.unwrap_or_default(),
                         query,
                     })
                 }
                 Req::Suggest(query) => {
-                    let s = q.music_search_suggestion(&query).await?;
-                    Resp::Suggest { query, terms: s.terms.into_iter().take(8).collect() }
+                    let terms = ytm::suggestions(api, &query).await?.into_iter().take(8).collect();
+                    Resp::Suggest { query, terms }
                 }
-                Req::Album(id) => Resp::Collection(self.album(&id).await?),
-                Req::Playlist(id) => Resp::Collection(self.playlist(&id).await?),
-                Req::Artist(id) => {
-                    let a = q.music_artist(&id, false).await?;
-                    Resp::Artist(ArtistPage {
-                        id: a.id,
-                        name: a.name,
-                        banner: model::thumbs(&a.header_image),
-                        subscribers: a.subscriber_count,
-                        description: a.description,
-                        top: artist_songs(&a.tracks),
-                        top_playlist: a.tracks_playlist_id,
-                        albums: a.albums.iter().map(album_card).collect(),
-                        playlists: a.playlists.iter().map(playlist_card).collect(),
-                        similar: a.similar_artists.iter().map(artist_card).collect(),
-                    })
-                }
+                Req::Album(id) => Resp::Collection(ytm::album(api, &id).await?),
+                Req::Playlist(id) => Resp::Collection(ytm::playlist(api, &id, me, 500).await?),
+                Req::Artist(id) => Resp::Artist(ytm::artist(api, &id).await?),
                 Req::Library => {
-                    let q = q.authenticated();
                     let (liked, pls, albums) =
-                        tokio::join!(q.music_liked_tracks(), q.music_saved_playlists(), q.music_saved_albums());
-                    let mut liked = liked?;
-                    let _ = liked.tracks.extend_limit(&q, 1000).await;
+                        tokio::join!(ytm::playlist(api, "LM", true, 1000), ytm::saved_playlists(api), ytm::saved_albums(api));
                     Resp::Library(Library {
-                        liked: model::tracks(&liked.tracks.items),
-                        playlists: pls.map(|p| p.items.iter()
-                            .filter(|item| saved_playlist_visible(item))
-                            .map(playlist_card).collect()).unwrap_or_default(),
-                        albums: albums.map(|p| p.items.iter().map(album_card).collect()).unwrap_or_default(),
+                        liked: liked?.tracks,
+                        playlists: pls.map(|p| p.into_iter().filter(saved_playlist_visible).collect()).unwrap_or_default(),
+                        albums: albums.unwrap_or_default(),
                     })
                 }
-                Req::History => {
-                    let h = q.authenticated().music_history().await?;
-                    let mut seen = std::collections::HashSet::new();
-                    Resp::History(
-                        h.items.iter().map(|i| Track::from(&i.item)).filter(|t| seen.insert(t.id.clone())).collect(),
-                    )
-                }
-                Req::Uploads => Resp::Uploads(ytm::uploads(&q.authenticated()).await?),
+                Req::History => Resp::History(ytm::history(api).await?),
+                Req::Uploads => Resp::Uploads(ytm::uploads(api).await?),
                 Req::Upload(files) => {
-                    let session = webmusic::Session::load(&self.data_dir).ok_or_else(|| anyhow::anyhow!("sign in to upload music"))?;
+                    let session = api.account().ok_or_else(|| anyhow::anyhow!("sign in to upload music"))?;
                     let (mut done, mut failed) = (0, Vec::new());
                     for f in &files {
                         let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -383,7 +344,7 @@ impl Backend {
                         self.rt.spawn(async move {
                             for wait in [20, 40, 60] {
                                 tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
-                                if let Ok(t) = ytm::uploads(&this.rp.query().authenticated()).await {
+                                if let Ok(t) = ytm::uploads(&this.api).await {
                                     let _ = this.tx.send(Resp::Uploads(t));
                                     this.wake();
                                 }
@@ -411,18 +372,14 @@ impl Backend {
                     Resp::Art { key, art }
                 }
                 Req::Radio(seed) => {
-                    let mut radio = q.music_radio_track(&seed).await?;
-                    let _ = radio.extend_limit(&q, 50).await;
-                    Resp::Radio { seed, tracks: model::tracks(&radio.items) }
+                    let tracks = ytm::radio(api, &seed, false, 50).await?;
+                    Resp::Radio { seed, tracks }
                 }
                 Req::PlayCollection { target, shuffle } => {
                     let mut tracks = match target {
-                        Target::Album(id) => self.album(&id).await?.tracks,
-                        Target::Playlist(id) => self.playlist(&id).await?.tracks,
-                        Target::Artist(id) => {
-                            let a = q.music_artist(&id, false).await?;
-                            artist_songs(&a.tracks)
-                        }
+                        Target::Album(id) => ytm::album(api, &id).await?.tracks,
+                        Target::Playlist(id) => ytm::playlist(api, &id, me, 500).await?.tracks,
+                        Target::Artist(id) => ytm::artist(api, &id).await?.top,
                         Target::Song(t) => vec![t],
                     };
                     if shuffle {
@@ -455,31 +412,31 @@ impl Backend {
                     return Ok(None);
                 }
                 Req::Like { video_id, like } => {
-                    ytm::set_like(&q.authenticated(), &video_id, like).await?;
+                    ytm::set_like(api, &video_id, like).await?;
                     Resp::Liked { video_id, like }
                 }
                 Req::Dislike(video_id) => {
-                    ytm::dislike(&q.authenticated(), &video_id).await?;
+                    ytm::dislike(api, &video_id).await?;
                     Resp::Liked { video_id, like: false }
                 }
                 Req::CreatePlaylist { title, video_id } => {
-                    let id = ytm::create_playlist(&q.authenticated(), &title, video_id.as_deref()).await?;
+                    let id = ytm::create_playlist(api, &title, video_id.as_deref()).await?;
                     Resp::PlaylistCreated { id, had_song: video_id.is_some() }
                 }
                 Req::EditPlaylist { id, title, description, privacy } => {
-                    ytm::edit_playlist(&q.authenticated(), &id, &title, &description, privacy.as_deref()).await?;
+                    ytm::edit_playlist(api, &id, &title, &description, privacy.as_deref()).await?;
                     Resp::PlaylistChanged { id: Some(id), message: "Playlist updated" }
                 }
                 Req::AddToPlaylist { playlist_id, video_id } => {
-                    ytm::add_to_playlist(&q.authenticated(), &playlist_id, &video_id).await?;
+                    ytm::add_to_playlist(api, &playlist_id, &video_id).await?;
                     Resp::PlaylistChanged { id: Some(playlist_id), message: "Added to playlist" }
                 }
                 Req::DeletePlaylist(id) => {
-                    ytm::delete_playlist(&q.authenticated(), &id).await?;
+                    ytm::delete_playlist(api, &id).await?;
                     Resp::PlaylistChanged { id: None, message: "Playlist deleted" }
                 }
                 Req::SaveCollection { id, save } => {
-                    ytm::save_collection(&q.authenticated(), &id, save).await?;
+                    ytm::save_collection(api, &id, save).await?;
                     Resp::PlaylistChanged { id: Some(id), message: if save { "Saved to library" } else { "Removed from library" } }
                 }
                 Req::SetCookie(input) => {
@@ -490,7 +447,8 @@ impl Backend {
                     Resp::LoggedIn(true)
                 }
                 Req::Logout => {
-                    let _ = self.rp.user_auth_remove_cookie().await;
+                    webmusic::Session::remove(&self.data_dir);
+                    api.set_account(None);
                     *self.premium.lock().await = Err(None);
                     crate::login::forget(&self.login_profile());
                     Resp::LoggedIn(false)
@@ -504,77 +462,6 @@ impl Backend {
         })
     }
 
-    async fn album(&self, id: &str) -> anyhow::Result<Collection> {
-        let a = self.rp.query().music_album(id).await?;
-        let mut sub = vec![format!("{:?}", a.album_type).replace("Ep", "EP")];
-        sub.push(a.artists.iter().map(|x| x.name.as_str()).collect::<Vec<_>>().join(", "));
-        if let Some(y) = a.year {
-            sub.push(y.to_string());
-        }
-        let mut tracks = model::tracks(&a.tracks);
-        // Album track lists omit covers; reuse the album's so rows and the queue have art.
-        for t in &mut tracks {
-            if t.thumbs.is_empty() {
-                t.thumbs = model::thumbs(&a.cover);
-            }
-            if t.album.is_none() {
-                t.album = Some(model::Link { name: a.name.clone(), id: Some(a.id.clone()) });
-            }
-        }
-        Ok(Collection {
-            artists: model::links(&a.artists),
-            save_id: a.playlist_id,
-            id: a.id,
-            is_album: true,
-            title: a.name,
-            subtitle: sub.join(" • "),
-            description: a.description.map(|d| d.to_plaintext()),
-            thumbs: model::thumbs(&a.cover),
-            tracks,
-        })
-    }
-
-    async fn playlist(&self, id: &str) -> anyhow::Result<Collection> {
-        let q = self.rp.query();
-        let q = if self.is_logged_in() { q.authenticated() } else { q };
-        let mut pl = match q.music_playlist(id).await {
-            Ok(pl) => pl,
-            // Mixes: rustypipe can't parse them, read the page ourselves.
-            Err(e) => {
-                let Ok(raw) = ytm::playlist(&q, id).await else { return Err(e.into()) };
-                return Ok(Collection {
-                    artists: Vec::new(),
-                    save_id: None,
-                    id: id.to_owned(),
-                    is_album: false,
-                    title: raw.title,
-                    subtitle: raw.subtitle,
-                    description: raw.description,
-                    thumbs: raw.thumbs,
-                    tracks: raw.tracks,
-                });
-            }
-        };
-        // Pull a few more pages so long playlists are usable without paging UI.
-        let _ = pl.tracks.extend_limit(&q, 500).await;
-        let mut sub = Vec::new();
-        if let Some(c) = &pl.channel {
-            sub.push(c.name.clone());
-        }
-        sub.push(format!("{} songs", pl.track_count.unwrap_or(pl.tracks.items.len() as u64)));
-        Ok(Collection {
-            artists: pl.channel.iter().map(|c| model::Link { name: c.name.clone(), id: Some(c.id.clone()) }).collect(),
-            save_id: None,
-            id: pl.id,
-            is_album: false,
-            title: pl.name,
-            subtitle: sub.join(" • "),
-            description: pl.description.map(|d| d.to_plaintext()),
-            thumbs: model::thumbs(&pl.thumbnail),
-            tracks: model::tracks(&pl.tracks.items),
-        })
-    }
-
     async fn lyrics_for(&self, t: &Track) -> Option<Lyrics> {
         let artist = t.artist_line();
         let query = lyrics::Query {
@@ -584,39 +471,31 @@ impl Backend {
             album: t.album.as_ref().map(|a| a.name.as_str()),
             duration: t.duration.or_else(|| self.audio.status.duration().map(|d| d.as_secs() as u32)),
         };
-        match self.lyrics.fetch(&query).await {
-            Ok(Some(l)) => return Some(l),
-            Ok(None) => {}
-            Err(e) => log::warn!("better lyrics failed: {e:#}"),
-        }
-        // Fallback: YouTube Music's own (unsynced) lyrics.
-        let q = self.rp.query();
-        let id = q.music_details(&t.id).await.ok()?.lyrics_id?;
-        let body = q.music_lyrics(&id).await.ok()?.body;
-        Some(Lyrics::plain(&body, "YouTube Music"))
+        self.lyrics.fetch(&query).await.unwrap_or_else(|e| {
+            log::warn!("better lyrics failed: {e:#}");
+            None
+        })
     }
 
+    /// Sign in with youtube.com cookies: a `Cookie` header value (what the sign-in
+    /// window hands over) or a Netscape cookies.txt export.
     async fn set_cookie(&self, input: &str) -> anyhow::Result<()> {
         let input = input.trim();
-        let res = if input.lines().any(|l| l.split('\t').count() >= 7) {
-            // Netscape cookies.txt export from a browser extension.
-            self.rp.user_auth_set_cookie_txt(input).await
+        let cookie = if input.lines().any(|l| l.split('\t').count() >= 7) {
+            netscape_cookies(input)
         } else {
             // Tolerate a copied `cookie: ...` header line.
-            let value = input.strip_prefix("cookie:").or_else(|| input.strip_prefix("Cookie:")).unwrap_or(input).trim();
-            self.rp.user_auth_set_cookie(value).await
+            input.strip_prefix("cookie:").or_else(|| input.strip_prefix("Cookie:")).unwrap_or(input).trim().to_owned()
         };
-        res.map_err(|e| {
+        anyhow::ensure!(!cookie.is_empty(), "no youtube.com cookies found");
+        let session = self.api.session_from_cookie(&cookie).await.inspect_err(|e| {
             // Names only, never values: enough to see whether SAPISID etc. arrived.
-            let names: Vec<&str> = input.split(';').filter_map(|kv| kv.trim().split('=').next()).take(40).collect();
-            log::warn!("cookie sign-in rejected: {e:?}; cookie names: {names:?}");
-            match e {
-                rustypipe::error::Error::Auth(_) => {
-                    anyhow::anyhow!("YouTube didn't recognise a signed-in session in those cookies")
-                }
-                e => e.into(),
-            }
-        })
+            let names: Vec<&str> = cookie.split(';').filter_map(|kv| kv.trim().split('=').next()).take(40).collect();
+            log::warn!("cookie sign-in rejected: {e:#}; cookie names: {names:?}");
+        })?;
+        session.save(&self.data_dir);
+        self.api.set_account(Some(session));
+        Ok(())
     }
 
     async fn start_playback(&self, video_id: &str, generation: u64, at: std::time::Duration) -> anyhow::Result<()> {
@@ -699,7 +578,7 @@ impl Backend {
     /// Find a stream URL, trying the fastest source that can play the song.
     async fn resolve(&self, video_id: &str) -> anyhow::Result<(Source, ResolvedStream)> {
         if self.hq.load(Ordering::Relaxed)
-            && let Some(session) = webmusic::Session::load(&self.data_dir)
+            && let Some(session) = self.api.account()
             && self.is_premium(&session).await
         {
             match self.resolve_from(Source::WebMusic, video_id).await {
@@ -713,7 +592,7 @@ impl Backend {
             // Age-restricted or Premium-only: only signed-in web players get it.
             Err(e) if needs_account(&e) => {
                 log::info!("{video_id} needs a signed-in player ({e:#})");
-                let session = webmusic::Session::load(&self.data_dir).ok_or_else(|| anyhow::anyhow!("sign in to play this song"))?;
+                let session = self.api.account().ok_or_else(|| anyhow::anyhow!("sign in to play this song"))?;
                 if self.is_premium(&session).await {
                     match self.resolve_from(Source::WebMusic, video_id).await {
                         Ok(s) => return Ok((Source::WebMusic, s)),
@@ -722,10 +601,7 @@ impl Backend {
                 }
                 Ok((Source::YtDlp, self.resolve_from(Source::YtDlp, video_id).await?))
             }
-            Err(e) => {
-                log::warn!("visionOS player failed ({e:#}), falling back to rustypipe");
-                Ok((Source::RustyPipe, self.resolve_from(Source::RustyPipe, video_id).await?))
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -740,29 +616,14 @@ impl Backend {
         Ok(match source {
             Source::VisionOs => plain(self.visionos_stream(video_id).await?, innertube::UA),
             Source::WebMusic => {
-                let session = webmusic::Session::load(&self.data_dir).ok_or_else(|| anyhow::anyhow!("signed out"))?;
+                let session = self.api.account().ok_or_else(|| anyhow::anyhow!("signed out"))?;
                 plain(session.audio_stream(&self.http, &self.jsc, video_id).await?, webmusic::UA)
             }
             Source::YtDlp => {
-                let s = ytdlp::resolve(&self.http, &self.data_dir, video_id).await?;
+                let session = self.api.account().ok_or_else(|| anyhow::anyhow!("sign in to play this song"))?;
+                let s = ytdlp::resolve(&self.http, &self.data_dir, &session.cookie, video_id).await?;
                 // yt-dlp's JSON doesn't carry YouTube's loudness figure.
                 ResolvedStream { url: s.url, size: s.size, duration_ms: s.duration_ms, user_agent: s.user_agent, loudness_db: None }
-            }
-            Source::RustyPipe => {
-                let q = self.rp.query();
-                let player = q.player(video_id).await?;
-                // AAC in MP4 decodes in pure Rust (symphonia); Opus would need libopus.
-                let filter = StreamFilter::new().no_video().audio_codecs([AudioCodec::Mp4a]);
-                let s = player
-                    .select_audio_stream(&filter)
-                    .ok_or_else(|| anyhow::anyhow!("no AAC audio stream available"))?;
-                ResolvedStream {
-                    url: s.url.clone(),
-                    size: s.size,
-                    duration_ms: s.duration_ms.unwrap_or(0) as u64,
-                    user_agent: q.user_agent(player.client_type).into_owned(),
-                    loudness_db: s.loudness_db,
-                }
             }
         })
     }
@@ -773,7 +634,7 @@ impl Backend {
     pub fn warm_signed_in(&self) {
         let this = self.clone();
         self.rt.spawn(async move {
-            let Some(session) = webmusic::Session::load(&this.data_dir) else { return };
+            let Some(session) = this.api.account() else { return };
             if this.is_premium(&session).await
                 && let Err(e) = this.jsc.warm(&this.http).await
             {
@@ -806,15 +667,14 @@ impl Backend {
     }
 
     async fn visionos_stream(&self, video_id: &str) -> anyhow::Result<innertube::Stream> {
-        let vd = self.rp.query().get_visitor_data(false).await?;
+        let vd = self.api.visitor_data(false).await?;
         match innertube::audio_stream(&self.http, video_id, &vd).await {
             Ok(s) => Ok(s),
             Err(e) if needs_account(&e) => Err(e),
             Err(e) => {
                 // A stale/flagged visitor ID is the usual cause; retry once with a fresh one.
                 log::info!("visionOS player: {e:#}; retrying with new visitor data");
-                self.rp.query().remove_visitor_data(&vd);
-                let vd = self.rp.query().get_visitor_data(true).await?;
+                let vd = self.api.visitor_data(true).await?;
                 innertube::audio_stream(&self.http, video_id, &vd).await
             }
         }
@@ -840,7 +700,7 @@ impl Backend {
     }
 
     pub fn is_logged_in(&self) -> bool {
-        self.rp.query().auth_enabled(rustypipe::client::ClientType::Desktop)
+        self.api.account().is_some()
     }
 }
 
@@ -849,7 +709,6 @@ enum Source {
     VisionOs,
     WebMusic,
     YtDlp,
-    RustyPipe,
 }
 
 struct ResolvedStream {
@@ -867,60 +726,37 @@ fn needs_account(e: &anyhow::Error) -> bool {
     msg.contains("LOGIN_REQUIRED") || msg.contains("Premium")
 }
 
-fn album_card(a: &AlbumItem) -> Card {
-    let mut sub = vec![format!("{:?}", a.album_type).replace("Ep", "EP")];
-    sub.push(a.artists.iter().map(|x| x.name.as_str()).collect::<Vec<_>>().join(", "));
-    if let Some(y) = a.year {
-        sub.push(y.to_string());
-    }
-    Card {
-        title: a.name.clone(),
-        subtitle: sub.join(" • "),
-        thumbs: model::thumbs(&a.cover),
-        target: Target::Album(a.id.clone()),
-        round: false,
-        links: model::links(&a.artists),
-    }
-}
-
 /// Keep the signed-in release feed's order, using US charts and the user's home artists.
-fn popular_new_albums(albums: &[AlbumItem], ranked_artists: &[ArtistItem], preferred_artists: &[String]) -> Vec<Card> {
-    let chart_ids: std::collections::HashSet<&str> = ranked_artists.iter().map(|a| a.id.as_str()).chain(preferred_artists.iter().map(String::as_str)).collect();
+fn popular_new_albums(albums: &[Card], ranked_artists: &[String], preferred_artists: &[String]) -> Vec<Card> {
+    let chart_ids: std::collections::HashSet<&str> = ranked_artists.iter().chain(preferred_artists).map(String::as_str).collect();
     let mut seen = std::collections::HashSet::new();
-    albums.iter()
-        .filter(|album| album.artists.iter().any(|a| a.id.as_deref().is_some_and(|id| chart_ids.contains(id))))
-        .filter(|album| seen.insert(album.id.as_str()))
-        .take(16).map(album_card).collect()
+    albums
+        .iter()
+        .filter(|album| album.links.iter().any(|a| a.id.as_deref().is_some_and(|id| chart_ids.contains(id))))
+        .filter(|album| seen.insert(match &album.target {
+            Target::Album(id) => id.as_str(),
+            _ => album.title.as_str(),
+        }))
+        .take(16)
+        .cloned()
+        .collect()
 }
 
-fn playlist_card(p: &MusicPlaylistItem) -> Card {
-    let mut sub = vec!["Playlist".to_owned()];
-    if let Some(c) = &p.channel {
-        sub.push(c.name.clone());
-    }
-    Card {
-        title: p.name.clone(),
-        subtitle: sub.join(" • "),
-        thumbs: model::thumbs(&p.thumbnail),
-        target: Target::Playlist(p.id.clone()),
-        round: false,
-        links: p.channel.iter().map(|c| model::Link { name: c.name.clone(), id: Some(c.id.clone()) }).collect(),
-    }
+/// youtube.com cookies from a Netscape cookies.txt export, as a `Cookie` header value.
+fn netscape_cookies(txt: &str) -> String {
+    txt.lines()
+        .filter(|l| !l.starts_with('#') || l.starts_with("#HttpOnly_"))
+        .filter_map(|l| {
+            let f: Vec<&str> = l.trim_start_matches("#HttpOnly_").split('\t').collect();
+            (f.len() >= 7 && f[0].trim_start_matches('.').ends_with("youtube.com")).then(|| format!("{}={}", f[5], f[6].trim()))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
-fn saved_playlist_visible(item: &MusicPlaylistItem) -> bool {
-    item.id != "SE" || item.track_count.unwrap_or(0) > 0
-}
-
-fn artist_card(a: &ArtistItem) -> Card {
-    Card {
-        title: a.name.clone(),
-        subtitle: a.subscriber_count.map(|n| format!("{} subscribers", compact(n))).unwrap_or_else(|| "Artist".into()),
-        thumbs: model::thumbs(&a.avatar),
-        target: Target::Artist(a.id.clone()),
-        round: true,
-        links: Vec::new(),
-    }
+/// "Episodes for later" is listed even when empty; hide it then.
+fn saved_playlist_visible(card: &Card) -> bool {
+    card.target != Target::Playlist("SE".into()) || card.subtitle.split_whitespace().any(|w| w.parse::<u64>().is_ok_and(|n| n > 0))
 }
 
 pub fn compact(n: u64) -> String {
@@ -935,13 +771,7 @@ pub fn compact(n: u64) -> String {
     format!("{}{unit}", s.strip_suffix(".0").unwrap_or(&s))
 }
 
-/// An artist page's song shelf. rustypipe appends the videos shelf to it, and those
-/// aren't songs.
-fn artist_songs(items: &[rustypipe::model::TrackItem]) -> Vec<Track> {
-    items.iter().filter(|t| t.track_type == rustypipe::model::TrackType::Track).map(Track::from).collect()
-}
-
-/// Larger art URL for the background / now-playing view.
+// Larger art URL for the background / now-playing view.
 pub fn art_url(t: &Track) -> Option<String> {
     model::pick(&t.thumbs, 120).map(|u| sized(u, 544))
 }
@@ -950,29 +780,37 @@ pub fn art_url(t: &Track) -> Option<String> {
 mod explore_tests {
     use super::*;
 
+    fn card(title: &str, target: Target, artist_id: Option<&str>, subtitle: &str) -> Card {
+        Card {
+            title: title.into(),
+            subtitle: subtitle.into(),
+            thumbs: vec![],
+            target,
+            round: false,
+            links: artist_id.map(|id| model::Link { name: "Artist".into(), id: Some(id.into()) }).into_iter().collect(),
+        }
+    }
+
     #[test]
     fn new_releases_only_include_charting_artists_and_deduplicate() {
-        let artist: ArtistItem = serde_json::from_value(serde_json::json!({
-            "id": "popular", "name": "Artist", "avatar": [], "subscriber_count": null
-        })).unwrap();
-        let album = |id: &str, artist_id: &str| serde_json::from_value::<AlbumItem>(serde_json::json!({
-            "id": id, "name": id, "cover": [],
-            "artists": [{"id": artist_id, "name": "Artist"}],
-            "artist_id": artist_id, "album_type": "album", "year": null, "by_va": false
-        })).unwrap();
+        let album = |id: &str, artist_id: &str| card(id, Target::Album(id.into()), Some(artist_id), "Album");
         let albums = vec![album("obscure", "other"), album("favorite-release", "favorite"), album("first-release", "popular"), album("second-release", "popular"), album("first-release", "popular")];
-        let found = popular_new_albums(&albums, &[artist.clone(), artist], &["favorite".into()]);
+        let found = popular_new_albums(&albums, &["popular".into(), "popular".into()], &["favorite".into()]);
         assert_eq!(found.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["favorite-release", "first-release", "second-release"]);
     }
 
     #[test]
+    fn cookies_txt_keeps_only_youtube() {
+        let txt = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tabc\n#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t0\tSID\txyz\n.google.com\tTRUE\t/\tTRUE\t0\tNID\tno\n";
+        assert_eq!(netscape_cookies(txt), "SAPISID=abc; SID=xyz");
+    }
+
+    #[test]
     fn empty_episodes_for_later_is_hidden() {
-        let item = |id: &str, count: Option<u64>| serde_json::from_value::<MusicPlaylistItem>(serde_json::json!({
-            "id": id, "name": "Episodes for later", "thumbnail": [], "channel": null,
-            "track_count": count, "from_ytm": true, "is_podcast": false
-        })).unwrap();
-        assert!(!saved_playlist_visible(&item("SE", None)));
-        assert!(saved_playlist_visible(&item("SE", Some(2))));
-        assert!(saved_playlist_visible(&item("PLcustom", None)));
+        let item = |id: &str, subtitle: &str| card("Episodes for later", Target::Playlist(id.into()), None, subtitle);
+        assert!(!saved_playlist_visible(&item("SE", "Auto playlist")));
+        assert!(!saved_playlist_visible(&item("SE", "Auto playlist • 0 episodes")));
+        assert!(saved_playlist_visible(&item("SE", "Auto playlist • 2 episodes")));
+        assert!(saved_playlist_visible(&item("PLcustom", "Playlist")));
     }
 }

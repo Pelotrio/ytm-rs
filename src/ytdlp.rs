@@ -55,11 +55,10 @@ async fn ensure(http: &reqwest::Client, data_dir: &Path) -> anyhow::Result<PathB
     Ok(bin)
 }
 
-pub async fn resolve(http: &reqwest::Client, data_dir: &Path, video_id: &str) -> anyhow::Result<Stream> {
-    let cookie = crate::webmusic::Session::load(data_dir).ok_or_else(|| anyhow::anyhow!("sign in to play this song"))?.cookie;
+pub async fn resolve(http: &reqwest::Client, data_dir: &Path, cookie: &str, video_id: &str) -> anyhow::Result<Stream> {
     let bin = ensure(http, data_dir).await?;
     let data_dir = data_dir.to_owned();
-    let video_id = video_id.to_owned();
+    let (cookie, video_id) = (cookie.to_owned(), video_id.to_owned());
     let mut s = tokio::task::spawn_blocking(move || run(&bin, &data_dir, &video_id, &cookie)).await??;
     // The range downloader needs the exact size; yt-dlp sometimes only estimates it.
     if s.size == 0 {

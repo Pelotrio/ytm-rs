@@ -1,7 +1,4 @@
-//! App-side data types. rustypipe's models are `#[non_exhaustive]`, so items parsed
-//! from raw InnerTube responses (the home feed) can't be built as rustypipe types.
-
-use rustypipe::model::{ArtistId, Thumbnail, TrackItem};
+//! App-side data types, parsed from YouTube Music's responses in `ytm.rs`.
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Thumb {
@@ -58,37 +55,6 @@ impl Track {
     pub fn first_artist_id(&self) -> Option<&str> {
         self.artists.iter().find_map(|a| a.id.as_deref())
     }
-}
-
-pub fn thumbs(t: &[Thumbnail]) -> Vec<Thumb> {
-    t.iter().map(|t| Thumb { url: t.url.clone(), width: t.width, height: t.height }).collect()
-}
-
-pub fn links(a: &[ArtistId]) -> Vec<Link> {
-    a.iter().map(|a| Link { name: a.name.clone(), id: a.id.clone() }).collect()
-}
-
-impl From<&TrackItem> for Track {
-    fn from(t: &TrackItem) -> Self {
-        let mut artists = links(&t.artists);
-        if let (Some(first), Some(id)) = (artists.first_mut(), &t.artist_id) {
-            first.id.get_or_insert_with(|| id.clone());
-        }
-        Track {
-            id: t.id.clone(),
-            title: t.name.clone(),
-            artists,
-            album: t.album.as_ref().map(|a| Link { name: a.name.clone(), id: Some(a.id.clone()) }),
-            duration: t.duration,
-            thumbs: thumbs(&t.cover),
-            track_nr: t.track_nr,
-            plays: t.view_count,
-        }
-    }
-}
-
-pub fn tracks(items: &[TrackItem]) -> Vec<Track> {
-    items.iter().map(Track::from).collect()
 }
 
 /// Smallest thumbnail at least `min_px` wide (falls back to the largest).

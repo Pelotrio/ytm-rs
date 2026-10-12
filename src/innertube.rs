@@ -2,8 +2,8 @@
 //!
 //! As of Oct 2026 this client returns plain (unciphered) stream URLs that need neither
 //! signature deobfuscation nor a PO token, and googlevideo serves every byte range for
-//! them. rustypipe's own player clients currently fail deobfuscation or get cut off
-//! after 1 MiB, so this is the primary path and rustypipe is the fallback.
+//! them; the web clients' streams need a PO token or get cut off after 1 MiB, so this
+//! is the path for everyone except signed-in Premium accounts (see `webmusic.rs`).
 //! Mirrors yt-dlp's `visionos` client definition; update together if YouTube changes it.
 
 use serde_json::{Value, json};

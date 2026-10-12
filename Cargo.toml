@@ -17,14 +17,14 @@ egui = "0.36.2"
 egui_extras = { version = "0.36.2", default-features = false, features = ["image"] }
 env_logger = { version = "0.11.11", default-features = false, features = ["humantime"] }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+localzone = "0.3.1"
 log = "0.4.34"
 memmap2 = "0.9.11"
 raw-window-handle = "0.6"
-reqwest = { version = "0.12", default-features = false, features = ["default-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["default-tls", "json"] }
 rodio = { version = "0.22.2", default-features = false, features = ["playback", "symphonia-aac", "symphonia-isomp4"] }
 rquickjs = "0.14.0"
 roxmltree = "0.21.1"
-rustypipe = { version = "0.11.4", features = ["userdata"] }
 serde = { version = "1.0.229", features = ["derive"] }
 skrifa = "0.44.0"
 sha1 = "0.10.7"
@@ -40,8 +40,8 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
-# Unwind, not abort: a panic inside a library (rustypipe) must fail one request,
-# not close the app.
+# Unwind, not abort: a panic while handling one request (in a library or a parser)
+# must fail that request, not close the app.
 panic = "unwind"
 
 # Keep debug builds usable: optimize dependencies (decoders, egui) even in dev.
