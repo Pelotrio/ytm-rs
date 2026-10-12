@@ -448,7 +448,7 @@ impl Backend {
                         return Ok(None);
                     }
                     log::debug!("prefetch {video_id}");
-                    let shared = self.open_stream(&video_id).await?;
+                    let shared = self.open_stream(&video_id, true).await?;
                     if let Some((_, old)) = self.prefetched.lock().unwrap().replace((video_id, shared)) {
                         old.cancel();
                     }
@@ -643,7 +643,7 @@ impl Backend {
                 log::debug!("play {video_id} (gen {generation}): using buffered stream");
                 s
             }
-            None => self.open_stream(video_id).await?,
+            None => self.open_stream(video_id, false).await?,
         };
         *self.current.lock().unwrap() = Some((video_id.to_owned(), shared.clone()));
         log::debug!("play {video_id} (gen {generation}): stream open in {:?}", t0.elapsed());
@@ -680,10 +680,11 @@ impl Backend {
         Ok(())
     }
 
-    /// Resolve a stream URL and start downloading it into a new buffer.
-    async fn open_stream(&self, video_id: &str) -> anyhow::Result<Arc<Shared>> {
+    /// Resolve a stream URL and start downloading it into a new buffer (just its start,
+    /// for a prefetch, until playback opens it).
+    async fn open_stream(&self, video_id: &str, prefetch: bool) -> anyhow::Result<Arc<Shared>> {
         let (source, s) = self.resolve(video_id).await?;
-        let shared = Shared::new(s.size, s.duration_ms, s.loudness_db);
+        let shared = Shared::new(s.size, s.duration_ms, s.loudness_db, prefetch);
         let refresh: stream::Refresh = {
             let (this, id) = (self.clone(), video_id.to_owned());
             Arc::new(move || {

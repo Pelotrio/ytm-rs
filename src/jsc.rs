@@ -2,22 +2,24 @@
 //! throttling parameter) with yt-dlp's EJS solver, run in QuickJS: the engine rustypipe
 //! already links, so no Node or yt-dlp process is involved.
 //!
-//! The player script is preprocessed once per player version and cached on disk.
-//! A worker thread keeps the current one loaded and exits after five idle minutes to
-//! give the memory back.
+//! The player script is preprocessed once per player version and cached on disk, along
+//! with its compiled bytecode (source and debug info stripped). Loading that takes a
+//! fraction of parsing the 4 MB script, so the worker thread can exit soon after each
+//! burst of solves and give QuickJS's ~20 MB back instead of holding it all session.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{RecvTimeoutError, Sender};
-use rquickjs::{Context, Runtime};
+use rquickjs::{Context, Runtime, qjs};
 use tokio::sync::oneshot;
 
 /// yt-dlp/ejs 0.8.0 (Unlicense; bundles meriyah, ISC, and astring, MIT).
 const LIB: &str = include_str!("../assets/ejs/yt.solver.lib.min.js");
 const CORE: &str = include_str!("../assets/ejs/yt.solver.core.min.js");
-const IDLE: Duration = Duration::from_secs(300);
+/// A song's resolve and the next one's prefetch solve within seconds of each other.
+const IDLE: Duration = Duration::from_secs(20);
 /// YouTube rolls out new player versions every few days.
 const PLAYER_TTL: Duration = Duration::from_secs(3600);
 
@@ -169,15 +171,66 @@ fn preprocess(base: &str) -> anyhow::Result<String> {
 }
 
 fn load(path: &Path) -> anyhow::Result<(Runtime, Context)> {
-    let pre = std::fs::read_to_string(path)?;
+    let t = std::time::Instant::now();
     let rt = Runtime::new()?;
     rt.set_max_stack_size(64 << 20);
     let ctx = Context::full(&rt)?;
-    ctx.with(|ctx| {
-        let src = format!("var _r = {{n: null, sig: null}}; Function('_result', {})(_r);", serde_json::to_string(&pre)?);
-        ctx.eval::<(), _>(src).map_err(|e| js_err(&ctx, e))
-    })?;
+    let cached = path.with_extension("qbc");
+    let fresh = match std::fs::read(&cached) {
+        Ok(bc) => ctx.with(|ctx| run_bytecode(&ctx, &bc)).inspect_err(|e| log::info!("jsc: cached bytecode unusable ({e:#}); recompiling")).is_err(),
+        Err(_) => true,
+    };
+    if fresh {
+        let bc = compile(&std::fs::read_to_string(path)?)?;
+        ctx.with(|ctx| run_bytecode(&ctx, &bc))?;
+        let _ = std::fs::write(&cached, &bc);
+    }
+    log::debug!("jsc: loaded solver in {:?}", t.elapsed());
     Ok((rt, ctx))
+}
+
+/// Compile the preprocessed solver (a function body that fills `_result`) to bytecode
+/// that defines the global `_r`.
+fn compile(pre: &str) -> anyhow::Result<Vec<u8>> {
+    let rt = Runtime::new()?;
+    rt.set_max_stack_size(64 << 20);
+    let ctx = Context::full(&rt)?;
+    // QuickJS's parser wants a NUL after the source.
+    let src = format!("var _r = {{n: null, sig: null}};\n(function (_result) {{\n{pre}\n}})(_r);\n\0");
+    ctx.with(|ctx| unsafe {
+        let c = ctx.as_raw().as_ptr();
+        let flags = (qjs::JS_EVAL_TYPE_GLOBAL | qjs::JS_EVAL_FLAG_COMPILE_ONLY) as i32;
+        let f = qjs::JS_Eval(c, src.as_ptr().cast(), (src.len() - 1) as _, c"solver.js".as_ptr(), flags);
+        if qjs::JS_IsException(f) {
+            return Err(js_err(&ctx, rquickjs::Error::Exception));
+        }
+        let mut len = 0;
+        let flags = (qjs::JS_WRITE_OBJ_BYTECODE | qjs::JS_WRITE_OBJ_STRIP_SOURCE | qjs::JS_WRITE_OBJ_STRIP_DEBUG) as i32;
+        let buf = qjs::JS_WriteObject(c, &mut len, f, flags);
+        qjs::JS_FreeValue(c, f);
+        anyhow::ensure!(!buf.is_null(), "js: couldn't write bytecode");
+        let out = std::slice::from_raw_parts(buf, len as usize).to_vec();
+        qjs::js_free(c, buf.cast());
+        Ok(out)
+    })
+}
+
+/// Run bytecode from `compile` in `ctx`.
+fn run_bytecode(ctx: &rquickjs::Ctx, bc: &[u8]) -> anyhow::Result<()> {
+    unsafe {
+        let c = ctx.as_raw().as_ptr();
+        let f = qjs::JS_ReadObject(c, bc.as_ptr(), bc.len() as _, qjs::JS_READ_OBJ_BYTECODE as i32);
+        if qjs::JS_IsException(f) {
+            return Err(js_err(ctx, rquickjs::Error::Exception));
+        }
+        // Consumes `f`.
+        let r = qjs::JS_EvalFunction(c, f);
+        if qjs::JS_IsException(r) {
+            return Err(js_err(ctx, rquickjs::Error::Exception));
+        }
+        qjs::JS_FreeValue(c, r);
+    }
+    Ok(())
 }
 
 fn solve(ctx: &Context, n: Option<String>, sig: Option<String>) -> anyhow::Result<(Option<String>, Option<String>)> {

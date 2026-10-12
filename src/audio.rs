@@ -345,9 +345,9 @@ mod tests {
     #[test]
     fn normalization_only_turns_loud_tracks_down() {
         let status = AudioStatus::default();
-        let loud = Shared::new(1, 0, Some(7.29));
-        let quiet = Shared::new(1, 0, Some(-4.0));
-        let unknown = Shared::new(1, 0, None);
+        let loud = Shared::new(1, 0, Some(7.29), false);
+        let quiet = Shared::new(1, 0, Some(-4.0), false);
+        let unknown = Shared::new(1, 0, None, false);
         status.normalize.store(true, Ordering::Relaxed);
         assert!((norm_gain(&status, Some(&loud)) - 0.432).abs() < 0.001);
         assert_eq!(norm_gain(&status, Some(&quiet)), 1.0);

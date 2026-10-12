@@ -22,6 +22,9 @@ const RETRIES: u32 = 3;
 /// googlevideo occasionally starts rejecting a URL partway through (HTTP 403);
 /// a freshly resolved URL for the same video resumes the download.
 const MAX_REFRESHES: u32 = 2;
+/// A prefetch only fetches this much (~16 s of audio) until playback actually opens it:
+/// enough to start at once, without holding a whole extra song in memory.
+const HEAD_BLOCKS: usize = 2;
 
 /// Resolves a fresh stream URL for the same video.
 pub type Refresh = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>> + Send + Sync>;
@@ -35,6 +38,15 @@ struct Inner {
     readers: usize,
     /// Set once a reader existed and all were dropped.
     cancelled: bool,
+    /// Blocks the workers may fetch; lifted to all of them when a reader opens.
+    limit: usize,
+}
+
+enum Claim {
+    Block(usize),
+    /// Everything allowed so far is fetched or in flight; wait for the limit to lift.
+    Wait,
+    Done,
 }
 
 pub struct Shared {
@@ -47,11 +59,16 @@ pub struct Shared {
     pub loudness_db: Option<f32>,
     /// Flips to true once the download task has stopped (complete, failed or cancelled).
     done: tokio::sync::watch::Sender<bool>,
+    /// Flips to true when `limit` is lifted (or the download is cancelled).
+    lifted: tokio::sync::watch::Sender<bool>,
 }
 
 impl Shared {
-    pub fn new(total: u64, duration_ms: u64, loudness_db: Option<f32>) -> Arc<Self> {
+    /// A buffer for `total` bytes. `head_only` (a prefetch) fetches just the start until
+    /// a reader opens it.
+    pub fn new(total: u64, duration_ms: u64, loudness_db: Option<f32>, head_only: bool) -> Arc<Self> {
         let n = total.div_ceil(BLOCK) as usize;
+        let limit = if head_only { HEAD_BLOCKS.min(n) } else { n };
         Arc::new(Self {
             inner: Mutex::new(Inner {
                 blocks: vec![None; n],
@@ -60,12 +77,14 @@ impl Shared {
                 error: None,
                 readers: 0,
                 cancelled: false,
+                limit,
             }),
             ready: Condvar::new(),
             total,
             duration_ms,
             loudness_db,
             done: tokio::sync::watch::Sender::new(false),
+            lifted: tokio::sync::watch::Sender::new(limit == n),
         })
     }
 
@@ -83,20 +102,24 @@ impl Shared {
     pub fn cancel(&self) {
         self.inner.lock().unwrap().cancelled = true;
         self.ready.notify_all();
+        self.lifted.send_replace(true);
     }
 
-    fn claim(&self) -> Option<usize> {
+    fn claim(&self) -> Claim {
         let mut inner = self.inner.lock().unwrap();
         if inner.cancelled || inner.error.is_some() {
-            return None;
+            return Claim::Done;
         }
         let n = inner.blocks.len();
         let start = inner.want.min(n.saturating_sub(1));
-        let idx = (start..n)
-            .chain(0..start)
-            .find(|&i| inner.blocks[i].is_none() && !inner.in_flight[i])?;
+        let Some(idx) = (start..n).chain(0..start).find(|&i| inner.blocks[i].is_none() && !inner.in_flight[i]) else {
+            return Claim::Done;
+        };
+        if idx >= inner.limit {
+            return Claim::Wait;
+        }
         inner.in_flight[idx] = true;
-        Some(idx)
+        Claim::Block(idx)
     }
 
     fn put(&self, idx: usize, data: Bytes) {
@@ -154,7 +177,15 @@ pub async fn download(http: reqwest::Client, url: String, ua: String, shared: Ar
     for _ in 0..WORKERS {
         let (http, ua, shared, slot) = (http.clone(), ua.clone(), shared.clone(), slot.clone());
         set.spawn(async move {
-            while let Some(idx) = shared.claim() {
+            loop {
+                let idx = match shared.claim() {
+                    Claim::Block(idx) => idx,
+                    Claim::Wait => {
+                        let _ = shared.lifted.subscribe().wait_for(|l| *l).await;
+                        continue;
+                    }
+                    Claim::Done => break,
+                };
                 let (a, b) = shared.range(idx);
                 let mut attempt = 0;
                 loop {
@@ -210,7 +241,12 @@ pub struct StreamReader {
 
 impl StreamReader {
     pub fn new(shared: Arc<Shared>) -> Self {
-        shared.inner.lock().unwrap().readers += 1;
+        {
+            let mut inner = shared.inner.lock().unwrap();
+            inner.readers += 1;
+            inner.limit = inner.blocks.len();
+        }
+        shared.lifted.send_replace(true);
         Self { shared, pos: 0 }
     }
 }
