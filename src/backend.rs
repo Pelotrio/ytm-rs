@@ -477,18 +477,11 @@ impl Backend {
         })
     }
 
-    /// Sign in with youtube.com cookies: a `Cookie` header value (what the sign-in
-    /// window hands over) or a Netscape cookies.txt export.
-    async fn set_cookie(&self, input: &str) -> anyhow::Result<()> {
-        let input = input.trim();
-        let cookie = if input.lines().any(|l| l.split('\t').count() >= 7) {
-            netscape_cookies(input)
-        } else {
-            // Tolerate a copied `cookie: ...` header line.
-            input.strip_prefix("cookie:").or_else(|| input.strip_prefix("Cookie:")).unwrap_or(input).trim().to_owned()
-        };
+    /// Sign in with the youtube.com cookies the Google sign-in window hands over.
+    async fn set_cookie(&self, cookie: &str) -> anyhow::Result<()> {
+        let cookie = cookie.trim();
         anyhow::ensure!(!cookie.is_empty(), "no youtube.com cookies found");
-        let session = self.api.session_from_cookie(&cookie).await.inspect_err(|e| {
+        let session = self.api.session_from_cookie(cookie).await.inspect_err(|e| {
             // Names only, never values: enough to see whether SAPISID etc. arrived.
             let names: Vec<&str> = cookie.split(';').filter_map(|kv| kv.trim().split('=').next()).take(40).collect();
             log::warn!("cookie sign-in rejected: {e:#}; cookie names: {names:?}");
@@ -742,18 +735,6 @@ fn popular_new_albums(albums: &[Card], ranked_artists: &[String], preferred_arti
         .collect()
 }
 
-/// youtube.com cookies from a Netscape cookies.txt export, as a `Cookie` header value.
-fn netscape_cookies(txt: &str) -> String {
-    txt.lines()
-        .filter(|l| !l.starts_with('#') || l.starts_with("#HttpOnly_"))
-        .filter_map(|l| {
-            let f: Vec<&str> = l.trim_start_matches("#HttpOnly_").split('\t').collect();
-            (f.len() >= 7 && f[0].trim_start_matches('.').ends_with("youtube.com")).then(|| format!("{}={}", f[5], f[6].trim()))
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
 /// "Episodes for later" is listed even when empty; hide it then.
 fn saved_playlist_visible(card: &Card) -> bool {
     card.target != Target::Playlist("SE".into()) || card.subtitle.split_whitespace().any(|w| w.parse::<u64>().is_ok_and(|n| n > 0))
@@ -797,12 +778,6 @@ mod explore_tests {
         let albums = vec![album("obscure", "other"), album("favorite-release", "favorite"), album("first-release", "popular"), album("second-release", "popular"), album("first-release", "popular")];
         let found = popular_new_albums(&albums, &["popular".into(), "popular".into()], &["favorite".into()]);
         assert_eq!(found.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["favorite-release", "first-release", "second-release"]);
-    }
-
-    #[test]
-    fn cookies_txt_keeps_only_youtube() {
-        let txt = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tabc\n#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t0\tSID\txyz\n.google.com\tTRUE\t/\tTRUE\t0\tNID\tno\n";
-        assert_eq!(netscape_cookies(txt), "SAPISID=abc; SID=xyz");
     }
 
     #[test]

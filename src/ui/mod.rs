@@ -168,6 +168,9 @@ pub struct App {
     index: Option<usize>,
     generation: u64,
     buffering: bool,
+    /// Unplayable songs skipped in a row; a run of them stops playback instead of
+    /// racing through the queue.
+    skip_streak: u32,
     repeat: Repeat,
     autoplay: bool,
     /// Turn loud tracks down to YouTube's loudness target.
@@ -216,7 +219,6 @@ pub struct App {
     // account / misc
     logged_in: bool,
     signing_in: Arc<AtomicBool>,
-    cookie_input: String,
     toast: Option<(String, f64)>,
 
     // updates
@@ -235,6 +237,23 @@ pub struct App {
     dialog: Option<Dialog>,
     share_pending: Option<String>,
     smoke: Option<String>,
+}
+
+/// Unplayable songs skipped in a row before playback stops.
+const MAX_SKIPS: u32 = 3;
+
+/// When a song failed because of the account (Premium-only, or needs signing in),
+/// the message to show instead of skipping: the rest of an album like that fails the
+/// same way.
+fn account_block(msg: &str, logged_in: bool) -> Option<&'static str> {
+    let m = msg.to_ascii_lowercase();
+    if m.contains("premium") {
+        Some("\"{title}\" needs YouTube Music Premium")
+    } else if !logged_in && (m.contains("sign in") || m.contains("age-restricted")) {
+        Some("Sign in to play \"{title}\"")
+    } else {
+        None
+    }
 }
 
 impl App {
@@ -295,6 +314,7 @@ impl App {
             index: None,
             generation: 0,
             buffering: false,
+            skip_streak: 0,
             repeat: match get("repeat").as_deref() {
                 Some("all") => Repeat::All,
                 Some("one") => Repeat::One,
@@ -346,23 +366,23 @@ impl App {
             textfx: Default::default(),
             logged_in,
             signing_in: Default::default(),
-            cookie_input: String::new(),
             toast: None,
             actions: Vec::new(),
             dialog: None,
             share_pending: None,
             smoke: None,
         };
-        // Dev hooks: YTM_SMOKE="query" searches and plays the first song ("id:<videoId>"
+        // Dev hooks: YTM_SMOKE="query" searches and plays the first song ("id:<videoId>[,<videoId>…]"
         // plays that video); YTM_SEARCH
         // only searches; YTM_PAGE opens a page; YTM_NOWPLAYING opens the overlay.
         if let Some(s) = get(SESSION_KEY).filter(|_| std::env::var_os("YTM_SMOKE").is_none()) {
             app.restore_session(&s);
         }
         let smoke = std::env::var("YTM_SMOKE").ok().filter(|q| !q.is_empty());
-        if let Some(id) = smoke.as_deref().and_then(|q| q.strip_prefix("id:")) {
-            let track = Track { id: id.to_owned(), title: id.to_owned(), artists: vec![], album: None, duration: None, thumbs: vec![], track_nr: None, plays: None };
-            app.play_list(vec![track], 0);
+        if let Some(ids) = smoke.as_deref().and_then(|q| q.strip_prefix("id:")) {
+            // "id:a,b,c" queues several.
+            let track = |id: &str| Track { id: id.to_owned(), title: id.to_owned(), artists: vec![], album: None, duration: None, thumbs: vec![], track_nr: None, plays: None };
+            app.play_list(ids.split(',').map(track).collect(), 0);
         } else if let Some(q) = smoke {
             app.search_text = q.clone();
             app.go(Page::Search(q.clone()));
@@ -959,6 +979,7 @@ impl App {
         }
         if self.buffering && self.playing() {
             self.buffering = false;
+            self.skip_streak = 0;
             self.prefetch_next();
             // Dev hook: YTM_SEEK=<secs> jumps into the first track once it starts.
             if self.generation == 1 {
@@ -1140,11 +1161,18 @@ impl App {
                         msg
                     };
                     let has_next = self.index.is_some_and(|i| i + 1 < self.queue.len());
-                    // Don't stall the queue on one unplayable song.
-                    if has_next {
+                    // Skipping can't help when the account is the problem: the rest of
+                    // an album like this needs it too. Stop on the song instead.
+                    if let Some(why) = account_block(&reason, self.logged_in) {
+                        self.skip_streak = 0;
+                        self.toast(why.replace("{title}", &title));
+                    } else if has_next && self.skip_streak < MAX_SKIPS {
+                        // Don't stall the queue on one unplayable song.
+                        self.skip_streak += 1;
                         self.toast(format!("Skipped \"{title}\": {reason}"));
                         self.next();
                     } else {
+                        self.skip_streak = 0;
                         self.toast(format!("Can't play \"{title}\": {reason}"));
                     }
                 }
@@ -1861,5 +1889,18 @@ mod share_tests {
         assert_eq!(share_url(&Target::Playlist("PL123".into())), "https://music.youtube.com/playlist?list=PL123");
         assert_eq!(share_url(&Target::Album("MPRE123".into())), "https://music.youtube.com/browse/MPRE123");
         assert_eq!(share_url(&Target::Artist("UC123".into())), "https://music.youtube.com/channel/UC123");
+    }
+}
+
+#[cfg(test)]
+mod account_block_tests {
+    use super::account_block;
+
+    #[test]
+    fn account_errors_stop_instead_of_skipping() {
+        assert!(account_block("sign in to play this song", false).is_some());
+        assert!(account_block("sign in to play this song", true).is_none());
+        assert!(account_block("This video is only available to Music Premium members", true).is_some());
+        assert!(account_block("decode: end of stream", false).is_none());
     }
 }

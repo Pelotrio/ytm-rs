@@ -647,7 +647,7 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
     // ---- account
     section_label(ui, "Account", None);
     let busy = app.signing_in.load(Ordering::Relaxed);
-    let (mut sign_in, mut sign_out, mut cookie_submit) = (false, false, None);
+    let (mut sign_in, mut sign_out) = (false, false);
     settings_card(ui, |ui| {
         if app.logged_in {
             let name = app.account_name.clone().unwrap_or_else(|| "YouTube Music".to_owned());
@@ -662,23 +662,6 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
                     sign_in = pill(ui, "Sign in with Google", Some(icon::CIRCLE_USER), true).clicked();
                 }
             });
-            divider(ui);
-            ui.add_space(10.0);
-            let cookie = &mut app.cookie_input;
-            egui::CollapsingHeader::new(RichText::new("Sign in with cookies instead").color(theme::text_dim())).show(ui, |ui| {
-                ui.label(
-                    RichText::new("Paste the cookie request header from a signed-in music.youtube.com tab (DevTools → Network → any request), or a cookies.txt export.")
-                        .font(theme::regular(12.5))
-                        .color(theme::text_dim()),
-                );
-                ui.add_space(6.0);
-                ui.add(egui::TextEdit::multiline(cookie).hint_text("cookie header or cookies.txt").desired_rows(3).desired_width(f32::INFINITY));
-                ui.add_space(6.0);
-                if !cookie.trim().is_empty() && pill(ui, "Sign in", None, true).clicked() {
-                    cookie_submit = Some(std::mem::take(cookie));
-                }
-            });
-            ui.add_space(10.0);
         }
     });
     if busy {
@@ -690,9 +673,6 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
     }
     if sign_out {
         app.backend.request(crate::backend::Req::Logout);
-    }
-    if let Some(c) = cookie_submit {
-        app.backend.request(crate::backend::Req::SetCookie(c));
     }
 
     // ---- playback
