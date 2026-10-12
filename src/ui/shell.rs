@@ -550,7 +550,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
         app.queue_open = !app.queue_open;
     }
     // Not lit for a song without lyrics: now playing shows its artwork instead.
-    let lyrics_on = app.np_open && app.np_tab == NpTab::Lyrics && !matches!(&app.lyrics, Some((_, None)));
+    let lyrics_on = app.np_open && app.np_tab == NpTab::Lyrics && !app.no_lyrics();
     if right_btn(ui, icon::MIC_VOCAL, "Lyrics", lyrics_on) {
         if lyrics_on {
             app.np_open = false;

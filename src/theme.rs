@@ -220,6 +220,18 @@ const CANDIDATES: &[(&str, u32)] = &[
     ("C:\\Windows\\Fonts\\seguiemj.ttf", 0),  // emoji (drawn monochrome)
 ];
 
+/// Heavier faces for the semibold and bold families, so CJK lyrics come out at the
+/// weight the theme asks for (Better Lyrics uses Noto Sans CJK at the lyric weight).
+#[cfg(windows)]
+const BOLD_VARIANTS: &[(&str, &str)] = &[
+    ("C:\\Windows\\Fonts\\YuGothM.ttc", "C:\\Windows\\Fonts\\YuGothB.ttc"),
+    ("C:\\Windows\\Fonts\\msyh.ttc", "C:\\Windows\\Fonts\\msyhbd.ttc"),
+    ("C:\\Windows\\Fonts\\msjh.ttc", "C:\\Windows\\Fonts\\msjhbd.ttc"),
+    ("C:\\Windows\\Fonts\\malgun.ttf", "C:\\Windows\\Fonts\\malgunbd.ttf"),
+];
+#[cfg(not(windows))]
+const BOLD_VARIANTS: &[(&str, &str)] = &[];
+
 #[cfg(target_os = "macos")]
 const CANDIDATES: &[(&str, u32)] = &[
     ("/System/Library/Fonts/Supplemental/Arial Unicode.ttf", 0),
@@ -271,21 +283,38 @@ pub fn install_fonts(ctx: &egui::Context, ui_font: &str) {
     // Mapped once for the life of the process, however often fonts are installed.
     static SYSTEM: std::sync::OnceLock<Vec<(&str, &'static [u8], u32)>> = std::sync::OnceLock::new();
     let system = SYSTEM.get_or_init(|| CANDIDATES.iter().filter_map(|&(path, index)| map(path).map(|b| (path, b, index))).collect());
+    static SYSTEM_BOLD: std::sync::OnceLock<Vec<(&str, &'static [u8], u32)>> = std::sync::OnceLock::new();
+    // The same list with the heavier CJK faces swapped in.
+    let system_bold = SYSTEM_BOLD.get_or_init(|| {
+        CANDIDATES
+            .iter()
+            .filter_map(|&(path, index)| {
+                let heavy = BOLD_VARIANTS.iter().find(|(base, _)| *base == path).map(|(_, b)| *b);
+                heavy.and_then(|h| map(h).map(|b| (h, b, index))).or_else(|| map(path).map(|b| (path, b, index)))
+            })
+            .collect()
+    });
     // Primary font groups that share metrics: Inter's weights, then each lyric font.
     let mut groups: Vec<(&str, [&'static [u8]; 3])> = vec![("inter", [INTER_REGULAR, INTER_SEMIBOLD, INTER_BOLD])];
     groups.extend(LYRIC_FONTS.iter().map(|(k, w)| (*k, *w)));
     for (key, weights) in &groups {
         let (asc_p, h_p) = em_metrics(weights[0], 0).unwrap_or((0.97, 1.21));
-        let mut fallbacks = Vec::new();
-        for &(path, bytes, index) in system {
-            let Some((asc_f, h_f)) = em_metrics(bytes, index) else { continue };
-            let shift = asc_p - (asc_f + 0.5 * (h_p - h_f));
-            let name = format!("sys:{path}@{key}");
-            let tweak = egui::FontTweak { y_offset_factor: shift, ..Default::default() };
-            defs.font_data.insert(name.clone(), Arc::new(FontData { index, ..FontData::from_static(bytes) }.tweak(tweak)));
-            fallbacks.push(name);
+        let mut chains: [Vec<String>; 2] = [Vec::new(), Vec::new()];
+        for (heavy, list) in [system, system_bold].into_iter().enumerate() {
+            for &(path, bytes, index) in list {
+                let Some((asc_f, h_f)) = em_metrics(bytes, index) else { continue };
+                let shift = asc_p - (asc_f + 0.5 * (h_p - h_f));
+                let name = format!("sys:{path}@{key}");
+                if !defs.font_data.contains_key(&name) {
+                    let tweak = egui::FontTweak { y_offset_factor: shift, ..Default::default() };
+                    defs.font_data.insert(name.clone(), Arc::new(FontData { index, ..FontData::from_static(bytes) }.tweak(tweak)));
+                }
+                chains[heavy].push(name);
+            }
         }
+        let fallbacks = chains[0].clone();
         for (w, bytes) in weights.iter().enumerate() {
+            let fallbacks = if w == 0 { &chains[0] } else { &chains[1] };
             let name = format!("{key}-{w}");
             defs.font_data.insert(name.clone(), Arc::new(FontData::from_static(bytes)));
             let mut chain = vec![name.clone()];

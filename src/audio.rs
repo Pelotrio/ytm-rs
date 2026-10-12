@@ -53,6 +53,8 @@ pub struct AudioStatus {
     pub normalize: AtomicBool,
     /// Smoothed output loudness 0..1 (f32 bits), for audio-reactive visuals.
     level: AtomicU32,
+    /// How far the output device runs behind the position (its buffer), in ms.
+    latency_ms: AtomicU32,
 }
 
 impl AudioStatus {
@@ -74,6 +76,11 @@ impl AudioStatus {
     pub fn duration(&self) -> Option<Duration> {
         let d = self.duration_ms.load(Ordering::Relaxed);
         (d > 0).then(|| Duration::from_millis(d))
+    }
+
+    /// How long audio takes from the player to the speakers (the output buffer).
+    pub fn latency(&self) -> Duration {
+        Duration::from_millis(self.latency_ms.load(Ordering::Relaxed) as u64)
     }
 
     pub fn level(&self) -> f32 {
@@ -206,6 +213,14 @@ fn run(
         }
     };
     sink.log_on_drop(false);
+    // The position counts samples handed to the device; it plays them a buffer later
+    // (rodio asks for ~50 ms), plus the shared-mode device period (~10 ms).
+    let rate = sink.config().sample_rate().get().max(1);
+    let buffer_ms = match sink.config().buffer_size() {
+        rodio::cpal::BufferSize::Fixed(n) => *n as u64 * 1000 / rate as u64,
+        rodio::cpal::BufferSize::Default => 0,
+    };
+    status.latency_ms.store((buffer_ms + 10) as u32, Ordering::Relaxed);
     let player = Player::connect_new(sink.mixer());
     player.set_volume(volume);
 

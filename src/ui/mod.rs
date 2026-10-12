@@ -7,7 +7,8 @@ mod notes;
 mod nowplaying;
 mod pages;
 mod shell;
-mod textfx;
+mod karaoke;
+mod lyric_prefs;
 mod widgets;
 
 use std::collections::HashSet;
@@ -21,7 +22,7 @@ use souvlaki::MediaControlEvent;
 
 use crate::audio::{AudioCmd, AudioEvent, AudioHandle};
 use crate::backend::{self, ArtistPage, Backend, Collection, Explore, Library, Req, Resp, SearchResults};
-use crate::lyrics::Lyrics;
+use crate::lyrics::{Lyrics, LyricsSet};
 use crate::media::Media;
 use crate::model::{Chip, Shelf, ShelfKind, Target, Track};
 use crate::shader::Background;
@@ -205,16 +206,19 @@ pub struct App {
     np_tab: NpTab,
     queue_open: bool,
     fullscreen: bool,
-    lyrics: Option<(String, Option<Lyrics>)>,
-    /// Romanization/translation for `lyrics` (same video ID).
-    lyrics_extras: Option<(String, crate::translate::Extras)>,
+    /// Every source's lyrics for the current song (by video ID).
+    lyrics: Option<(String, LyricsSet)>,
+    /// Romanization/translation for one source's lines: (video ID, source key, language, extras).
+    lyrics_extras: Option<(String, String, String, crate::translate::Extras)>,
+    /// The extras last asked for, so each is requested once.
+    extras_asked: Option<(String, String, String)>,
     show_roman: bool,
     show_trans: bool,
-    lyrics_user_scroll: f64,
+    lyric_prefs: lyric_prefs::Prefs,
+    lyric_view: karaoke::View,
+    lyric_clock: lyric_prefs::Clock,
     /// Rotation of a "record" cover (radians); advances only while playing.
     record_angle: f64,
-    /// Cached blurred/glowing lyric lines.
-    textfx: textfx::TextFx,
 
     // account / misc
     logged_in: bool,
@@ -359,11 +363,13 @@ impl App {
             fullscreen: false,
             lyrics: None,
             lyrics_extras: None,
+            extras_asked: None,
             show_roman: get("show_roman").is_none_or(|v| v == "1"),
             show_trans: get("show_trans").is_none_or(|v| v == "1"),
-            lyrics_user_scroll: -10.0,
+            lyric_prefs: lyric_prefs::Prefs::load(&get),
+            lyric_view: Default::default(),
+            lyric_clock: Default::default(),
             record_angle: 0.0,
-            textfx: Default::default(),
             logged_in,
             signing_in: Default::default(),
             toast: None,
@@ -534,6 +540,49 @@ impl App {
         self.index.and_then(|i| self.queue.get(i))
     }
 
+    /// The lyrics shown for the current song: the song's pick, then the listener's order.
+    fn lyric_choice(&self) -> Option<&Lyrics> {
+        let (id, set) = self.lyrics.as_ref()?;
+        set.pick(&self.lyric_prefs.order_for(id))
+    }
+
+    /// Lyrics have loaded, and no enabled source has any.
+    fn no_lyrics(&self) -> bool {
+        self.lyrics.is_some() && self.lyric_choice().is_none()
+    }
+
+    /// Ask for romanization/translation of the shown source once, when they're switched on
+    /// and some line needs one the lyrics don't ship.
+    fn request_lyric_extras(&mut self) {
+        if !(self.show_roman || self.show_trans) {
+            return;
+        }
+        let Some(l) = self.lyric_choice() else { return };
+        let Some((id, _)) = &self.lyrics else { return };
+        let target = self.lyric_prefs.target.clone();
+        let want = (id.clone(), l.provider.key().to_owned(), target.clone());
+        if self.extras_asked.as_ref() == Some(&want) {
+            return;
+        }
+        let needs = l.lines.iter().any(|x| {
+            !x.instrumental
+                && !x.text.trim().is_empty()
+                && ((self.show_roman && x.romanization.is_none() && crate::translate::non_latin(&x.text))
+                    || (self.show_trans && lyric_prefs::shipped_translation(x, &target).is_none()))
+        });
+        let req = needs.then(|| Req::LyricsExtras {
+            video_id: id.clone(),
+            source: l.provider.key().to_owned(),
+            lines: l.lines.iter().map(|x| if x.instrumental { String::new() } else { x.text.clone() }).collect(),
+            lang: l.language.clone(),
+            target,
+        });
+        self.extras_asked = Some(want);
+        if let Some(r) = req {
+            self.backend.request(r);
+        }
+    }
+
     fn current_id(&self) -> Option<&str> {
         self.current().map(|t| t.id.as_str())
     }
@@ -690,6 +739,8 @@ impl App {
         self.request_art();
         self.lyrics = None;
         self.lyrics_extras = None;
+        self.extras_asked = None;
+        self.lyric_view.reset();
         self.backend.request(Req::Lyrics(track.clone()));
         // Keep the queue topped up so autoplay never stalls at the end.
         if self.autoplay && !self.radio_pending && self.index.is_some_and(|i| i + 1 >= self.queue.len()) {
@@ -871,7 +922,7 @@ impl App {
                 } else {
                     self.audio.send(AudioCmd::Seek(at));
                 }
-                self.lyrics_user_scroll = -10.0;
+                self.lyric_view.resume();
             }
             Action::Like(id, like) => {
                 if !self.logged_in {
@@ -1084,12 +1135,16 @@ impl App {
             }
             Resp::Lyrics { video_id, lyrics } => {
                 if self.current_id() == Some(video_id.as_str()) {
+                    log::info!(
+                        "lyrics: {}",
+                        lyrics.sources.iter().map(|l| format!("{} ({} lines)", l.provider.key(), l.lines.len())).collect::<Vec<_>>().join(", ")
+                    );
                     self.lyrics = Some((video_id, lyrics));
                 }
             }
-            Resp::LyricsExtras { video_id, extras } => {
+            Resp::LyricsExtras { video_id, source, target, extras } => {
                 if self.current_id() == Some(video_id.as_str()) {
-                    self.lyrics_extras = Some((video_id, extras));
+                    self.lyrics_extras = Some((video_id, source, target, extras));
                 }
             }
             Resp::Art { key, art } => {
@@ -1402,6 +1457,7 @@ impl eframe::App for App {
         let now = ctx.input(|i| i.time);
         self.sync_look();
         self.pump(now);
+        self.request_lyric_extras();
         // Upload: files from the picker, or dropped onto the window.
         let mut files = self.picked_uploads.lock().unwrap().take().unwrap_or_default();
         files.extend(ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_owned()).filter(|p| !p.as_os_str().is_empty()).collect::<Vec<_>>()));
@@ -1445,8 +1501,9 @@ impl eframe::App for App {
             }
         }
         // Frame pacing: idle costs nothing. The background drifts slowly, so ~15 fps
-        // reads as smooth on pages; the now-playing view runs at 30 fps for the lyric
-        // sweep. Each egui frame re-lays-out the UI, so frame rate is the main CPU cost.
+        // reads as smooth on pages; the now-playing view runs at 30 fps, and the synced
+        // lyrics ask for every frame while they animate (the karaoke sweep must be
+        // smooth). Each egui frame re-lays-out the UI, so frame rate is the main CPU cost.
         let playing = self.playing();
         if self.np_open && playing {
             ctx.request_repaint_after(Duration::from_millis(33));
@@ -1619,6 +1676,7 @@ impl eframe::App for App {
         storage.set_string("reactive_bg", b(self.reactive_bg));
         storage.set_string("show_roman", b(self.show_roman));
         storage.set_string("show_trans", b(self.show_trans));
+        self.lyric_prefs.save(storage);
         storage.set_string("np_art", b(self.np_tab == NpTab::Art));
         // Background test runs leave the user's real "last song" alone unless asked.
         let test_run = std::env::var_os("YTM_BACKGROUND").is_some() && std::env::var_os("YTM_SAVE_SESSION").is_none();

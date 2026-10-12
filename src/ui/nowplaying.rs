@@ -1,13 +1,12 @@
 //! Now-playing overlay: big art + synced lyrics / up next, over the full-strength
-//! animated background. Lyrics follow better-lyrics' presentation: the active line
-//! fills word by word, others dim with distance, the view glides to keep the active
-//! line in place, and instrumental breaks show breathing dots.
+//! animated background. The lyrics themselves are drawn by `karaoke` (a port of the
+//! better-lyrics renderer); this adds their toolbar and the plain-text fallback.
 
-use egui::{Align2, Color32, Pos2, Rect, Sense, Ui, Vec2, pos2, vec2};
+use egui::{Align2, Color32, Rect, Sense, Ui, Vec2, pos2, vec2};
 
 use super::widgets::{self, icon_button, named, text_at};
-use super::{Action, App, NpTab};
-use crate::lyrics::{Line, Lyrics, Sync};
+use super::{Action, App, NpTab, karaoke};
+use crate::lyrics::{Lyrics, LyricsSet, Provider, Sync, SyncKind};
 use crate::shader::Params;
 use crate::theme::{self, icon};
 
@@ -81,7 +80,7 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
     let look = app.look();
     let cs = &look.cover;
     let area = ui.max_rect();
-    let no_lyrics = matches!(&app.lyrics, Some((_, None)));
+    let no_lyrics = app.no_lyrics();
     // Header
     let header = Rect::from_min_size(area.min, vec2(area.width(), 44.0));
     let mut hui = ui.new_child(egui::UiBuilder::new().max_rect(header).layout(egui::Layout::left_to_right(egui::Align::Center)));
@@ -117,19 +116,6 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
         });
         if lyr.inner.clicked() {
             app.np_tab = if app.np_tab == NpTab::Lyrics { NpTab::Art } else { NpTab::Lyrics };
-        }
-        if app.np_tab == NpTab::Lyrics && !no_lyrics {
-            ui.add_space(4.0);
-            let tr = widgets::chip(ui, "文A", app.show_roman || app.show_trans).on_hover_text("Romanization and translation");
-            egui::Popup::menu(&tr).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-                ui.set_width(300.0);
-                super::pages::setting_row(ui, "Romanization", Some("Japanese, Korean, Chinese, Cyrillic and other scripts in Latin letters."), |ui| {
-                    super::pages::toggle(ui, &mut app.show_roman, "Romanization");
-                });
-                super::pages::setting_row(ui, "English translation", Some("Machine translated by Google. Skipped for English songs."), |ui| {
-                    super::pages::toggle(ui, &mut app.show_trans, "English translation");
-                });
-            });
         }
     });
 
@@ -293,22 +279,9 @@ fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Tra
 
 // ------------------------------------------------------------------ lyrics
 
-enum Item {
-    Line(usize),
-    /// Instrumental break between `start` and `end` ms.
-    Gap { start: u32, end: u32 },
-}
-
 fn lyrics_panel(app: &mut App, ui: &mut Ui, rect: Rect, now: f64, centered: bool) {
     // Lent out for the frame rather than cloned (the drawing needs `app` mutably).
-    let lyrics = app.lyrics.take();
-    lyrics_body(app, ui, rect, now, centered, lyrics.as_ref().map(|(_, l)| l.as_ref()));
-    app.lyrics = lyrics;
-}
-
-/// `lyrics`: None while loading, Some(None) when the song has none.
-fn lyrics_body(app: &mut App, ui: &mut Ui, rect: Rect, now: f64, centered: bool, lyrics: Option<Option<&Lyrics>>) {
-    let Some(lyrics) = lyrics else {
+    let Some((id, set)) = app.lyrics.take() else {
         ui.add_space(rect.height() * 0.35);
         ui.vertical_centered(|ui| {
             ui.spinner();
@@ -316,529 +289,236 @@ fn lyrics_body(app: &mut App, ui: &mut Ui, rect: Rect, now: f64, centered: bool,
         });
         return;
     };
-    let Some(lyrics) = lyrics else {
+    let order = app.lyric_prefs.order_for(&id);
+    if let Some(lyrics) = set.pick(&order) {
+        let panel = Rect::from_min_max(rect.min, pos2(rect.right(), rect.bottom() - 4.0));
+        if lyrics.sync == Sync::None {
+            plain_lyrics(app, ui, panel, lyrics);
+        } else {
+            synced(app, ui, panel, &id, lyrics, now, centered);
+        }
+        dock(app, ui, rect, &id, &set, lyrics);
+    } else {
         ui.add_space(rect.height() * 0.4);
         ui.vertical_centered(|ui| {
             ui.label(egui::RichText::new("No lyrics found for this song").font(theme::semibold(20.0)).color(theme::text_dim()));
         });
-        return;
-    };
-    if lyrics.sync == Sync::None {
-        egui::ScrollArea::vertical().id_salt("plain-lyrics").auto_shrink(false).show(ui, |ui| {
-            ui.label(egui::RichText::new("These lyrics aren't synced").font(theme::regular(13.0)).color(theme::TEXT_FAINT));
-            ui.add_space(14.0);
-            let extras = app.lyrics_extras.as_ref().map(|(_, e)| e);
-            fn get(on: bool, v: Option<&Vec<Option<String>>>, i: usize) -> Option<&str> {
-                v.filter(|_| on)?.get(i)?.as_deref()
-            }
-            for (i, l) in lyrics.lines.iter().enumerate() {
-                ui.label(egui::RichText::new(&l.text).font(theme::semibold(22.0)).color(theme::TEXT));
-                if let Some(r) = get(app.show_roman, extras.map(|e| &e.roman), i) {
-                    ui.label(egui::RichText::new(r).font(theme::semibold(14.0)).color(theme::text_dim()));
-                }
-                if let Some(t) = get(app.show_trans, extras.map(|e| &e.trans), i) {
-                    ui.label(egui::RichText::new(t).font(theme::regular(13.5)).color(theme::TEXT_FAINT));
-                }
-            }
-            ui.add_space(20.0);
-            let shown = extras.is_some() && (app.show_roman || app.show_trans);
-            ui.label(egui::RichText::new(credit(lyrics, shown)).font(theme::regular(12.0)).color(theme::TEXT_FAINT));
-        });
-        return;
     }
-    synced(app, ui, rect, lyrics, now, centered);
+    app.lyrics = Some((id, set));
 }
 
-fn synced(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics, now: f64, narrow: bool) {
-    use crate::preset::{Align, BlurScope, Fill};
-    let style = &app.look().lyrics;
-    let accent = app.accent_color();
-    let centered = narrow || style.align == Align::Center;
-    let pos_ms = app.audio.status.position_smooth().as_millis() as u32 + 60;
-    let max_scale = style.active_scale.clamp(1.0, 1.2);
-    // Leave room for the active line to grow without being clipped.
-    let width = ((rect.width() - 40.0) / max_scale).max(200.0);
-    let size = (width / 20.0).clamp(26.0, if narrow { 46.0 } else { 36.0 }) * style.size.clamp(0.6, 1.6);
-    let font = |sz: f32, bg: bool| {
-        if bg { theme::lyric_font(&style.font, crate::preset::Weight::Semibold, sz * 0.62) } else { theme::lyric_font(&style.font, style.weight, sz) }
-    };
-
-    // Items: lines plus breathing gaps for long instrumental breaks.
-    let mut items = Vec::new();
-    let first = lyrics.lines.iter().find(|l| !l.background).map_or(0, |l| l.start);
-    if first > 4500 {
-        items.push(Item::Gap { start: 0, end: first });
-    }
-    let mut last_end = 0;
-    for (i, l) in lyrics.lines.iter().enumerate() {
-        if !l.background && i > 0 && l.start > last_end + 5000 {
-            items.push(Item::Gap { start: last_end, end: l.start });
-        }
-        items.push(Item::Line(i));
-        if !l.background {
-            last_end = last_end.max(l.end);
-        }
-    }
-
-    // Active item: latest one that has started.
-    let started = |it: &Item| match it {
-        Item::Line(i) => lyrics.lines[*i].start,
-        Item::Gap { start, .. } => *start,
-    };
-    let active = items.iter().rposition(|it| started(it) <= pos_ms && !matches!(it, Item::Line(i) if lyrics.lines[*i].background));
-
-    // Romanization and translation, laid out under their line.
-    let extras = app.lyrics_extras.as_ref().map(|(_, e)| e);
-    let (show_roman, show_trans) = (app.show_roman, app.show_trans);
-    let sub_gap = size * 0.08;
-    // Same font family as the lyrics: romanization a step lighter, translation regular.
-    let roman_weight = if style.weight == crate::preset::Weight::Bold { crate::preset::Weight::Semibold } else { style.weight };
-    let subs_for = |ui: &mut Ui, i: usize, bg: bool, scale: f32| -> [Option<std::sync::Arc<egui::Galley>>; 2] {
-        let s = if bg { size * 0.62 } else { size } * scale;
-        let get = |on: bool, v: Option<&Vec<Option<String>>>| v.filter(|_| on).and_then(|v| v.get(i).cloned().flatten());
-        let roman = get(show_roman, extras.map(|e| &e.roman));
-        let trans = get(show_trans, extras.map(|e| &e.trans));
-        [
-            roman.map(|t| ui.fonts_mut(|f| f.layout(t, theme::lyric_font(&style.font, roman_weight, s * 0.5), Color32::WHITE, width * scale))),
-            trans.map(|t| ui.fonts_mut(|f| f.layout(t, theme::lyric_font(&style.font, crate::preset::Weight::Regular, s * 0.46), Color32::WHITE, width * scale))),
-        ]
-    };
-
-    // Layout pass.
-    let gap = size * style.line_gap.clamp(0.1, 1.6);
-    let mut ys = Vec::with_capacity(items.len());
-    let mut galleys = Vec::with_capacity(items.len());
-    let mut subs = Vec::with_capacity(items.len());
-    let mut y = 0.0;
-    for it in &items {
-        ys.push(y);
-        match it {
-            Item::Line(i) => {
-                let l = &lyrics.lines[*i];
-                let g = ui.fonts_mut(|f| f.layout(display_text(l), font(size, l.background), Color32::WHITE, width));
-                let sg = subs_for(ui, *i, l.background, 1.0);
-                let sub_h: f32 = sg.iter().flatten().map(|s| s.size().y + sub_gap).sum();
-                y += g.size().y + sub_h + if l.background { gap * 0.5 } else { gap };
-                galleys.push(Some(g));
-                subs.push(sg);
-            }
-            Item::Gap { .. } => {
-                y += size * 1.3;
-                galleys.push(None);
-                subs.push([None, None]);
-            }
-        }
-    }
-
-    // Smooth follow: spring the scroll toward the active item (unless the user scrolled).
-    let default_anchor = (style.anchor - 0.32).abs() < 1e-3;
-    let anchor_frac = if narrow && default_anchor { 0.42 } else { style.anchor.clamp(0.15, 0.6) };
-    let anchor = rect.top() + rect.height() * anchor_frac;
-    let target = active.map_or(0.0, |a| ys[a]) + size * 0.5;
-    let sid = egui::Id::new("lyrics-scroll");
-    let dt = ui.input(|i| i.stable_dt).min(0.1);
-    let mut scroll: f32 = ui.data(|d| d.get_temp(sid)).unwrap_or(target);
-    let hovered = ui.rect_contains_pointer(rect);
-    let wheel = if hovered { ui.input(|i| i.smooth_scroll_delta.y) } else { 0.0 };
-    let user_scrolling = now - app.lyrics_user_scroll <= 3.0;
-    if wheel != 0.0 {
-        scroll -= wheel;
-        app.lyrics_user_scroll = now;
-    } else if !user_scrolling {
-        scroll += (target - scroll) * (1.0 - (-dt * 7.0).exp());
-    }
-    ui.data_mut(|d| d.insert_temp(sid, scroll));
-    let origin_y = anchor - scroll;
-    // Themes that hide sung lines show them again, blurred, while the user scrolls back.
-    let reveal = theme::anim_bool(ui.ctx(), "lyr-reveal", user_scrolling, 0.3);
-
-    let painter = ui.painter_at(rect);
-    let fade = |yy: f32| {
-        // Fade lines out toward the top/bottom edges.
-        let t = ((yy - rect.top()) / 90.0).min((rect.bottom() - yy) / 120.0);
-        t.clamp(0.0, 1.0)
-    };
-    let sung_color = crate::preset::paint(&style.sung_color, accent);
-    let glow_color = crate::preset::paint(&style.glow_color, accent);
-    for (k, it) in items.iter().enumerate() {
-        let top = origin_y + ys[k];
-        let is_active = Some(k) == active;
-        match it {
-            Item::Gap { start, end } => {
-                let a = theme::anim_bool(ui.ctx(), ("gap", k), is_active && pos_ms < *end, 0.35);
-                if a <= 0.01 {
-                    continue;
-                }
-                let p = ((pos_ms.saturating_sub(*start)) as f32 / (end - start).max(1) as f32).clamp(0.0, 1.0);
-                let breath = 1.0 + 0.12 * (now as f32 * 3.0).sin();
-                let x0 = if centered { rect.center().x - 30.0 } else { rect.left() + 26.0 };
-                for d in 0..3 {
-                    let fill = ((p * 3.0) - d as f32).clamp(0.0, 1.0);
-                    let c = pos2(x0 + d as f32 * 22.0, top + size * 0.5);
-                    painter.circle_filled(c, size * 0.17 * breath * a, theme::with_alpha(Color32::WHITE, a * (0.3 + 0.7 * fill)));
-                }
-            }
-            Item::Line(i) => {
-                let l = &lyrics.lines[*i];
-                let Some(base_g) = galleys[k].clone() else { continue };
-                if top > rect.bottom() + size || top + base_g.size().y < rect.top() - size {
-                    continue;
-                }
-                let sung = pos_ms >= l.start && pos_ms < l.end + 200;
-                let lit = is_active || (l.background && sung);
-                // A line that just finished stays fully lit while it fades, so its last
-                // characters are seen highlighted even when the next line follows at once.
-                let lit_amt = theme::anim_bool(ui.ctx(), ("lyr-lit", k), lit, 0.35);
-                // The active line grows a little (laid out at the bigger size, with the
-                // wrap width scaled to match so it breaks at the same words).
-                let grow = if max_scale > 1.001 && lit_amt > 0.0 { ((1.0 + (max_scale - 1.0) * lit_amt) * 200.0).round() / 200.0 } else { 1.0 };
-                let g = if grow > 1.0 {
-                    ui.fonts_mut(|f| f.layout(display_text(l), font(size * grow, l.background), Color32::WHITE, width * grow))
-                } else {
-                    base_g.clone()
-                };
-                let x = if centered {
-                    rect.center().x - g.size().x / 2.0
-                } else if l.alt_singer {
-                    rect.right() - 20.0 - g.size().x
-                } else {
-                    rect.left() + 20.0
-                };
-                // Grow from the line's anchor edge rather than its top-left.
-                let pos = Pos2::new(x, top - (g.size().y - base_g.size().y) * 0.5);
-                let line_rect = Rect::from_min_size(pos, g.size());
-                // Where the glyphs actually are: CJK fallback glyphs sit higher and taller
-                // than the Latin row box, so hover/click use the inked bounds.
-                let ink = g.mesh_bounds.translate(pos.to_vec2()).union(Rect::from_x_y_ranges(line_rect.x_range(), line_rect.center().y..=line_rect.center().y));
-                let edge_fade = fade(line_rect.center().y);
-
-                let rel = active.map_or(1, |a| k as isize - a as isize);
-                let dist = rel.unsigned_abs() as f32;
-                let past = rel < 0;
-                let upcoming_alpha = (style.inactive_alpha - dist.min(6.0) * style.falloff).max(style.min_alpha.min(style.inactive_alpha));
-                let base_alpha = if lit {
-                    style.active_alpha
-                } else if past {
-                    egui::lerp(style.past_alpha.unwrap_or(upcoming_alpha)..=upcoming_alpha, reveal)
-                } else {
-                    upcoming_alpha
-                };
-                let a = theme::anim(ui.ctx(), ("lyr-a", k), base_alpha.clamp(0.0, 1.0), 0.3) * edge_fade;
-                let blur_on = match style.blur_scope {
-                    BlurScope::All => true,
-                    BlurScope::Past => past,
-                    BlurScope::Upcoming => !past || reveal > 0.0,
-                };
-                let target_blur = if style.blur > 0.0 && blur_on && !lit { style.blur * (1.0 + 0.35 * (dist - 1.0).clamp(0.0, 3.0)) } else { 0.0 };
-                let target_blur = target_blur.min(9.0).min(size * 0.22);
-                // Blur fades in/out as a crossfade between the sharp line and a cached
-                // blurred copy (radius is kept while fading back to sharp).
-                let blur_key = egui::Id::new(("lyr-br", k));
-                let last_r: f32 = ui.data(|d| d.get_temp(blur_key)).unwrap_or(0.0);
-                if target_blur > 0.0 && (target_blur - last_r).abs() > 0.01 {
-                    ui.data_mut(|d| d.insert_temp(blur_key, target_blur));
-                }
-                let radius = if target_blur > 0.0 { target_blur } else { last_r };
-                let blur_mix = theme::anim(ui.ctx(), ("lyr-bm", k), if target_blur > 0.0 { 1.0 } else { 0.0 }, 0.35);
-
-                let progress = if lit_amt > 0.0 {
-                    if lit {
-                        // Finish the fill before the next line takes over.
-                        let next = lyrics.lines[*i + 1..].iter().find(|x| !x.background).map_or(u32::MAX, |x| x.start);
-                        let done_by = next.saturating_sub(120);
-                        match style.fill {
-                            Fill::Sweep => char_progress(l, pos_ms, done_by),
-                            Fill::Word => word_progress(l, pos_ms, done_by),
-                            Fill::Line => f32::INFINITY,
-                        }
-                    } else {
-                        f32::INFINITY
-                    }
-                } else {
-                    0.0
-                };
-                let scale = g.size().x / base_g.size().x.max(1.0);
-                let look = Paint {
-                    a,
-                    lit,
-                    lit_amt,
-                    soft: style.fill == Fill::Sweep,
-                    radius,
-                    blur_mix,
-                    lift: vec2(0.0, -style.lift.clamp(0.0, 6.0) * lit_amt),
-                    sung: theme::with_alpha(sung_color, lit_amt * edge_fade),
-                    glow: (style.glow > 0.0).then(|| {
-                        (style.glow.clamp(0.0, 1.0), theme::with_alpha(glow_color, lit_amt * edge_fade * (0.2 + 0.5 * style.glow.clamp(0.0, 1.0))))
-                    }),
-                };
-                paint_text(&mut app.textfx, ui.ctx(), &painter, &g, (&base_g, grow), pos, progress, size * scale, &look);
-
-                // Romanization and translation under the line, drawn the same way: same
-                // font, scale, lift, colours and glow. Romanization follows the fill in
-                // step with the line; the translation lights as a whole.
-                let mut ink = ink;
-                let sg = if scale > 1.001 { subs_for(ui, *i, l.background, scale) } else { subs[k].clone() };
-                let glyphs = |g: &egui::Galley| g.rows.iter().map(|r| r.row.glyphs.len()).sum::<usize>() as f32;
-                let frac = if progress.is_finite() { progress / glyphs(&g).max(1.0) } else { progress };
-                let mut sy = line_rect.bottom().max(ink.bottom()) + sub_gap * scale;
-                for (j, (sg, base_sg)) in sg.iter().zip(&subs[k]).enumerate() {
-                    let (Some(sg), Some(base_sg)) = (sg, base_sg) else { continue };
-                    let sx = if centered {
-                        rect.center().x - sg.size().x / 2.0
-                    } else if l.alt_singer {
-                        rect.right() - 20.0 - sg.size().x
-                    } else {
-                        rect.left() + 20.0
-                    };
-                    let sp = pos2(sx, sy);
-                    sy += sg.size().y + sub_gap * scale;
-                    ink = ink.union(Rect::from_min_size(sp, sg.size()));
-                    let (dim, sub_size) = if j == 0 { (0.85, size * scale * 0.5) } else { (0.7, size * scale * 0.46) };
-                    let sub_progress = if j == 0 && frac.is_finite() { frac * glyphs(sg) } else if progress > 0.0 { f32::INFINITY } else { 0.0 };
-                    // Small text drowns in a glow sized for the line, so it gets half as much.
-                    let glow = look.glow.map(|(st, tint)| (st, theme::with_alpha(tint, 0.5)));
-                    let sub = Paint { a: a * dim, radius: radius * 0.6, sung: theme::with_alpha(look.sung, dim), glow, ..look };
-                    paint_text(&mut app.textfx, ui.ctx(), &painter, sg, (base_sg, if scale > 1.001 { scale } else { 1.0 }), sp, sub_progress, sub_size, &sub);
-                }
-                // Click a line to jump there.
-                // Only inside the lyrics area: lines running past its edge mustn't take
-                // clicks meant for the player bar.
-                let resp = ui.interact(ink.intersect(rect), ui.id().with(("lyr", k)), Sense::click());
-                let resp = named(resp, &l.text);
-                if resp.hovered() {
-                    painter.rect_filled(ink.expand2(vec2(10.0, 6.0)), 8.0, theme::glass(0.05));
-                }
-                if resp.clicked() {
-                    app.actions.push(Action::Seek(l.start as f32 / 1000.0));
-                }
-            }
-        }
-    }
-    painter.text(
-        rect.right_bottom() - vec2(6.0, 4.0),
-        Align2::RIGHT_BOTTOM,
-        credit(lyrics, extras.is_some() && (show_roman || show_trans)),
-        theme::regular(11.5),
-        theme::TEXT_FAINT,
-    );
-}
-
-/// How a lyric galley is drawn this frame.
-#[derive(Clone, Copy)]
-struct Paint {
-    /// Alpha of unsung text.
-    a: f32,
-    lit: bool,
-    lit_amt: f32,
-    /// Feathered sweep edge (vs. a hard one).
-    soft: bool,
-    /// Blur radius and how far blurred it is.
-    radius: f32,
-    blur_mix: f32,
-    lift: Vec2,
-    /// Sung colour, alpha included.
-    sung: Color32,
-    /// Glow strength (0..1) and tint.
-    glow: Option<(f32, Color32)>,
-}
-
-/// Draw one galley of a lyric line: unsung text (blurred while inactive), then the
-/// sung part up to `progress` characters, glowing, lifted and feathered at the edge.
-/// `fx_src`: the line at its resting size and how much `g` is grown from it. Blur and
-/// glow are rasterized from that and drawn scaled, so a line growing as it lights
-/// reuses one texture instead of rasterizing a new one every frame.
-#[allow(clippy::too_many_arguments)]
-fn paint_text(
-    fx: &mut super::textfx::TextFx,
-    ctx: &egui::Context,
-    painter: &egui::Painter,
-    g: &std::sync::Arc<egui::Galley>,
-    fx_src: (&std::sync::Arc<egui::Galley>, f32),
-    pos: Pos2,
-    progress: f32,
-    font_size: f32,
-    p: &Paint,
-) {
-    let (src, grow) = fx_src;
-    let rows = split_rows(g, pos, progress);
-    if p.a > 0.003 {
-        if p.lit {
-            // Unsung text: only the part the fill hasn't reached.
-            for r in &rows {
-                let feathered = p.soft && r.edge > r.left && r.edge < r.right;
-                // Past the feather the text is plainly unsung.
-                let from = if feathered { r.edge + 6.0 } else { r.edge };
-                if from < r.right {
-                    let clip = Rect::from_min_max(pos2(from.max(r.left), r.top), pos2(r.right, r.bottom));
-                    painter.with_clip_rect(clip.intersect(painter.clip_rect())).galley_with_override_text_color(pos, g.clone(), theme::with_alpha(Color32::WHITE, p.a));
-                }
-                // In the feather, unsung text crossfades with the sung bands drawn below,
-                // at the same partial lift, so the glyph under the edge isn't seen twice.
-                if feathered {
-                    for b in 0..4 {
-                        let x0 = r.edge - 6.0 + b as f32 * 3.0;
-                        let band = Rect::from_min_max(pos2(x0, r.top), pos2(x0 + 3.0, r.bottom));
-                        let t = 1.0 - (b as f32 + 0.5) / 4.0;
-                        painter
-                            .with_clip_rect(band.intersect(painter.clip_rect()))
-                            .galley_with_override_text_color(pos + p.lift * t, g.clone(), theme::with_alpha(Color32::WHITE, p.a * (1.0 - t)));
-                    }
-                }
-            }
-        } else {
-            let blurred = if p.blur_mix > 0.01 && p.radius > 0.2 { fx.get(ctx, src, p.radius / grow, 1.25) } else { None };
-            match blurred {
-                Some(b) => {
-                    if p.blur_mix < 0.99 {
-                        painter.galley_with_override_text_color(pos, g.clone(), theme::with_alpha(Color32::WHITE, p.a * (1.0 - p.blur_mix)));
-                    }
-                    b.paint(painter, pos, grow, theme::with_alpha(Color32::WHITE, p.a * p.blur_mix));
-                }
-                None => painter.galley_with_override_text_color(pos, g.clone(), theme::with_alpha(Color32::WHITE, p.a)),
-            }
-        }
-    }
-    if p.lit_amt <= 0.0 {
-        return;
-    }
-    for r in &rows {
-        let solid_end = if p.soft && r.edge < r.right { r.edge - 6.0 } else { r.edge };
-        if solid_end > r.left {
-            let clip = Rect::from_min_max(pos2(r.left, r.top), pos2(solid_end, r.bottom));
-            if let Some((strength, tint)) = p.glow {
-                // A soft halo that spreads with the theme's strength. A tight, bright one
-                // fills the gaps inside letters and makes the text itself look blurred.
-                let gr = (font_size * (0.12 + 0.25 * strength)).max(2.5);
-                if let Some(b) = fx.get(ctx, src, gr / grow, 1.3) {
-                    // Only sideways past the row: above and below are the neighbouring rows.
-                    let gclip = Rect::from_min_max(pos2(r.left - gr * 2.0, r.top), pos2(solid_end, r.bottom));
-                    b.paint(&painter.with_clip_rect(gclip.intersect(painter.clip_rect())), pos + p.lift, grow, tint);
-                }
-            }
-            painter.with_clip_rect(clip.intersect(painter.clip_rect())).galley_with_override_text_color(pos + p.lift, g.clone(), p.sung);
-        }
-        // Feather: a few thin bands with decreasing alpha (and lift) at the edge.
-        if p.soft && r.edge > r.left && r.edge < r.right {
-            for b in 0..4 {
-                let x0 = r.edge - 6.0 + b as f32 * 3.0;
-                let band = Rect::from_min_max(pos2(x0, r.top), pos2(x0 + 3.0, r.bottom));
-                let t = 1.0 - (b as f32 + 0.5) / 4.0;
-                painter
-                    .with_clip_rect(band.intersect(painter.clip_rect()))
-                    .galley_with_override_text_color(pos + p.lift * t, g.clone(), theme::with_alpha(p.sung, t * p.sung.a() as f32 / 255.0));
-            }
-        }
-    }
-}
-
-fn credit(lyrics: &Lyrics, extras: bool) -> String {
-    if extras { format!("Lyrics from {} · Translated by Google", lyrics.source) } else { format!("Lyrics from {}", lyrics.source) }
-}
-
-fn display_text(l: &Line) -> String {
-    if l.words.is_empty() { l.text.clone() } else { l.words.iter().map(|w| w.text.as_str()).collect::<String>().trim_end().to_owned() }
-}
-
-/// How many characters of the line have been sung (fractional), from word timing or,
-/// for line-synced lyrics, spread evenly across the line like better-lyrics does.
-/// Word fills are squeezed to end by `done_by` (just before the next line starts).
-fn char_progress(l: &Line, pos: u32, done_by: u32) -> f32 {
-    if l.words.is_empty() {
-        let n = l.text.chars().count() as f32;
-        let span = ((l.end.saturating_sub(l.start)) as f32 * 0.9).min(n * 90.0).max(1.0);
-        return n * ((pos.saturating_sub(l.start)) as f32 / span).clamp(0.0, 1.0);
-    }
-    let mut chars = 0.0;
-    for w in &l.words {
-        let n = w.text.chars().count() as f32;
-        let (start, end) = (w.start.min(done_by), w.end.min(done_by));
-        if pos >= end {
-            chars += n;
-        } else if pos >= start {
-            let f = (pos - start) as f32 / (end - start).max(1) as f32;
-            // Count trailing space only once the word is done.
-            let letters = w.text.trim_end().chars().count() as f32;
-            chars += letters * f;
-            break;
-        } else {
-            break;
-        }
-    }
-    chars
-}
-
-/// Like `char_progress`, but whole words at a time: a word counts as sung the
-/// moment it starts (opacity-based karaoke).
-fn word_progress(l: &Line, pos: u32, done_by: u32) -> f32 {
-    if l.words.is_empty() {
-        // Line-synced: snap the even spread up to the end of the current word.
-        let p = char_progress(l, pos, done_by);
-        if p <= 0.0 {
-            return 0.0;
-        }
-        let chars: Vec<char> = l.text.chars().collect();
-        let mut i = (p.floor() as usize).min(chars.len());
-        while i < chars.len() && !chars[i].is_whitespace() {
-            i += 1;
-        }
-        return i as f32;
-    }
-    l.words.iter().take_while(|w| w.start.min(done_by) <= pos).map(|w| w.text.trim_end().chars().count() as f32 + (w.text.len() - w.text.trim_end().len()) as f32).sum()
-}
-
-/// One wrapped row of a lyric line and how far along it the fill has reached.
-struct RowSplit {
-    left: f32,
-    right: f32,
-    top: f32,
-    bottom: f32,
-    /// x where the sung part ends (`left` = nothing sung, `right` = all of it).
-    edge: f32,
-}
-
-/// Split a line's rows at the fill position (`progress` characters).
-fn split_rows(g: &std::sync::Arc<egui::Galley>, pos: Pos2, progress: f32) -> Vec<RowSplit> {
-    let mut out = Vec::with_capacity(g.rows.len());
-    let mut remaining = progress;
-    let last = g.rows.len().saturating_sub(1);
-    // Where each row's glyphs are inked. Row boxes come from the Latin font, and CJK
-    // fallback glyphs stand taller, poking out above and below them. Rows meet halfway
-    // between their inked glyphs, so a row's clip never reaches its neighbours' glyphs
-    // (which would paint them twice: lit and unlit, a lift apart).
-    let ink: Vec<(f32, f32)> = g
-        .rows
+/// Romanization and translation for each line, the way the extension picks them: what
+/// the lyrics ship (Apple-style TTML) first, then Unison/Google.
+fn decorations<'a>(
+    show_roman: bool,
+    show_trans: bool,
+    target: &'a str,
+    extras: Option<&'a (String, String, String, crate::translate::Extras)>,
+    id: &str,
+    lyrics: &'a Lyrics,
+) -> (Vec<Option<karaoke::Roman<'a>>>, Vec<Option<&'a str>>) {
+    let extras = extras.filter(|(v, s, t, _)| v == id && s == lyrics.provider.key() && t == target).map(|(_, _, _, e)| e);
+    let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
+    let roman = lyrics
+        .lines
         .iter()
-        .map(|row| {
-            let y = pos.y + row.pos.y;
-            let (mut t, mut b) = (f32::INFINITY, f32::NEG_INFINITY);
-            for gl in &row.row.glyphs {
-                if gl.uv_rect.size.y > 0.0 {
-                    t = t.min(y + gl.pos.y + gl.uv_rect.offset.y);
-                    b = b.max(y + gl.pos.y + gl.uv_rect.offset.y + gl.uv_rect.size.y);
-                }
+        .enumerate()
+        .map(|(i, l)| {
+            if !show_roman || l.instrumental {
+                return None;
             }
-            if t.is_finite() { (t.min(y), b.max(y + row.row.size.y)) } else { (y, y + row.row.size.y) }
+            if let Some(r) = l.romanization.as_deref().filter(|r| !same(r, &l.text)) {
+                return Some(if l.timed_roman.is_empty() { karaoke::Roman::Text(r) } else { karaoke::Roman::Timed(&l.timed_roman, r) });
+            }
+            let r = extras?.roman.get(i)?.as_deref()?;
+            (!same(r, &l.text)).then_some(karaoke::Roman::Text(r))
         })
         .collect();
-    for (r, row) in g.rows.iter().enumerate() {
-        let n = row.row.glyphs.len() as f32;
-        let row_rect = Rect::from_min_size(pos + row.pos.to_vec2(), row.row.size);
-        // The outer edges stay open (lift, tall glyphs).
-        let top = if r == 0 { row_rect.top() - row.row.size.y } else { (ink[r - 1].1 + ink[r].0) / 2.0 };
-        let bottom = if r == last { row_rect.bottom() + row.row.size.y } else { (ink[r].1 + ink[r + 1].0) / 2.0 };
-        let (left, right) = (row_rect.left() - 4.0, row_rect.right() + 4.0);
-        let edge = if n == 0.0 || remaining <= 0.0 {
-            left
-        } else if remaining >= n {
-            right
-        } else {
-            let idx = remaining.floor() as usize;
-            let frac = remaining - idx as f32;
-            row_rect.left() + row.row.glyphs.get(idx).map_or(row.row.size.x, |gl| gl.pos.x + gl.advance_width * frac)
-        };
-        // Row breaks consume the implicit newline/space between rows.
-        remaining -= n;
-        out.push(RowSplit { left, right, top, bottom, edge });
+    let trans = lyrics
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            if !show_trans || l.instrumental {
+                return None;
+            }
+            let t = super::lyric_prefs::shipped_translation(l, target).or_else(|| extras?.trans.get(i)?.as_deref())?;
+            (!same(t, &l.text)).then_some(t)
+        })
+        .collect();
+    (roman, trans)
+}
+
+fn synced(app: &mut App, ui: &mut Ui, rect: Rect, id: &str, lyrics: &Lyrics, now: f64, narrow: bool) {
+    let style = app.look().lyrics.clone();
+    let accent = app.accent_color();
+    let centered = narrow || style.align == crate::preset::Align::Center;
+    let playing = app.playing();
+    // Audible position: the device plays what the player hands it a buffer later.
+    let pos = app.audio.status.position_smooth().as_secs_f64() - app.audio.status.latency().as_secs_f64();
+    let pos = app.lyric_clock.tick(pos, playing, now);
+    let t = pos - app.lyric_prefs.offset(id, lyrics.provider, lyrics.sync == Sync::Word);
+    let (roman, trans) = decorations(app.show_roman, app.show_trans, &app.lyric_prefs.target, app.lyrics_extras.as_ref(), id, lyrics);
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut h);
+        lyrics.provider.key().hash(&mut h);
+        app.theme_id.hash(&mut h);
+        app.default_theme.hash(&mut h);
+        for r in &roman {
+            match r {
+                Some(karaoke::Roman::Timed(_, s)) | Some(karaoke::Roman::Text(s)) => s.hash(&mut h),
+                None => 0u8.hash(&mut h),
+            }
+        }
+        trans.hash(&mut h);
+        h.finish()
+    };
+    let frame = karaoke::Frame { lyrics, key, roman, trans, t, playing, now, rect, style: &style, accent, centered };
+    // The view lives in `app`; the frame borrows `app` for decorations, so swap it out.
+    let mut view = std::mem::take(&mut app.lyric_view);
+    let out = view.show(ui, frame);
+    app.lyric_view = view;
+    if let Some(s) = out.seek {
+        app.actions.push(Action::Seek(s as f32));
     }
-    out
+    if out.animating {
+        ui.ctx().request_repaint();
+    }
+    if out.user_scrolling {
+        // The extension's "resume autoscroll" button.
+        let r = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 70.0), vec2(150.0, 34.0));
+        let resp = ui.interact(r, ui.id().with("lyr-resume"), Sense::click());
+        let resp = named(resp, "Back to the current line");
+        let hover = theme::anim_bool(ui.ctx(), "lyr-resume-h", resp.hovered(), 0.12);
+        ui.painter().rect_filled(r, 17.0, theme::glass(0.12 + 0.08 * hover));
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, "Back to current line", theme::semibold(13.0), Color32::WHITE);
+        if resp.clicked() {
+            app.lyric_view.resume();
+        }
+    }
+}
+
+fn plain_lyrics(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics) {
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+    egui::ScrollArea::vertical().id_salt("plain-lyrics").auto_shrink(false).show(&mut child, |ui| {
+        ui.label(egui::RichText::new("These lyrics aren't synced").font(theme::regular(13.0)).color(theme::TEXT_FAINT));
+        ui.add_space(14.0);
+        let style = &app.look().lyrics;
+        let size = (32.0 * style.size.clamp(0.6, 1.6)).min(rect.width() / 14.0).max(18.0);
+        for l in &lyrics.lines {
+            ui.label(egui::RichText::new(&l.text).font(theme::lyric_font(&style.font, style.weight, size)).color(theme::with_alpha(Color32::WHITE, 0.85)));
+            ui.add_space(size * 0.25);
+        }
+        ui.add_space(80.0);
+    });
+}
+
+/// Sync-type colours from the extension's dock (syllable, word, line, unsynced).
+fn sync_color(k: SyncKind) -> Color32 {
+    match k {
+        SyncKind::Syllable => Color32::from_rgb(196, 160, 255),
+        SyncKind::Word => Color32::from_rgb(130, 200, 255),
+        SyncKind::Line => Color32::from_rgb(255, 205, 110),
+        SyncKind::Unsynced => Color32::from_rgb(170, 170, 170),
+    }
+}
+
+fn sync_label(k: SyncKind) -> &'static str {
+    match k {
+        SyncKind::Syllable => "Syllable synced",
+        SyncKind::Word => "Word synced",
+        SyncKind::Line => "Line synced",
+        SyncKind::Unsynced => "Not synced",
+    }
+}
+
+/// The lyrics toolbar (the extension's dock): source, romanization, translation, timing.
+fn dock(app: &mut App, ui: &mut Ui, rect: Rect, id: &str, set: &LyricsSet, shown: &Lyrics) {
+    let sources: Vec<Provider> = app.lyric_prefs.order_for(id).into_iter().filter(|p| set.get(*p).is_some()).collect();
+    let at = sources.iter().position(|p| *p == shown.provider).unwrap_or(0);
+    let h = 44.0;
+    let w = 420.0f32.min(rect.width() - 16.0);
+    let r = Rect::from_min_size(pos2(rect.right() - w - 8.0, rect.bottom() - h - 8.0), vec2(w, h));
+    let hovered = ui.rect_contains_pointer(r);
+    let lit = theme::anim_bool(ui.ctx(), "lyr-dock-h", hovered, 0.2);
+    ui.painter().rect(r, 14.0, theme::glass(0.04 + 0.03 * lit), egui::Stroke::new(1.0, theme::glass(0.08)), egui::StrokeKind::Inside);
+    let mut dui = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink2(vec2(8.0, 6.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    dui.multiply_opacity(0.72 + 0.28 * lit);
+    dui.spacing_mut().item_spacing.x = 4.0;
+    let mut pick: Option<Provider> = None;
+    // Source: previous / name (menu) / next.
+    let step = |ui: &mut Ui, glyph: char, label: &str, enabled: bool| {
+        ui.add_enabled_ui(enabled, |ui| icon_button(ui, glyph, 16.0, label, false)).inner.clicked()
+    };
+    if step(&mut dui, icon::CHEVRON_LEFT, "Previous source", sources.len() > 1) {
+        pick = Some(sources[(at + sources.len() - 1) % sources.len()]);
+    }
+    let kind = shown.provider.sync();
+    let name = format!("{}  {}/{}", shown.provider.name(), at + 1, sources.len());
+    let label = egui::RichText::new(format!("● {name}")).font(theme::semibold(12.5)).color(Color32::WHITE);
+    let src = dui.add(egui::Button::new(label).frame(false)).on_hover_text(format!("{} · choose lyrics source", sync_label(kind)));
+    // Recolour the dot with the sync type.
+    dui.painter().circle_filled(pos2(src.rect.left() + 9.0, src.rect.center().y), 3.5, sync_color(kind));
+    egui::Popup::menu(&src).show(|ui| {
+        ui.set_min_width(240.0);
+        for p in &sources {
+            let l = set.get(*p).unwrap();
+            let text = format!("{}  ·  {}", p.name(), sync_label(p.sync()));
+            if ui.add(egui::Button::selectable(*p == shown.provider, text)).on_hover_text(format!("{} lines", l.lines.iter().filter(|x| !x.instrumental).count())).clicked() {
+                pick = Some(*p);
+            }
+        }
+    });
+    if step(&mut dui, icon::CHEVRON_RIGHT, "Next source", sources.len() > 1) {
+        pick = Some(sources[(at + 1) % sources.len()]);
+    }
+    if let Some(p) = pick {
+        // `pinForPick`: the listener's first choice needs no pin.
+        if sources.first() == Some(&p) && app.lyric_prefs.order_for("").first() == Some(&p) {
+            app.lyric_prefs.pins.remove(id);
+        } else {
+            app.lyric_prefs.pins.insert(id.to_owned(), p);
+        }
+        app.lyric_view.reset();
+    }
+    divider(&mut dui);
+    let toggle = |ui: &mut Ui, text: &str, on: bool, tip: &str| {
+        let fill = if on { theme::with_alpha(Color32::from_rgb(255, 196, 64), 0.18) } else { Color32::TRANSPARENT };
+        let color = if on { Color32::from_rgb(255, 214, 120) } else { theme::with_alpha(Color32::WHITE, 0.6) };
+        ui.add(egui::Button::new(egui::RichText::new(text).font(theme::semibold(13.0)).color(color)).fill(fill).corner_radius(9.0).min_size(vec2(32.0, 28.0)))
+            .on_hover_text(tip)
+            .clicked()
+    };
+    if toggle(&mut dui, "文A", app.show_trans, &format!("Translation ({})", lang_name(&app.lyric_prefs.target))) {
+        app.show_trans = !app.show_trans;
+    }
+    if toggle(&mut dui, "あa", app.show_roman, "Romanization") {
+        app.show_roman = !app.show_roman;
+    }
+    divider(&mut dui);
+    // Timing offset for this song and source, in 0.1 s steps.
+    let off = app.lyric_prefs.song_offset(id, shown.provider);
+    if step(&mut dui, icon::CHEVRON_LEFT, "Lyrics earlier", true) {
+        app.lyric_prefs.set_song_offset(id, shown.provider, off - 0.1);
+    }
+    let v = dui
+        .add(egui::Button::new(egui::RichText::new(format!("{off:+.1}s").replace("+0.0", "0.0")).font(theme::semibold(12.5)).color(Color32::WHITE)).frame(false))
+        .on_hover_text("Lyrics timing for this song. Double-click to reset.");
+    if v.double_clicked() {
+        app.lyric_prefs.set_song_offset(id, shown.provider, 0.0);
+    }
+    if step(&mut dui, icon::CHEVRON_RIGHT, "Lyrics later", true) {
+        app.lyric_prefs.set_song_offset(id, shown.provider, off + 0.1);
+    }
+}
+
+fn divider(ui: &mut Ui) {
+    let (r, _) = ui.allocate_exact_size(vec2(1.0, 26.0), Sense::hover());
+    ui.painter().rect_filled(r, 0.0, theme::glass(0.12));
+}
+
+fn lang_name(code: &str) -> &str {
+    super::lyric_prefs::LANGUAGES.iter().find(|(c, _)| *c == code).map_or(code, |(_, n)| n)
 }

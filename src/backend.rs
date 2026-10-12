@@ -13,7 +13,7 @@ use tokio::runtime::Runtime;
 
 use crate::art::Art;
 use crate::audio::{AudioCmd, AudioHandle};
-use crate::lyrics::{self, Lyrics};
+use crate::lyrics::{self, LyricsSet};
 use crate::model::{self, Card, Target, Thumb, Track, sized};
 use crate::stream::{self, Shared};
 use crate::{innertube, jsc, webmusic, ytdlp, ytm, ytmapi};
@@ -36,6 +36,8 @@ pub enum Req {
     /// Upload audio files to the account's library.
     Upload(Vec<PathBuf>),
     Lyrics(Track),
+    /// Romanization and translation for the lyric lines of one source.
+    LyricsExtras { video_id: String, source: String, lines: Vec<String>, lang: Option<String>, target: String },
     /// Process cover art for the background; `key` is echoed back.
     Art { key: String, url: String },
     /// Radio seeded from a track; appended to the queue.
@@ -73,6 +75,7 @@ impl Req {
             Req::Uploads => "Loading uploads",
             Req::Upload(_) => "Upload",
             Req::Lyrics(_) => "Lyrics",
+            Req::LyricsExtras { .. } => "Translation",
             Req::Art { .. } => "Art",
             Req::Radio(_) => "Loading radio",
             Req::PlayCollection { .. } => "Playback",
@@ -92,7 +95,7 @@ impl Req {
 
     /// Background requests fail quietly (logged, no toast).
     fn quiet(&self) -> bool {
-        matches!(self, Req::Suggest(_) | Req::Art { .. } | Req::Prefetch(_) | Req::HomeMore(_) | Req::Lyrics(_))
+        matches!(self, Req::Suggest(_) | Req::Art { .. } | Req::Prefetch(_) | Req::HomeMore(_) | Req::Lyrics(_) | Req::LyricsExtras { .. })
     }
 }
 
@@ -159,9 +162,10 @@ pub enum Resp {
     Uploads(Vec<Track>),
     /// Upload finished: how many files went up, and which failed.
     Uploaded { done: usize, failed: Vec<String> },
-    Lyrics { video_id: String, lyrics: Option<Lyrics> },
-    /// Romanization/translation for the lyrics, arriving after them.
-    LyricsExtras { video_id: String, extras: crate::translate::Extras },
+    /// Every source's lyrics for a song (empty when nobody has them).
+    Lyrics { video_id: String, lyrics: LyricsSet },
+    /// Romanization/translation for one source's lines, arriving after them.
+    LyricsExtras { video_id: String, source: String, target: String, extras: crate::translate::Extras },
     Art { key: String, art: Art },
     Radio { seed: String, tracks: Vec<Track> },
     PlayQueue { tracks: Vec<Track> },
@@ -355,14 +359,12 @@ impl Backend {
                 }
                 Req::Lyrics(track) => {
                     let video_id = track.id.clone();
-                    let lyrics = self.lyrics_for(&track).await;
-                    let texts: Option<Vec<String>> = lyrics.as_ref().map(|l| l.lines.iter().map(|l| l.text.clone()).collect());
-                    // Show the lyrics straight away; the extras follow.
-                    let _ = self.tx.send(Resp::Lyrics { lyrics, video_id: video_id.clone() });
-                    self.wake();
-                    let Some(texts) = texts else { return Ok(None) };
-                    let Some(extras) = self.translate.extras(&video_id, &texts).await else { return Ok(None) };
-                    Resp::LyricsExtras { video_id, extras }
+                    Resp::Lyrics { lyrics: self.lyrics_for(&track).await, video_id }
+                }
+                Req::LyricsExtras { video_id, source, lines, lang, target } => {
+                    let key = format!("{video_id}_{source}");
+                    let Some(extras) = self.translate.extras(&key, &lines, lang.as_deref(), &target).await else { return Ok(None) };
+                    Resp::LyricsExtras { video_id, source, target, extras }
                 }
                 Req::Art { key, url } => {
                     // The backdrop is a 64 px blur; fetch near that, not the 544 px art.
@@ -462,7 +464,7 @@ impl Backend {
         })
     }
 
-    async fn lyrics_for(&self, t: &Track) -> Option<Lyrics> {
+    async fn lyrics_for(&self, t: &Track) -> LyricsSet {
         let artist = t.artist_line();
         let query = lyrics::Query {
             video_id: &t.id,
@@ -472,8 +474,8 @@ impl Backend {
             duration: t.duration.or_else(|| self.audio.status.duration().map(|d| d.as_secs() as u32)),
         };
         self.lyrics.fetch(&query).await.unwrap_or_else(|e| {
-            log::warn!("better lyrics failed: {e:#}");
-            None
+            log::warn!("lyrics failed: {e:#}");
+            LyricsSet::default()
         })
     }
 

@@ -124,6 +124,40 @@ pub struct LyricStyle {
     pub glow_color: String,
     pub active_scale: f32,
     pub lift: f32,
+    /// Values ported straight from the theme's stylesheet; when present they replace
+    /// the approximations above.
+    pub css: Option<ThemeCss>,
+}
+
+/// A Better Lyrics theme's own CSS, for the parts of it the lyrics renderer reads.
+#[derive(Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ThemeCss {
+    /// `--blyrics-font-size` in rem by window width: `[[min_width_px, rem], ...]`.
+    pub font_rem: Vec<[f32; 2]>,
+    /// `--blyrics-font-weight` (400 / 600 / 700).
+    pub font_weight: Option<u16>,
+    /// Line opacity and blur (px) before the active line (`div:not(.blyrics--active):not(.blyrics--active ~ div)`).
+    pub past: Option<[f32; 2]>,
+    /// … and after it (`.blyrics--active ~ div`).
+    pub upcoming: Option<[f32; 2]>,
+    /// `transition: opacity calc(var(--blyrics-duration) / n) delay`: `[1/n, delay s]`.
+    pub opacity_transition: Option<[f32; 2]>,
+    /// `transition: filter …`: `[1/n, delay s]`.
+    pub filter_transition: Option<[f32; 2]>,
+    /// Alpha of `--blyrics-glow-color` on the container and on held words (`[data-long-word]`).
+    pub glow_alpha: Option<f32>,
+    pub long_word_glow_alpha: Option<f32>,
+    /// Wobble transforms set to identity.
+    pub no_wobble: bool,
+    /// `--blyrics-letter-wave-*`: crest (em), settle (em), duration (s), emphasis scale.
+    pub letter_wave: Option<[f32; 4]>,
+    /// `.blyrics-background-lyric { font-size }` in em.
+    pub background_em: Option<f32>,
+    /// `--blyrics-hover-scale`.
+    pub hover_scale: Option<f32>,
+    /// `.blyrics-container { padding-inline: start end }` in px.
+    pub padding_inline: Option<[f32; 2]>,
 }
 
 impl Default for LyricStyle {
@@ -134,12 +168,12 @@ impl Default for LyricStyle {
             font: "inter".into(),
             size: 1.0,
             line_gap: 0.6,
-            anchor: 0.32,
+            anchor: 0.37,
             fill: Fill::Sweep,
-            active_alpha: 0.38,
-            inactive_alpha: 0.36,
-            falloff: 0.035,
-            min_alpha: 0.14,
+            active_alpha: 0.3,
+            inactive_alpha: 0.3,
+            falloff: 0.0,
+            min_alpha: 0.3,
             past_alpha: None,
             sung_color: "white".into(),
             blur: 0.0,
@@ -148,6 +182,7 @@ impl Default for LyricStyle {
             glow_color: "white".into(),
             active_scale: 1.0,
             lift: 0.0,
+            css: None,
         }
     }
 }
