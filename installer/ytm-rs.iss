@@ -4,7 +4,7 @@
 ; Output: installer\Output\ytm-rs-setup-<version>.exe
 
 #define AppName "ytm-rs"
-#define AppVersion "0.2.10"
+#define AppVersion "0.2.11"
 #define AppExe "ytm-rs.exe"
 
 [Setup]
