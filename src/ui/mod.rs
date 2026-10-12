@@ -249,6 +249,8 @@ impl App {
         let get = |k: &str| storage.and_then(|s| s.get_string(k));
         let discord_enabled = get("discord_enabled").is_none_or(|v| v == "1");
         let logged_in = backend.is_logged_in();
+        // Before any request: a song started at launch (dev hooks) must see this setting.
+        backend.set_high_quality(get("high_quality").is_none_or(|v| v == "1"));
         backend.request(Req::Home(None));
         if logged_in {
             backend.request(Req::Library);
@@ -370,7 +372,7 @@ impl App {
             app.go(Page::Search(q));
         }
         // An explicit page replaces the smoke search, so its query shouldn't linger.
-        if matches!(std::env::var("YTM_PAGE").as_deref(), Ok("home" | "explore" | "library" | "uploads" | "settings")) {
+        if matches!(std::env::var("YTM_PAGE").as_deref(), Ok("home" | "explore" | "library" | "uploads" | "liked" | "history" | "settings")) {
             app.search_text.clear();
         }
         match std::env::var("YTM_PAGE").as_deref() {
@@ -378,6 +380,8 @@ impl App {
             Ok("explore") => app.go(Page::Explore),
             Ok("library") => app.go(Page::Library(LibTab::Playlists)),
             Ok("uploads") => app.go(Page::Library(LibTab::Uploads)),
+            Ok("liked") => app.go(Page::Library(LibTab::Songs)),
+            Ok("history") => app.go(Page::Library(LibTab::History)),
             Ok("settings") => app.go(Page::Settings),
             Ok(p) if p.starts_with("album:") => app.go(Page::Album(p[6..].to_owned())),
             Ok(p) if p.starts_with("artist:") => app.go(Page::Artist(p[7..].to_owned())),
@@ -392,7 +396,6 @@ impl App {
             app.np_open = true;
         }
         app.audio.set_normalize(app.normalize);
-        app.backend.set_high_quality(app.high_quality);
         app
     }
 
