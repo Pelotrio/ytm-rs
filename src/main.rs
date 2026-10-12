@@ -68,6 +68,8 @@ fn main() -> eframe::Result {
         multisampling: 0,
         depth_buffer: 0,
         stencil_buffer: 0,
+        // Dev hook: YTM_FPS paces frames itself (see `dev_pace`), so vsync is off.
+        glow_options: eframe::egui_glow::GlowConfiguration { vsync: std::env::var_os("YTM_FPS").is_none(), ..Default::default() },
         ..Default::default()
     };
 
@@ -150,7 +152,12 @@ fn init_logging() {
     let mut builder = env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("warn,ytm_rs=info"),
     );
-    if !cfg!(debug_assertions) {
+    // Dev hook: YTM_LOG=<path> logs there (test runs beside a running copy).
+    if let Some(path) = std::env::var_os("YTM_LOG") {
+        if let Ok(file) = std::fs::File::create(path) {
+            builder.target(env_logger::Target::Pipe(Box::new(file)));
+        }
+    } else if !cfg!(debug_assertions) {
         if let Some(dirs) = directories::ProjectDirs::from("", "", "ytm-rs") {
             let _ = std::fs::create_dir_all(dirs.data_dir());
             if let Ok(file) = std::fs::File::create(dirs.data_dir().join("ytm-rs.log")) {

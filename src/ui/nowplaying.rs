@@ -380,7 +380,7 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, id: &str, lyrics: &Lyrics, now
     let frame = karaoke::Frame { lyrics, key, roman, trans, t, playing, now, rect, style: &style, accent, centered };
     // The view lives in `app`; the frame borrows `app` for decorations, so swap it out.
     let mut view = std::mem::take(&mut app.lyric_view);
-    let out = view.show(ui, frame);
+    let out = if karaoke::dev_off("view") { karaoke::Out { seek: None, animating: true, user_scrolling: false } } else { view.show(ui, frame) };
     app.lyric_view = view;
     if let Some(s) = out.seek {
         app.actions.push(Action::Seek(s as f32));

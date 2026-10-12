@@ -694,6 +694,9 @@ pub struct View {
     deco_born: HashMap<u64, f64>,
     glow: Glow,
     credits_focused: bool,
+    /// The frame (`cumulative_pass_nr`) the view was last drawn in; 0 once its textures
+    /// are freed.
+    shown_pass: u64,
 }
 
 pub struct Frame<'a> {
@@ -726,6 +729,15 @@ impl View {
         *self = Self { glow: std::mem::take(&mut self.glow), ..Default::default() };
     }
 
+    /// Called every frame: once the view isn't drawn (another tab or page), its glows,
+    /// blurred lines and atlas copy go; they're rebuilt as it comes back.
+    pub fn release_hidden(&mut self, pass: u64) {
+        if self.shown_pass != 0 && self.shown_pass + 1 < pass {
+            self.glow = Glow::default();
+            self.shown_pass = 0;
+        }
+    }
+
     pub fn resume(&mut self) {
         self.user_until = 0.0;
     }
@@ -733,6 +745,7 @@ impl View {
     pub fn show(&mut self, ui: &mut egui::Ui, f: Frame) -> Out {
         let rect = f.rect;
         let ctx = ui.ctx().clone();
+        self.shown_pass = ctx.cumulative_pass_nr();
         let cfg = Cfg::new(f.style, f.accent, rect.width(), ctx.content_rect().width(), f.centered);
         let layout_key = hash((f.key, rect.width().round() as i32, cfg.size.to_bits(), cfg.padding.to_bits(), cfg.centered, &cfg.font, cfg.weight as u8));
         if self.layout.as_ref().is_none_or(|l| l.key != layout_key) {
@@ -1001,9 +1014,8 @@ impl View {
                     })
                     .collect();
                 let words: Vec<(&Word, f32)> = b.words.iter().map(|w| (w, if w.bg { dim * 0.78 } else { dim })).chain(deco_words).collect();
-                let key = (f.key, i, (r * 4.0) as i32);
-                if let Some((tex, rr)) = self.glow.blurred_line(&ctx, key, &words, &texts, r, atlas, ppp) {
-                    painter.image(tex, xf.rect(rr), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), theme::with_alpha(Color32::WHITE, opacity));
+                if let Some((tex, rr, uv)) = self.glow.blurred_line(&ctx, (f.key, i), r, &words, &texts, atlas, ppp) {
+                    painter.image(tex, xf.rect(rr), uv, theme::with_alpha(Color32::WHITE, opacity));
                 }
                 animating |= st.exit.is_some();
             } else {
@@ -1518,7 +1530,7 @@ fn paint_words(
             push_quad(&mut m, r, q.uv, color, alpha.as_ref(), &cuts);
             screen_quads.push((r, q.uv, q.letter, q.letters, 1.0));
         }
-        if look.glow > 0.05 && look.glow_alpha >= GLOW_INVISIBLE {
+        if look.glow > 0.05 && look.glow_alpha >= GLOW_INVISIBLE && !dev_off("glow") {
             glow.push(GlowJob {
                 key: (key.0, key.1, key.2, wi as u32),
                 quads: screen_quads,
@@ -1552,12 +1564,37 @@ pub struct GlowJob {
     layer: ShapeIdx,
 }
 
+/// A GL texture sized in 64 px steps. A new image that fits is written into it in place
+/// (`glTexSubImage2D`); a new texture or a new size makes the driver allocate, and at 144
+/// frames a second it kept over 100 MB of those allocations (a new texture per blur step of
+/// every line was the bulk of it).
+struct Slot {
+    tex: TextureHandle,
+    size: [usize; 2],
+    /// The part the current image covers.
+    used: [usize; 2],
+    /// Of the current image: an unchanged one (a glow that has stopped moving) isn't sent again.
+    hash: u64,
+}
+
+const SLOT_STEP: usize = 64;
+/// Unused slots kept for the next glow or line to write into.
+const SPARE_SLOTS: usize = 8;
+
+impl Slot {
+    fn uv(&self) -> Rect {
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(self.used[0] as f32 / self.size[0] as f32, self.used[1] as f32 / self.size[1] as f32))
+    }
+}
+
 #[derive(Default)]
 struct Glow {
     /// A copy of the font atlas, refreshed when glyphs we need aren't in it yet.
     atlas: Option<Arc<Coverage>>,
-    textures: HashMap<(u64, usize, u32, u32), (TextureHandle, f64)>,
-    lines: HashMap<(u64, usize, i32), (TextureHandle, Rect, f64)>,
+    textures: HashMap<(u64, usize, u32, u32), (Slot, f64)>,
+    /// Per line: its blurred image, the radius (in 1/4 px) it was drawn at, where it goes.
+    lines: HashMap<(u64, usize), (Slot, i32, Rect, f64)>,
+    spare: Vec<Slot>,
     scratch: Vec<f32>,
     note: Option<(usize, Arc<Vec<f32>>)>,
     note_tex: Option<(usize, TextureHandle)>,
@@ -1577,6 +1614,57 @@ impl Glow {
         self.atlas.clone().unwrap()
     }
 
+    /// Puts `img` in a texture: `old` if it fits, else a spare one that does, else a new one.
+    fn upload(&mut self, ctx: &egui::Context, old: Option<Slot>, img: ColorImage, name: &str) -> Slot {
+        let used = img.size;
+        let image_hash = hash((used, &img.pixels));
+        if let Some(s) = &old
+            && s.used == used
+            && s.hash == image_hash
+        {
+            return old.unwrap();
+        }
+        // The image plus a transparent column and row, so filtering at its edge reads what it
+        // did on a texture of its own; whatever an earlier, bigger image left past them is
+        // never sampled.
+        let (w, h) = (used[0] + 1, used[1] + 1);
+        let bucket = [w.next_multiple_of(SLOT_STEP), h.next_multiple_of(SLOT_STEP)];
+        let fits = |s: &Slot| s.size[0] >= w && s.size[1] >= h && s.size[0] * s.size[1] <= 2 * bucket[0] * bucket[1];
+        let slot = match old {
+            Some(s) if fits(&s) => Some(s),
+            Some(s) => {
+                self.recycle(s);
+                None
+            }
+            None => None,
+        };
+        let slot = slot.or_else(|| self.spare.iter().position(fits).map(|k| self.spare.swap_remove(k)));
+        let size = slot.as_ref().map_or(bucket, |s| s.size);
+        // A new texture gets its full size; an old one only the part being drawn.
+        let (pw, ph) = if slot.is_some() { (w, h) } else { (size[0], size[1]) };
+        let mut pixels = vec![Color32::TRANSPARENT; pw * ph];
+        for (y, row) in img.pixels.chunks_exact(used[0]).enumerate() {
+            pixels[y * pw..y * pw + used[0]].copy_from_slice(row);
+        }
+        let img = ColorImage { size: [pw, ph], source_size: vec2(pw as f32, ph as f32), pixels };
+        match slot {
+            Some(mut s) => {
+                s.tex.set_partial([0, 0], img, TextureOptions::LINEAR);
+                s.used = used;
+                s.hash = image_hash;
+                s
+            }
+            None => Slot { tex: ctx.load_texture(name, img, TextureOptions::LINEAR), size, used, hash: image_hash },
+        }
+    }
+
+    fn recycle(&mut self, s: Slot) {
+        if self.spare.len() >= SPARE_SLOTS {
+            self.spare.remove(0);
+        }
+        self.spare.push(s);
+    }
+
     fn finish(&mut self, ctx: &egui::Context, painter: &egui::Painter, jobs: Vec<GlowJob>, atlas_size: [usize; 2], ppp: f32) {
         let now = ctx.input(|i| i.time);
         if !jobs.is_empty() {
@@ -1584,37 +1672,36 @@ impl Glow {
             let atlas = self.atlas(ctx, atlas_size, &uvs);
             for j in jobs {
                 let Some((img, rect)) = rasterize_glow(&atlas, &j, ppp, &mut self.scratch) else { continue };
-                let entry = self.textures.entry(j.key);
-                let tex = match entry {
-                    std::collections::hash_map::Entry::Occupied(mut o) => {
-                        o.get_mut().0.set(img, TextureOptions::LINEAR);
-                        o.get_mut().1 = now;
-                        o.get().0.id()
-                    }
-                    std::collections::hash_map::Entry::Vacant(v) => {
-                        let t = ctx.load_texture("lyric-glow", img, TextureOptions::LINEAR);
-                        let id = t.id();
-                        v.insert((t, now));
-                        id
-                    }
-                };
-                let mut mesh = Mesh::with_texture(tex);
-                mesh.add_rect_with_uv(rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), j.color);
+                let old = self.textures.remove(&j.key).map(|(s, _)| s);
+                let slot = self.upload(ctx, old, img, "lyric-glow");
+                let mut mesh = Mesh::with_texture(slot.tex.id());
+                mesh.add_rect_with_uv(rect, slot.uv(), j.color);
+                self.textures.insert(j.key, (slot, now));
                 painter.set(j.layer, Shape::mesh(mesh));
             }
         }
-        self.textures.retain(|_, (_, used)| now - *used < 1.0);
-        self.lines.retain(|_, (_, _, used)| now - *used < 4.0);
+        let gone: Vec<Slot> = (self.textures.extract_if(|_, (_, used)| now - *used >= 1.0).map(|(_, (s, _))| s))
+            .chain(self.lines.extract_if(|_, (.., used)| now - *used >= 4.0).map(|(_, (s, ..))| s))
+            .collect();
+        for s in gone {
+            self.recycle(s);
+        }
     }
 
     /// A whole line blurred (`filter: blur()`): its words, each at its own alpha, and its
-    /// text decorations, in content coordinates. Cached per line and radius.
+    /// text decorations, in content coordinates. Cached per line at its latest radius.
     #[allow(clippy::too_many_arguments)]
-    fn blurred_line(&mut self, ctx: &egui::Context, key: (u64, usize, i32), words: &[(&Word, f32)], texts: &[(Arc<Galley>, Pos2, f32)], radius: f32, atlas_size: [usize; 2], ppp: f32) -> Option<(TextureId, Rect)> {
+    fn blurred_line(&mut self, ctx: &egui::Context, key: (u64, usize), radius: f32, words: &[(&Word, f32)], texts: &[(Arc<Galley>, Pos2, f32)], atlas_size: [usize; 2], ppp: f32) -> Option<(TextureId, Rect, Rect)> {
+        if dev_off("blur") {
+            return None;
+        }
         let now = ctx.input(|i| i.time);
-        if let Some((t, r, used)) = self.lines.get_mut(&key) {
+        let step = (radius * 4.0) as i32;
+        if let Some((s, r, rect, used)) = self.lines.get_mut(&key)
+            && *r == step
+        {
             *used = now;
-            return Some((t.id(), *r));
+            return Some((s.tex.id(), *rect, s.uv()));
         }
         let uv_of = |min: [u16; 2], max: [u16; 2]| {
             Rect::from_min_max(
@@ -1660,10 +1747,11 @@ impl Glow {
             layer: ShapeIdx(0),
         };
         let (img, content_rect) = rasterize_glow(&atlas, &job, ppp, &mut self.scratch)?;
-        let tex = ctx.load_texture("lyric-blur", img, TextureOptions::LINEAR);
-        let id = tex.id();
-        self.lines.insert(key, (tex, content_rect, now));
-        Some((id, content_rect))
+        let old = self.lines.remove(&key).map(|(s, ..)| s);
+        let slot = self.upload(ctx, old, img, "lyric-blur");
+        let out = (slot.tex.id(), content_rect, slot.uv());
+        self.lines.insert(key, (slot, step, content_rect, now));
+        Some(out)
     }
 }
 
@@ -2003,10 +2091,10 @@ fn paint_instrumental(painter: &egui::Painter, glow: &mut Glow, ctx: &egui::Cont
         gaussian(&mut g, gw, gw, sigma);
         let gpad = pad as f32 / sz as f32 * 24.0;
         let grect = Rect::from_min_max(to_screen(pos2(-gpad, -gpad)), to_screen(pos2(24.0 + gpad, 24.0 + gpad)));
-        let gt = glow.set_tex(ctx, 1, mask_image(&g, gw, 0.6));
-        painter.image(gt, grect, full, theme::with_alpha(cfg.active, fill_a));
-        let ft = glow.set_tex(ctx, 2, mask_image(&fill, sz, 1.0));
-        painter.image(ft, rect, full, theme::with_alpha(cfg.active, fill_a));
+        let (gt, guv) = glow.set_tex(ctx, 1, mask_image(&g, gw, 0.6));
+        painter.image(gt, grect, guv, theme::with_alpha(cfg.active, fill_a));
+        let (ft, fuv) = glow.set_tex(ctx, 2, mask_image(&fill, sz, 1.0));
+        painter.image(ft, rect, fuv, theme::with_alpha(cfg.active, fill_a));
     }
     (st.selected && e >= 0.0 && e <= d) || st.exit.is_some()
 }
@@ -2065,28 +2153,46 @@ impl Glow {
         id
     }
 
-    fn set_tex(&mut self, ctx: &egui::Context, slot: u32, img: ColorImage) -> TextureId {
+    /// The instrumental note's fill or glow this frame, and the part of the texture it covers.
+    fn set_tex(&mut self, ctx: &egui::Context, slot: u32, img: ColorImage) -> (TextureId, Rect) {
         let key = (u64::MAX, usize::MAX, slot, 0);
         let now = ctx.input(|i| i.time);
-        match self.textures.get_mut(&key) {
-            Some((t, used)) => {
-                t.set(img, TextureOptions::LINEAR);
-                *used = now;
-                t.id()
-            }
-            None => {
-                let t = ctx.load_texture("lyric-instrumental", img, TextureOptions::LINEAR);
-                let id = t.id();
-                self.textures.insert(key, (t, now));
-                id
-            }
-        }
+        let old = self.textures.remove(&key).map(|(s, _)| s);
+        let s = self.upload(ctx, old, img, "lyric-instrumental");
+        let out = (s.tex.id(), s.uv());
+        self.textures.insert(key, (s, now));
+        out
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slots_are_rewritten_in_place() {
+        let ctx = egui::Context::default();
+        let img = |w: usize, h: usize| ColorImage::filled([w, h], Color32::WHITE);
+        let mut g = Glow::default();
+        let a = g.upload(&ctx, None, img(100, 40), "t");
+        assert_eq!(a.size, [128, 64]);
+        let id = a.tex.id();
+        // Smaller, and a little bigger within the slot: the same texture, drawn in part.
+        let b = g.upload(&ctx, Some(a), img(60, 30), "t");
+        assert_eq!((b.tex.id(), b.used), (id, [60, 30]));
+        assert_eq!(b.uv().max, pos2(60.0 / 128.0, 30.0 / 64.0));
+        let c = g.upload(&ctx, Some(b), img(120, 60), "t");
+        assert_eq!(c.tex.id(), id);
+        // Outgrown: a new texture; the old one is kept for the next image that fits it.
+        let d = g.upload(&ctx, Some(c), img(300, 40), "t");
+        assert_ne!(d.tex.id(), id);
+        assert_eq!(g.spare.len(), 1);
+        let e = g.upload(&ctx, None, img(90, 50), "t");
+        assert_eq!(e.tex.id(), id);
+        // Far too big for a small image: not reused.
+        let f = g.upload(&ctx, Some(d), img(10, 10), "t");
+        assert_eq!(f.size, [64, 64]);
+    }
 
     #[test]
     fn bezier_matches_css_ease() {
@@ -2151,4 +2257,10 @@ mod tests {
         assert!(point_in_polygon(p, pos2(10.0, 17.0)));
         assert!(!point_in_polygon(p, pos2(2.0, 2.0)));
     }
+}
+
+/// Dev hook: YTM_LYR_OFF=glow,blur,view leaves those parts out (memory breakdowns).
+pub fn dev_off(what: &str) -> bool {
+    static OFF: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    OFF.get_or_init(|| std::env::var("YTM_LYR_OFF").unwrap_or_default()).split(',').any(|x| x == what)
 }
