@@ -126,6 +126,8 @@ pub struct Collection {
     pub description: Option<String>,
     pub thumbs: Vec<Thumb>,
     pub tracks: Vec<Track>,
+    /// The account's own playlist (editable), not one saved from someone else.
+    pub owned: bool,
 }
 
 pub struct ArtistPage {

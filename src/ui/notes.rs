@@ -146,7 +146,7 @@ pub fn summary(blocks: &[Block]) -> (Vec<String>, usize) {
     (items, more)
 }
 
-fn surface() -> egui::Frame {
+pub(super) fn surface() -> egui::Frame {
     egui::Frame::new()
         .fill(Color32::from_gray(28))
         .stroke(Stroke::new(1.0, Color32::from_gray(44)))

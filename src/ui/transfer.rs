@@ -37,6 +37,14 @@ pub struct Setup {
     dev: bool,
     /// When the transfer finished (app time); the sidebar card leaves a few seconds later.
     done_at: Option<f64>,
+    /// The song shown in the review (its place in the review), when one was picked from the list.
+    focus: Option<usize>,
+    /// The review list shows the songs that matched instead of the ones to check.
+    show_matched: bool,
+    /// Height of the review card last frame, for the list beside it.
+    card_h: f32,
+    /// The song the review list last scrolled to.
+    scrolled_to: Option<usize>,
     /// When the last review decision was made (app time), so a double click decides one song, not two.
     decided_at: f64,
 }
@@ -379,6 +387,9 @@ fn setup(app: &mut App, ui: &mut Ui) {
         xfer.start(&app.backend, c.source.clone(), dest, false);
         app.xfer.tab = Tab::All;
         app.xfer.pick = None;
+        app.xfer.focus = None;
+        app.xfer.scrolled_to = None;
+        app.xfer.show_matched = false;
         app.xfer.seen = None;
     }
 }
@@ -813,13 +824,19 @@ fn review(app: &mut App, ui: &mut Ui) {
     let guard = xfer.job.lock().unwrap();
     let Some(job) = guard.as_ref() else { return };
     let total = job.doubts.len();
-    let Some(at) = job.current_doubt() else { return };
+    let left = job.doubts.iter().filter(|d| d.decision.is_none()).count();
+    // The song on screen: one picked from the list, else the first not decided yet.
+    let Some(at) = app.xfer.focus.filter(|&k| k < total).or_else(|| job.current_doubt()) else { return };
     let d = &job.doubts[at];
     let sp = &job.tracks[d.index];
     // The current pick: what the search chose (if anything), among the candidates.
     let current = job.results[d.index].track().and_then(|t| d.candidates.iter().position(|c| c.id == t.id));
     let current_label = job.results[d.index].track().filter(|_| current.is_none()).cloned();
-    let picked = app.xfer.pick.filter(|(k, _)| *k == at).map(|(_, c)| c).or(current);
+    let decided_pick = match d.decision {
+        Some(Decision::Pick(k)) => Some(k),
+        _ => None,
+    };
+    let picked = app.xfer.pick.filter(|(k, _)| *k == at).map(|(_, c)| c).or(decided_pick).or(current);
 
     ui.add_space(6.0);
     breadcrumb(app, ui);
@@ -828,8 +845,12 @@ fn review(app: &mut App, ui: &mut Ui) {
         ui.vertical(|ui| {
             ui.set_width((ui.available_width() - 300.0).max(200.0));
             ui.add_space(4.0);
-            let n = total - at;
-            ui.label(RichText::new(if n == 1 { "Check 1 song".to_owned() } else { format!("Check {} songs", fmt_n(n)) }).font(theme::bold(28.0)).color(theme::TEXT));
+            let title = match left {
+                0 => "Everything's checked".to_owned(),
+                1 => "Check 1 song".to_owned(),
+                n => format!("Check {} songs", fmt_n(n)),
+            };
+            ui.label(RichText::new(title).font(theme::bold(28.0)).color(theme::TEXT));
             ui.add_space(2.0);
             dim(ui, "These didn't match cleanly. Pick the right one, skip it, or keep the current pick. Click a cover to play it.");
         });
@@ -840,11 +861,13 @@ fn review(app: &mut App, ui: &mut Ui) {
     ui.add_space(12.0);
     let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
     ui.painter().rect_filled(bar, 3.0, theme::glass(0.12));
-    ui.painter().rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * at as f32 / total.max(1) as f32, 6.0)), 3.0, accent);
+    ui.painter().rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * (total - left) as f32 / total.max(1) as f32, 6.0)), 3.0, accent);
     ui.add_space(14.0);
 
     let mut decision = None;
     let mut back = false;
+    let mut focus_to: Option<usize> = None;
+    let mut edit: Option<usize> = None;
     let mut acts = Vec::new();
     let wide = ui.available_width() > 820.0;
     let queue_w = if wide { 260.0 } else { 0.0 };
@@ -852,37 +875,72 @@ fn review(app: &mut App, ui: &mut Ui) {
         if wide {
             ui.vertical(|ui| {
                 ui.set_width(queue_w);
+                let card_h = if app.xfer.card_h > 0.0 { app.xfer.card_h } else { 560.0 };
                 egui::Frame::new().fill(theme::glass(0.04)).corner_radius(theme::panel_radius()).inner_margin(10).show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    small_caps(ui, "UP NEXT");
-                    let from = at.saturating_sub(2);
-                    for k in from..(from + 10).min(total) {
-                        let dk = &job.doubts[k];
-                        let t = &job.tracks[dk.index];
-                        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::hover());
-                        if k == at {
-                            ui.painter().rect_filled(rect, 8.0, theme::glass(0.08));
+                    // The same height as the card beside it, whatever's in the list.
+                    ui.set_height(card_h - 20.0);
+                    let matched: Vec<usize> = (0..job.results.len()).filter(|&i| matches!(job.results[i], Search::Found(_))).collect();
+                    ui.horizontal(|ui| {
+                        if widgets::chip(ui, &format!("To check {}", fmt_n(total)), !app.xfer.show_matched).clicked() {
+                            app.xfer.show_matched = false;
                         }
-                        let img = Rect::from_min_size(pos2(rect.left() + 6.0, rect.center().y - 17.0), vec2(34.0, 34.0));
-                        paint_cover(ui, img, &spotify_thumbs(&t.art), 4.0, 1.0);
-                        let mark = match dk.decision {
-                            Some(Decision::Skip) => "Skipped",
-                            Some(_) => "✓",
-                            None => "",
-                        };
-                        let mw = if mark.is_empty() { 0.0 } else { 54.0 };
-                        let tw = rect.right() - img.right() - 16.0 - mw;
-                        text_at(ui, pos2(img.right() + 10.0, rect.top() + 6.0), &t.name, theme::semibold(13.0), theme::TEXT, tw);
-                        text_at(ui, pos2(img.right() + 10.0, rect.top() + 25.0), &t.artist_line(), theme::regular(12.0), theme::text_dim(), tw);
-                        if !mark.is_empty() {
-                            ui.painter().text(pos2(rect.right() - 6.0, rect.center().y), Align2::RIGHT_CENTER, mark, theme::regular(12.0), theme::text_dim());
+                        if widgets::chip(ui, &format!("Matched {}", fmt_n(matched.len())), app.xfer.show_matched).clicked() {
+                            app.xfer.show_matched = true;
                         }
+                    });
+                    ui.add_space(8.0);
+                    const ROW: f32 = 46.0;
+                    let list_h = ui.available_height();
+                    let n = if app.xfer.show_matched { matched.len() } else { total };
+                    let mut area = egui::ScrollArea::vertical().id_salt(("xfer-queue", app.xfer.show_matched)).auto_shrink([false, false]).max_height(list_h);
+                    // Keep the song on screen in view when it changes.
+                    if !app.xfer.show_matched && app.xfer.scrolled_to != Some(at) {
+                        app.xfer.scrolled_to = Some(at);
+                        let spacing = ui.spacing().item_spacing.y;
+                        area = area.vertical_scroll_offset((at as f32 * (ROW + spacing) - list_h / 2.0 + ROW / 2.0).max(0.0));
                     }
+                    area.show_rows(ui, ROW, n, |ui, range| {
+                        for r in range {
+                            let (i, mark, on) = if app.xfer.show_matched {
+                                let i = matched[r];
+                                (i, "", job.doubts.get(at).is_some_and(|d| d.index == i))
+                            } else {
+                                let mark = match job.doubts[r].decision {
+                                    Some(Decision::Skip) => "Skipped",
+                                    Some(_) => "✓",
+                                    None => "",
+                                };
+                                (job.doubts[r].index, mark, r == at)
+                            };
+                            let t = &job.tracks[i];
+                            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
+                            let resp = named(resp, &t.name).on_hover_cursor(egui::CursorIcon::PointingHand);
+                            let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.12);
+                            ui.painter().rect_filled(rect, 8.0, theme::glass(if on { 0.08 } else { 0.04 * h }));
+                            let img = Rect::from_min_size(pos2(rect.left() + 6.0, rect.center().y - 17.0), vec2(34.0, 34.0));
+                            paint_cover(ui, img, &spotify_thumbs(&t.art), 4.0, 1.0);
+                            let mw = if mark.is_empty() { 0.0 } else { 54.0 };
+                            let tw = rect.right() - img.right() - 16.0 - mw;
+                            text_at(ui, pos2(img.right() + 10.0, rect.top() + 6.0), &t.name, theme::semibold(13.0), theme::TEXT, tw);
+                            text_at(ui, pos2(img.right() + 10.0, rect.top() + 25.0), &t.artist_line(), theme::regular(12.0), theme::text_dim(), tw);
+                            if !mark.is_empty() {
+                                ui.painter().text(pos2(rect.right() - 6.0, rect.center().y), Align2::RIGHT_CENTER, mark, theme::regular(12.0), theme::text_dim());
+                            }
+                            if resp.clicked() {
+                                if app.xfer.show_matched {
+                                    edit = Some(i);
+                                } else {
+                                    focus_to = Some(r);
+                                }
+                            }
+                        }
+                    });
                 });
             });
             ui.add_space(18.0);
         }
-        ui.vertical(|ui| {
+        let card = ui.vertical(|ui| {
             ui.set_width(ui.available_width());
             settings_card(ui, |ui| {
                 ui.add_space(18.0);
@@ -891,7 +949,12 @@ fn review(app: &mut App, ui: &mut Ui) {
                 paint_cover(ui, img, &spotify_thumbs(&sp.art), 8.0, 1.0);
                 let x = img.right() + 16.0;
                 let tw = head.right() - x;
-                ui.painter().text(pos2(x, head.top() + 1.0), Align2::LEFT_TOP, format!("ON SPOTIFY · {} OF {}", fmt_n(at + 1), fmt_n(total)), theme::bold(11.5), theme::TEXT_FAINT);
+                let state = match d.decision {
+                    Some(Decision::Skip) => " · SKIPPED",
+                    Some(_) => " · CHECKED",
+                    None => "",
+                };
+                ui.painter().text(pos2(x, head.top() + 1.0), Align2::LEFT_TOP, format!("ON SPOTIFY · {} OF {}{state}", fmt_n(at + 1), fmt_n(total)), theme::bold(11.5), theme::TEXT_FAINT);
                 text_at(ui, pos2(x, head.top() + 17.0), &sp.name, theme::bold(21.0), theme::TEXT, tw);
                 let r = text_at(ui, pos2(x, head.top() + 45.0), &sp.artist_line(), theme::regular(14.0), theme::text_dim(), tw - 100.0);
                 if sp.local {
@@ -904,23 +967,34 @@ fn review(app: &mut App, ui: &mut Ui) {
                 ui.painter().rect_filled(line, 0.0, theme::glass(0.10));
                 ui.add_space(12.0);
                 small_caps(ui, "PICK THE RIGHT ONE ON YOUTUBE MUSIC");
-                if d.candidates.is_empty() {
-                    dim(ui, "Nothing on YouTube Music looks like this song.");
-                }
-                // The choices scroll on their own when they don't fit, so the buttons under
-                // them stay on screen.
-                let room = (ui.clip_rect().bottom() - ui.cursor().top() - 96.0).max(52.0 * 3.5);
-                egui::ScrollArea::vertical().id_salt(("xfer-cands", at)).min_scrolled_height(room).max_height(room).show(ui, |ui| {
-                    if let Some(t) = &current_label {
-                        // The first search's pick isn't among the new results: show it too.
-                        let _ = candidate_row(ui, t, false, true, false, accent, &mut acts);
-                    }
-                    for (k, c) in d.candidates.iter().enumerate() {
-                        if candidate_row(ui, c, d.videos[k], current == Some(k), picked == Some(k), accent, &mut acts) {
-                            app.xfer.pick = Some((at, k));
+                // A fixed height, the same for every song, so the buttons under the list stay
+                // put; longer lists scroll inside it.
+                let room = (ui.ctx().content_rect().height() - 560.0).clamp(52.0 * 3.5, 52.0 * 8.0);
+                egui::ScrollArea::vertical()
+                    .id_salt(("xfer-cands", at))
+                    .auto_shrink([false, false])
+                    .min_scrolled_height(room)
+                    .max_height(room)
+                    .show(ui, |ui| {
+                        if let Some(t) = &current_label {
+                            // The first search's pick isn't among the new results: show it too.
+                            let _ = candidate_row(ui, t, false, true, false, accent, &mut acts);
                         }
-                    }
-                });
+                        if d.loading {
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                dim(ui, "Finding other versions…");
+                            });
+                        } else if d.candidates.is_empty() && current_label.is_none() {
+                            dim(ui, "Nothing on YouTube Music looks like this song.");
+                        }
+                        for (k, c) in d.candidates.iter().enumerate() {
+                            if candidate_row(ui, c, d.videos[k], current == Some(k), picked == Some(k), accent, &mut acts) {
+                                app.xfer.pick = Some((at, k));
+                            }
+                        }
+                    });
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     if pill(ui, "Skip this song", None, false).on_hover_text("Skipped songs are listed at the end").clicked() {
@@ -945,9 +1019,24 @@ fn review(app: &mut App, ui: &mut Ui) {
                 ui.add_space(14.0);
             });
         });
+        app.xfer.card_h = card.response.rect.height();
     });
+    // After deciding, the next song still to check (after this one, then from the top).
+    let next_open = |from: usize| (from + 1..total).chain(0..from).find(|&k| job.doubts[k].decision.is_none());
+    let next = next_open(at);
     drop(guard);
     app.actions.extend(acts);
+    if let Some(k) = focus_to {
+        app.xfer.focus = Some(k);
+        app.xfer.pick = None;
+        return;
+    }
+    if let Some(i) = edit {
+        app.xfer.focus = xfer.edit_match(&app.backend, i);
+        app.xfer.pick = None;
+        app.xfer.show_matched = false;
+        return;
+    }
     let now = ui.input(|i| i.time);
     if (back || decision.is_some() || finish) && now - app.xfer.decided_at < 0.4 {
         return;
@@ -956,10 +1045,11 @@ fn review(app: &mut App, ui: &mut Ui) {
         app.xfer.decided_at = now;
     }
     if back {
-        xfer.undo_decision();
+        app.xfer.focus = Some(at - 1);
         app.xfer.pick = None;
     } else if let Some(d) = decision {
-        xfer.decide(d);
+        app.xfer.focus = next;
+        xfer.decide(at, d);
         app.xfer.pick = None;
     } else if finish {
         xfer.finish_review();

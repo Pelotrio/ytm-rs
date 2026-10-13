@@ -149,6 +149,7 @@ fn parse_album(v: &Value, id: &str) -> Option<Collection> {
         description: text(&h["description"]["musicDescriptionShelfRenderer"]["description"]),
         thumbs,
         tracks,
+        owned: false,
     })
 }
 
@@ -206,6 +207,7 @@ fn parse_playlist(v: &Value, id: &str) -> Option<(Collection, Option<String>, Op
             description: text(&h["description"]["musicDescriptionShelfRenderer"]["description"]),
             thumbs: thumbs(thumb),
             tracks,
+            owned: owned(two),
         },
         token,
         count,
@@ -218,6 +220,11 @@ fn header(two: &Value) -> Option<&Value> {
     [&c["musicResponsiveHeaderRenderer"], &c["musicEditablePlaylistDetailHeaderRenderer"]["header"]["musicResponsiveHeaderRenderer"]]
         .into_iter()
         .find(|h| !h.is_null())
+}
+
+/// Your own playlists have the editable header.
+fn owned(two: &Value) -> bool {
+    !two["tabs"][0]["tabRenderer"]["content"]["sectionListRenderer"]["contents"][0]["musicEditablePlaylistDetailHeaderRenderer"].is_null()
 }
 
 fn playlist_continuation(v: &Value) -> (Vec<Track>, Option<String>) {

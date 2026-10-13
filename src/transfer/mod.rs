@@ -87,6 +87,8 @@ pub struct Doubt {
     /// Which candidates are videos rather than songs.
     pub videos: Vec<bool>,
     pub decision: Option<Decision>,
+    /// A matched song opened for a change: its alternatives are still being searched.
+    pub loading: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -215,8 +217,11 @@ struct Saved {
     results: Vec<Search>,
     not_songs: usize,
     created: Vec<String>,
+    #[serde(default)]
     added: usize,
+    #[serde(default)]
     liked: usize,
+    #[serde(default)]
     reviewed: bool,
 }
 
@@ -396,25 +401,42 @@ impl Transfer {
     }
 
     /// Record a review decision for the current doubt.
-    pub fn decide(&self, decision: Decision) {
+    pub fn decide(&self, doubt: usize, decision: Decision) {
         let mut guard = self.job.lock().unwrap();
         let Some(job) = guard.as_mut() else { return };
-        if let Some(i) = job.current_doubt() {
-            job.doubts[i].decision = Some(decision);
+        if let Some(d) = job.doubts.get_mut(doubt) {
+            d.decision = Some(decision);
             if job.current_doubt().is_none() {
                 self.review_done.notify_one();
             }
         }
     }
 
-    /// Step back to the previous song in the review.
-    pub fn undo_decision(&self) {
-        let mut guard = self.job.lock().unwrap();
-        let Some(job) = guard.as_mut() else { return };
-        let at = job.current_doubt().unwrap_or(job.doubts.len());
-        if at > 0 {
-            job.doubts[at - 1].decision = None;
-        }
+    /// Open a song that matched for a change: it joins the review (its current match is
+    /// kept unless another is picked) and its alternatives are searched. Returns its place
+    /// in the review.
+    pub fn edit_match(self: &Arc<Self>, rt: &crate::backend::Backend, index: usize) -> Option<usize> {
+        let track = {
+            let mut guard = self.job.lock().unwrap();
+            let job = guard.as_mut()?;
+            if let Some(k) = job.doubts.iter().position(|d| d.index == index) {
+                return Some(k);
+            }
+            job.doubts.push(Doubt { index, candidates: Vec::new(), videos: Vec::new(), decision: None, loading: true });
+            job.tracks.get(index)?.clone()
+        };
+        let (this, api) = (self.clone(), rt.api());
+        rt.spawn(async move {
+            let found = candidates(&api, &track).await.unwrap_or_default();
+            if let Some(job) = this.job.lock().unwrap().as_mut()
+                && let Some(d) = job.doubts.iter_mut().find(|d| d.index == index)
+            {
+                (d.candidates, d.videos) = found.into_iter().unzip();
+                d.loading = false;
+            }
+            this.wake();
+        });
+        Some(self.job.lock().unwrap().as_ref()?.doubts.len() - 1)
     }
 
     /// Keep the current picks for every song not reviewed yet.
@@ -645,7 +667,7 @@ impl Transfer {
                     continue;
                 }
                 let (candidates, videos) = cands.into_iter().unzip();
-                j.doubts.push(Doubt { index: i, candidates, videos, decision: None });
+                j.doubts.push(Doubt { index: i, candidates, videos, decision: None, loading: false });
             }
         });
         self.save();

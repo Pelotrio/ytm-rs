@@ -1475,6 +1475,18 @@ fn share_url(target: &Target) -> String {
 
 impl App {
     fn draw_dialog(&mut self, ctx: &egui::Context) {
+        if let Some(Dialog::ConfirmDelete { id, title }) = &self.dialog {
+            let (id, title) = (id.clone(), title.clone());
+            match confirm_delete(ctx, &title, self.accent_color()) {
+                Some(true) => {
+                    self.backend.request(Req::DeletePlaylist(id));
+                    self.dialog = None;
+                }
+                Some(false) => self.dialog = None,
+                None => {}
+            }
+            return;
+        }
         let Some(mut dialog) = self.dialog.take() else { return };
         let mut open = true;
         let mut done = false;
@@ -1531,20 +1543,48 @@ impl App {
                         done = true;
                     }
                 }
-                Dialog::ConfirmDelete { id, title } => {
-                    ui.label(format!("Delete \"{title}\"?"));
-                    ui.horizontal(|ui| {
-                        if ui.button("Cancel").clicked() { done = true; }
-                        if ui.button("Delete playlist").clicked() {
-                            self.backend.request(Req::DeletePlaylist(id.clone()));
-                            done = true;
-                        }
-                    });
-                }
+                Dialog::ConfirmDelete { .. } => unreachable!("drawn by confirm_delete"),
             }
         });
         if open && !done { self.dialog = Some(dialog); }
     }
+}
+
+/// "Delete playlist?" as a modal card: Some(true) delete, Some(false) cancel, None still open.
+fn confirm_delete(ctx: &egui::Context, title: &str, _accent: Color32) -> Option<bool> {
+    let mut answer = None;
+    let modal = egui::Modal::new("confirm-delete".into()).frame(notes::surface()).backdrop_color(theme::shade(0.55)).show(ctx, |ui| {
+        ui.set_width(400.0_f32.min(ctx.content_rect().width() - 48.0));
+        egui::Frame::new().inner_margin(egui::Margin { left: 26, right: 26, top: 24, bottom: 22 }).show(ui, |ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+            ui.label(egui::RichText::new("Delete playlist?").font(theme::bold(22.0)).color(theme::TEXT));
+            ui.add_space(10.0);
+            let body = format!("\u{201c}{title}\u{201d} will be removed from your YouTube Music library. This can't be undone.");
+            ui.add(egui::Label::new(egui::RichText::new(body).font(theme::regular(14.0)).color(theme::text_dim())).wrap());
+            ui.add_space(22.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                // Destructive action in red, white text.
+                let label = "Delete";
+                let g = ui.painter().layout_no_wrap(label.to_owned(), theme::semibold(14.0), Color32::WHITE);
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(g.size().x + 40.0, 38.0), egui::Sense::click());
+                let resp = widgets::named(resp, "Delete playlist").on_hover_cursor(egui::CursorIcon::PointingHand);
+                let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
+                ui.painter().rect_filled(rect, 19.0, theme::lerp_color(Color32::from_rgb(214, 40, 57), Color32::from_rgb(236, 56, 72), h));
+                ui.painter().galley(rect.center() - g.size() / 2.0, g, Color32::WHITE);
+                if resp.clicked() {
+                    answer = Some(true);
+                }
+                if widgets::pill(ui, "Cancel", None, false).clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+    });
+    if answer.is_none() && (modal.should_close() || ctx.input(|i| i.key_pressed(egui::Key::Escape))) {
+        answer = Some(false);
+    }
+    answer
 }
 
 impl eframe::App for App {
