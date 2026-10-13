@@ -26,7 +26,7 @@ use crate::audio::{AudioCmd, AudioEvent, AudioHandle};
 use crate::backend::{self, ArtistPage, Backend, Collection, Explore, Library, Req, Resp, SearchResults};
 use crate::lyrics::{Lyrics, LyricsSet};
 use crate::media::Media;
-use crate::model::{Chip, Shelf, ShelfKind, Target, Track};
+use crate::model::{Card, Chip, Shelf, ShelfKind, Target, Track};
 use crate::shader::Background;
 use crate::theme;
 
@@ -169,6 +169,8 @@ pub struct App {
     liked: HashSet<String>,
     account_name: Option<String>,
     account_avatar: Option<String>,
+    /// Last launch's playlists, shown in the sidebar until the library arrives.
+    sidebar_cache: Option<Vec<Card>>,
 
     // playback
     queue: Vec<Track>,
@@ -344,6 +346,7 @@ impl App {
             liked: HashSet::new(),
             account_name: None,
             account_avatar: None,
+            sidebar_cache: None,
             queue: Vec::new(),
             index: None,
             generation: 0,
@@ -463,6 +466,15 @@ impl App {
             app.np_open = true;
         }
         app.jam.name = get("jam_name").unwrap_or_default();
+        // Last launch's name, picture and playlists, so they show at once; the account
+        // menu and the library replace them when they arrive.
+        if app.logged_in
+            && let Some(c) = get("account_cache").and_then(|j| serde_json::from_str::<AccountCache>(&j).ok())
+        {
+            app.account_name = c.name;
+            app.account_avatar = c.avatar;
+            app.sidebar_cache = Some(c.playlists).filter(|p| !p.is_empty());
+        }
         // Dev hook: YTM_QUEUE opens the queue drawer.
         if std::env::var_os("YTM_QUEUE").is_some() {
             app.queue_open = true;
@@ -1356,6 +1368,7 @@ impl App {
                 self.logged_in = v;
                 self.account_name = None;
                 self.account_avatar = None;
+                self.sidebar_cache = None;
                 self.library = None;
                 self.history = None;
                 self.uploads = None;
@@ -1860,6 +1873,12 @@ impl eframe::App for App {
         let b = |v: bool| if v { "1" } else { "0" }.to_owned();
         storage.set_string("autoplay", b(self.autoplay));
         storage.set_string("jam_name", self.jam.name.clone());
+        let cache = self.logged_in.then(|| AccountCache {
+            name: self.account_name.clone(),
+            avatar: self.account_avatar.clone(),
+            playlists: self.library.as_ref().map(|l| l.playlists.clone()).or_else(|| self.sidebar_cache.clone()).unwrap_or_default(),
+        });
+        storage.set_string("account_cache", cache.and_then(|c| serde_json::to_string(&c).ok()).unwrap_or_default());
         storage.set_string("normalize", b(self.normalize));
         storage.set_string("high_quality", b(self.high_quality));
         storage.set_string("auto_update", b(self.auto_update));
@@ -1914,6 +1933,14 @@ impl eframe::App for App {
 }
 
 const SESSION_KEY: &str = "session";
+
+/// What the sidebar and the account button show, kept for the next launch.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AccountCache {
+    name: Option<String>,
+    avatar: Option<String>,
+    playlists: Vec<Card>,
+}
 
 /// What's saved between launches so the player picks up where it left off.
 #[derive(serde::Serialize, serde::Deserialize)]

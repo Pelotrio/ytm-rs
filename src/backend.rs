@@ -261,7 +261,12 @@ impl Backend {
             _ => None,
         };
         let this = self.clone();
-        let task = self.rt.spawn(async move { this.handle(req).await });
+        let t0 = std::time::Instant::now();
+        let task = self.rt.spawn(async move {
+            let r = this.handle(req).await;
+            log::debug!("{what}: done in {:?}", t0.elapsed());
+            r
+        });
         let this = self.clone();
         self.rt.spawn(async move {
             // A panic in a handler (or a library it calls) fails just this request,

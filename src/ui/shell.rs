@@ -264,7 +264,8 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         }
         let bars = if t > 0.0 { egui::scroll_area::ScrollBarVisibility::AlwaysHidden } else { egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded };
         egui::ScrollArea::vertical().id_salt("sidebar-pl").auto_shrink(false).scroll_bar_visibility(bars).show(ui, |ui| {
-            let Some(lib) = &app.library else {
+            // Last launch's list until the library arrives.
+            let Some(playlists) = app.library.as_ref().map(|l| &l.playlists).or(app.sidebar_cache.as_ref()) else {
                 // The spinner animates every frame: give up on a request that never answered.
                 if app.library_requested.elapsed() < std::time::Duration::from_secs(20) {
                     ui.horizontal(|ui| {
@@ -281,7 +282,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 }
                 return;
             };
-            for c in &lib.playlists {
+            for c in playlists {
                 let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), Sense::click());
                 if !ui.is_rect_visible(rect) {
                     continue;

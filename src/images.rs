@@ -14,6 +14,11 @@ use crate::backend::Backend;
 
 /// A failed download is tried again when it's next needed after this long.
 const RETRY_AFTER: Duration = Duration::from_secs(30);
+/// Thumbnails up to this size are also kept on disk, so the next launch shows them at
+/// once (the account picture, playlist covers, the home feed).
+const DISK_MAX_FILE: usize = 256 * 1024;
+/// The disk cache is trimmed to this, oldest first, at launch.
+const DISK_BUDGET: u64 = 64 * 1024 * 1024;
 
 enum Entry {
     Pending,
@@ -28,11 +33,45 @@ fn is_http(uri: &str) -> bool {
 pub struct HttpImages {
     backend: Backend,
     cache: Arc<Mutex<HashMap<String, Entry>>>,
+    dir: std::path::PathBuf,
 }
 
 impl HttpImages {
     pub fn new(backend: Backend) -> Self {
-        Self { backend, cache: Default::default() }
+        let dir = backend.data_dir().join("thumbs");
+        let _ = std::fs::create_dir_all(&dir);
+        trim(&dir);
+        Self { backend, cache: Default::default(), dir }
+    }
+}
+
+/// Where `uri` is kept on disk. Thumbnail URLs change when the picture does.
+fn disk_path(dir: &std::path::Path, uri: &str) -> std::path::PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    uri.hash(&mut h);
+    dir.join(format!("{:016x}", h.finish()))
+}
+
+/// Keep the disk cache under its budget, dropping the least recently used files.
+fn trim(dir: &std::path::Path) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut files: Vec<_> = rd
+        .flatten()
+        .filter_map(|f| {
+            let m = f.metadata().ok()?;
+            Some((m.modified().ok()?, m.len(), f.path()))
+        })
+        .collect();
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    files.sort();
+    for (_, len, path) in files {
+        if total <= DISK_BUDGET {
+            break;
+        }
+        if std::fs::remove_file(path).is_ok() {
+            total -= len;
+        }
     }
 }
 
@@ -63,7 +102,17 @@ impl BytesLoader for HttpImages {
 
         let (http, cache, uri, backend) =
             (self.backend.http().clone(), self.cache.clone(), uri.to_owned(), self.backend.clone());
+        let file = disk_path(&self.dir, &uri);
         self.backend.spawn(async move {
+            if let Ok(bytes) = std::fs::read(&file) {
+                // Touch it, so trimming drops pictures that aren't used any more.
+                let _ = std::fs::File::options().write(true).open(&file).and_then(|f| f.set_modified(std::time::SystemTime::now()));
+                if let Some(slot) = cache.lock().unwrap().get_mut(&uri) {
+                    *slot = Entry::Ready(Arc::from(bytes), None);
+                }
+                backend.wake();
+                return;
+            }
             let res = async {
                 let resp = http.get(&uri).send().await?.error_for_status()?;
                 let mime = resp
@@ -75,7 +124,12 @@ impl BytesLoader for HttpImages {
             }
             .await;
             let entry = match res {
-                Ok((bytes, mime)) => Entry::Ready(Arc::from(&bytes[..]), mime),
+                Ok((bytes, mime)) => {
+                    if bytes.len() <= DISK_MAX_FILE {
+                        let _ = std::fs::write(&file, &bytes);
+                    }
+                    Entry::Ready(Arc::from(&bytes[..]), mime)
+                }
                 Err(e) => Entry::Failed(e.to_string(), Instant::now()),
             };
             // Only store if not forgotten while in flight.

@@ -78,7 +78,7 @@ pub fn sized(url: &str, px: u32) -> String {
 }
 
 /// What a card or shelf item opens.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Target {
     Song(Track),
     Album(String),
@@ -86,7 +86,7 @@ pub enum Target {
     Artist(String),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Card {
     pub title: String,
     pub subtitle: String,
