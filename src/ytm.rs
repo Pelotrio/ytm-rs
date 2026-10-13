@@ -414,6 +414,26 @@ pub async fn saved_albums(api: &Api) -> anyhow::Result<Vec<Card>> {
     saved(api, "4qmFsgIoEhRGRW11c2ljX2xpa2VkX2FsYnVtcxoQZ2dNR0tnUUlBQkFCb0FZQg%3D%3D").await
 }
 
+/// The signed-in account's name and photo, as its account menu shows them (for a brand
+/// account, the channel's).
+pub async fn account(api: &Api) -> anyhow::Result<(Option<String>, Option<String>)> {
+    let v = api.call_signed_in("account/account_menu", json!({})).await?;
+    let h = find_key(&v, "activeAccountHeaderRenderer").ok_or_else(|| anyhow::anyhow!("no account header"))?;
+    let name = text(&h["accountName"]);
+    let photo = arr(&h["accountPhoto"]["thumbnails"]).last().and_then(|t| t["url"].as_str()).map(str::to_owned);
+    log::info!("account menu: name {}, photo {}", name.is_some(), photo.is_some());
+    Ok((name, photo))
+}
+
+/// The first value under `key`, anywhere in `v`.
+fn find_key<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
+    match v {
+        Value::Object(m) => m.get(key).or_else(|| m.values().find_map(|x| find_key(x, key))),
+        Value::Array(a) => a.iter().find_map(|x| find_key(x, key)),
+        _ => None,
+    }
+}
+
 /// Recently played, newest first, each song once.
 pub async fn history(api: &Api) -> anyhow::Result<Vec<Track>> {
     let v = api.call_signed_in("browse", json!({ "browseId": "FEmusic_history", "params": "oggECgIIAQ%3D%3D" })).await?;

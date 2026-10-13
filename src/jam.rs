@@ -117,9 +117,10 @@ impl Cmd {
 #[derive(Debug)]
 pub enum Event {
     /// Joined (or rejoined after a dropped connection).
-    Welcome { you: String, host: String, control: bool, members: Vec<Member> },
+    Welcome { you: String, host: String, control: bool, queue: bool, members: Vec<Member> },
     Members { host: String, members: Vec<Member> },
-    Control(bool),
+    /// What guests may do: control playback, add songs.
+    Control { on: bool, queue: bool },
     /// The host's state; `Instant` is when (locally) playback was at `state.pos`.
     State(RoomState, Instant),
     Tick(Tick, Instant),
@@ -174,8 +175,9 @@ impl Jam {
         self.send(v);
     }
 
-    pub fn set_control(&self, on: bool) {
-        self.send(serde_json::json!({ "t": "control", "on": on }));
+    /// Host: let guests control playback (`on`) and add songs (`queue`).
+    pub fn set_control(&self, on: bool, queue: bool) {
+        self.send(serde_json::json!({ "t": "control", "on": on, "queue": queue }));
     }
 
     pub fn request(&self, cmd: Cmd) {
@@ -201,9 +203,23 @@ impl Drop for Jam {
 #[derive(Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 enum In {
-    Welcome { you: String, host: String, control: bool, members: Vec<Member>, state: Option<Stamped<RoomState>>, tick: Option<Stamped<Tick>>, now: i64 },
+    Welcome {
+        you: String,
+        host: String,
+        control: bool,
+        #[serde(default = "yes")]
+        queue: bool,
+        members: Vec<Member>,
+        state: Option<Stamped<RoomState>>,
+        tick: Option<Stamped<Tick>>,
+        now: i64,
+    },
     Members { host: String, members: Vec<Member> },
-    Control { on: bool },
+    Control {
+        on: bool,
+        #[serde(default = "yes")]
+        queue: bool,
+    },
     State(Stamped<RoomState>),
     Tick(Stamped<Tick>),
     Req { name: String, cmd: Cmd },
@@ -217,6 +233,10 @@ struct Stamped<T> {
     #[serde(flatten)]
     v: T,
     ts: i64,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn now_ms() -> i64 {
@@ -343,12 +363,12 @@ impl Conn {
                         continue;
                     };
                     match m {
-                        In::Welcome { you, host, control, members, state, tick, now } => {
+                        In::Welcome { you, host, control, queue, members, state, tick, now } => {
                             // A first guess until the pings answer.
                             self.offset.store(now - now_ms(), Ordering::Relaxed);
                             pings_left = 5;
                             self.create = false;
-                            self.emit(Event::Welcome { you, host, control, members });
+                            self.emit(Event::Welcome { you, host, control, queue, members });
                             if let Some(s) = state {
                                 let at = self.local_instant(s.ts);
                                 self.emit(Event::State(s.v, at));
@@ -359,7 +379,7 @@ impl Conn {
                             }
                         }
                         In::Members { host, members } => self.emit(Event::Members { host, members }),
-                        In::Control { on } => self.emit(Event::Control(on)),
+                        In::Control { on, queue } => self.emit(Event::Control { on, queue }),
                         In::State(s) => {
                             let at = self.local_instant(s.ts);
                             self.emit(Event::State(s.v, at));
@@ -381,7 +401,7 @@ impl Conn {
                                 "not_found" => "No jam with that code. Check it and try again".to_owned(),
                                 "taken" => "That jam code is taken, try again".to_owned(),
                                 "full" => "That jam is full".to_owned(),
-                                "denied" => "Only the host can control playback".to_owned(),
+                                "denied" => msg.clone().unwrap_or_else(|| "Only the host can do that".to_owned()),
                                 "rate" => "Slow down a little".to_owned(),
                                 _ => msg.unwrap_or(code.clone()),
                             };

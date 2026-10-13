@@ -302,6 +302,7 @@ impl App {
         backend.request(Req::Home(None));
         if logged_in {
             backend.request(Req::Library);
+            backend.request(Req::Account);
             backend.warm_signed_in();
         }
         let transfer_handle = {
@@ -1161,11 +1162,9 @@ impl App {
     fn on_resp(&mut self, r: Resp, now: f64) {
         match r {
             Resp::Home(page) => {
-                if self.account_name.is_none() {
-                    self.account_name = page.shelves.iter().find_map(|s| s.strapline.clone());
-                }
-                if let Some(avatar) = page.shelves.iter().find(|s| s.title == "Listen again").and_then(|s| s.strap_thumb.clone()) {
-                    self.account_avatar = Some(avatar);
+                // Until the account menu answers (Req::Account).
+                if self.account_avatar.is_none() {
+                    self.account_avatar = page.shelves.iter().find(|s| s.title == "Listen again").and_then(|s| s.strap_thumb.clone());
                 }
                 let mut chips = page.chips;
                 // The feed marks the active mood itself; keep the bar when it doesn't send chips.
@@ -1349,6 +1348,10 @@ impl App {
                     }
                 }
             }
+            Resp::Account { name, photo } => {
+                self.account_name = name.or(self.account_name.take());
+                self.account_avatar = photo.or(self.account_avatar.take());
+            }
             Resp::LoggedIn(v) => {
                 self.logged_in = v;
                 self.account_name = None;
@@ -1361,6 +1364,7 @@ impl App {
                 self.backend.request(Req::Home(None));
                 if v {
                     self.request_library();
+                    self.backend.request(Req::Account);
                 } else {
                     self.liked.clear();
                 }

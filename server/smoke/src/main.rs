@@ -151,6 +151,7 @@ async fn main() -> R {
         let w = expect(&mut a, "welcome").await?;
         check(w["you"].is_string() && w["you"] == w["host"], "creator is host")?;
         check(w["control"] == false, "control starts off")?;
+        check(w["queue"] == true, "guests may add songs by default")?;
         check(w["members"] == json!([{ "id": w["you"], "name": "Alice" }]), &format!("members/name cleaned: {w}"))?;
         check(w["state"].is_null() && w["tick"].is_null(), "no state yet")?;
         check(w["now"].is_number(), "now")?;
@@ -238,6 +239,25 @@ async fn main() -> R {
         send(&mut c, json!({ "t": "req", "cmd": { "k": "seek", "pos": 9000 } })).await?;
         let r = expect(&mut a, "req").await?;
         check(r["name"] == "Carol" && r["cmd"]["pos"] == 9000, &r.to_string())
+    }.await);
+
+    step!("queue off: guest add denied, control still on", async {
+        send(&mut a, json!({ "t": "control", "on": true, "queue": false })).await?;
+        for ws in [&mut a, &mut b, &mut c] {
+            let m = expect(ws, "control").await?;
+            check(m["on"] == true && m["queue"] == false, &m.to_string())?;
+        }
+        send(&mut b, json!({ "t": "req", "cmd": { "k": "add", "track": { "videoId": "ddd" } } })).await?;
+        expect_error(&mut b, "denied").await?;
+        expect_none(&mut a, "req").await?;
+        send(&mut b, json!({ "t": "req", "cmd": { "k": "skip" } })).await?;
+        expect(&mut a, "req").await?;
+        send(&mut a, json!({ "t": "control", "on": true, "queue": true })).await?;
+        for ws in [&mut a, &mut b, &mut c] {
+            let m = expect(ws, "control").await?;
+            check(m["queue"] == true, &m.to_string())?;
+        }
+        R::Ok(())
     }.await);
 
     step!("JSON ping -> pong", async {

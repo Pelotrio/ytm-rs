@@ -34,6 +34,8 @@ pub struct Session {
     you: String,
     host: String,
     control: bool,
+    /// Guests may add songs.
+    queue: bool,
     members: Vec<Member>,
     /// Who added which song (video ID → name), for songs guests added.
     pub by: HashMap<String, String>,
@@ -94,7 +96,7 @@ fn my_name(app: &App) -> String {
 fn fresh(app: &mut App, created: bool) {
     let code_input = std::mem::take(&mut app.jam.code_input);
     let name = std::mem::take(&mut app.jam.name);
-    app.jam = Session { created, code_input, name, load_ms: 800, ..Default::default() };
+    app.jam = Session { created, code_input, name, queue: true, load_ms: 800, ..Default::default() };
 }
 
 pub fn start(app: &mut App) {
@@ -164,8 +166,10 @@ pub fn dev_script(app: &mut App, ctx: &egui::Context, now: f64) {
             "skip" => app.next(),
             "prev" => app.prev(),
             "toggle" => app.toggle(),
-            "control=on" => set_control(app, true),
-            "control=off" => set_control(app, false),
+            "control=on" => set_control(app, true, app.jam.queue),
+            "control=off" => set_control(app, false, app.jam.queue),
+            "queue=on" => set_control(app, app.jam.control, true),
+            "queue=off" => set_control(app, app.jam.control, false),
             a if a.starts_with("add=") => {
                 let track = crate::model::Track { id: a[4..].to_owned(), title: "Test song".into(), artists: vec![], album: None, duration: None, thumbs: vec![], track_nr: None, plays: None };
                 app.apply(Action::Enqueue(track));
@@ -209,7 +213,7 @@ pub fn tick(app: &mut App) {
 fn on_event(app: &mut App, e: Event) {
     let s = &mut app.jam;
     match e {
-        Event::Welcome { you, host, control, members } => {
+        Event::Welcome { you, host, control, queue, members } => {
             let rejoin = s.welcomed;
             s.welcomed = true;
             s.reconnecting = false;
@@ -217,6 +221,7 @@ fn on_event(app: &mut App, e: Event) {
             s.you = you;
             s.host = host;
             s.control = control;
+            s.queue = queue;
             s.members = members;
             // Send our state straight away when hosting.
             s.sent_sig = 0;
@@ -235,7 +240,10 @@ fn on_event(app: &mut App, e: Event) {
                 app.toast("You're the host now");
             }
         }
-        Event::Control(on) => s.control = on,
+        Event::Control { on, queue } => {
+            s.control = on;
+            s.queue = queue;
+        }
         Event::State(state, at) => {
             if s.is_host() {
                 return;
@@ -374,11 +382,12 @@ fn host_request(app: &mut App, name: String, cmd: Cmd) {
     }
 }
 
-/// Host: let everyone control playback, or not.
-fn set_control(app: &mut App, on: bool) {
+/// Host: what guests may do (control playback, add songs).
+fn set_control(app: &mut App, on: bool, queue: bool) {
     app.jam.control = on;
+    app.jam.queue = queue;
     if let Some(c) = &app.jam.conn {
-        c.set_control(on);
+        c.set_control(on, queue);
     }
 }
 
@@ -471,6 +480,10 @@ fn guest_follow(app: &mut App) {
 pub fn request(app: &mut App, cmd: Cmd) {
     if cmd.is_control() && !app.jam.control {
         app.toast("Only the host can control playback");
+        return;
+    }
+    if !cmd.is_control() && !app.jam.queue {
+        app.toast("The host turned off adding songs");
         return;
     }
     match &cmd {
@@ -638,14 +651,25 @@ fn room(app: &mut App, ui: &mut Ui) {
     section_label(ui, "Playback", None);
     settings_card(ui, |ui| {
         if host {
-            let mut on = app.jam.control;
-            setting_row(ui, "Let everyone control playback", Some("Guests can pause, skip, seek and jump in the queue. Anyone can always add songs."), |ui| {
-                if toggle(ui, &mut on, "Let everyone control playback").changed() {
-                    set_control(app, on);
+            let (mut queue, mut on) = (app.jam.queue, app.jam.control);
+            setting_row(ui, "Guests can add songs", Some("Songs they play go into the queue, right after the current one."), |ui| {
+                if toggle(ui, &mut queue, "Guests can add songs").changed() {
+                    set_control(app, on, queue);
+                }
+            });
+            divider(ui);
+            setting_row(ui, "Guests can control playback", Some("Play and pause, skip, go back, seek, and jump to a song in the queue."), |ui| {
+                if toggle(ui, &mut on, "Guests can control playback").changed() {
+                    set_control(app, on, queue);
                 }
             });
         } else {
-            let desc = if app.jam.control { "Everyone can control playback" } else { "The host controls playback. Songs you play are added to the queue." };
+            let desc = match (app.jam.queue, app.jam.control) {
+                (true, true) => "You can add songs and control playback.",
+                (true, false) => "Songs you play are added to the queue. The host controls playback.",
+                (false, true) => "You can control playback. The host turned off adding songs.",
+                (false, false) => "The host controls the queue and playback.",
+            };
             setting_row(ui, "Following the host", Some(desc), |_| {});
         }
         divider(ui);

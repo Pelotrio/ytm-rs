@@ -84,6 +84,12 @@ impl Solver {
         Ok(p)
     }
 
+    /// A player has been prepared, so solving won't wait for a download and preprocess
+    /// (an expired one only re-checks the version; a new version is rare).
+    pub fn ready(&self) -> bool {
+        self.player.try_lock().is_ok_and(|p| p.is_some())
+    }
+
     /// Prepare the current player and load it into the worker ahead of the first song.
     pub async fn warm(&self, http: &reqwest::Client) -> anyhow::Result<()> {
         let player = self.player(http).await?;

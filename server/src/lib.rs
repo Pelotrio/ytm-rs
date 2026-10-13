@@ -39,6 +39,9 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 struct Meta {
     host: String,
     control: bool,
+    /// Guests may not add songs (they may by default).
+    #[serde(default)]
+    no_queue: bool,
     /// Join counter, so "earliest joined" is unambiguous.
     seq: u32,
     #[serde(default)]
@@ -133,7 +136,7 @@ impl DurableObject for Room {
         list.push(json!({ "id": me.id, "name": me.name }));
         let stored = |s: Option<String>| s.and_then(|s| serde_json::from_str::<Value>(&s).ok());
         send(&ws, &json!({
-            "t": "welcome", "you": me.id, "host": meta.host, "control": meta.control,
+            "t": "welcome", "you": me.id, "host": meta.host, "control": meta.control, "queue": !meta.no_queue,
             "members": list, "now": now as u64,
             "state": stored(storage.get("state").await?),
             "tick": stored(storage.get("tick").await?),
@@ -209,8 +212,12 @@ impl DurableObject for Room {
                     return error(&ws, "bad", "control needs on: bool");
                 };
                 meta.control = on;
+                // Optional: older clients only send `on`.
+                if let Some(queue) = m.get("queue").and_then(Value::as_bool) {
+                    meta.no_queue = !queue;
+                }
                 storage.put("meta", &meta).await?;
-                self.broadcast(&json!({ "t": "control", "on": on }), None);
+                self.broadcast(&json!({ "t": "control", "on": on, "queue": !meta.no_queue }), None);
             }
             "end" => {
                 storage.delete_alarm().await?;
@@ -229,7 +236,10 @@ impl DurableObject for Room {
                 };
                 let gated = matches!(kind, "toggle" | "skip" | "prev" | "seek" | "jump");
                 if gated && !meta.control && !is_host {
-                    return error(&ws, "denied", "the host has guest control off");
+                    return error(&ws, "denied", "Only the host can control playback");
+                }
+                if !gated && meta.no_queue && !is_host {
+                    return error(&ws, "denied", "The host turned off adding songs");
                 }
                 let fwd = json!({ "t": "req", "from": me.id, "name": me.name, "cmd": cmd });
                 if let Some((host, _)) = self.members(None).iter().find(|(_, x)| x.id == meta.host) {

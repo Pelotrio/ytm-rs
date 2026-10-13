@@ -33,6 +33,8 @@ pub enum Req {
     History,
     /// Songs the account uploaded to YouTube Music.
     Uploads,
+    /// The signed-in account's name and photo.
+    Account,
     /// Upload audio files to the account's library.
     Upload(Vec<PathBuf>),
     Lyrics(Track),
@@ -73,6 +75,7 @@ impl Req {
             Req::Library => "Loading library",
             Req::History => "Loading history",
             Req::Uploads => "Loading uploads",
+            Req::Account => "Account",
             Req::Upload(_) => "Upload",
             Req::Lyrics(_) => "Lyrics",
             Req::LyricsExtras { .. } => "Translation",
@@ -95,7 +98,7 @@ impl Req {
 
     /// Background requests fail quietly (logged, no toast).
     fn quiet(&self) -> bool {
-        matches!(self, Req::Suggest(_) | Req::Art { .. } | Req::Prefetch(_) | Req::HomeMore(_) | Req::Lyrics(_) | Req::LyricsExtras { .. })
+        matches!(self, Req::Suggest(_) | Req::Account | Req::Art { .. } | Req::Prefetch(_) | Req::HomeMore(_) | Req::Lyrics(_) | Req::LyricsExtras { .. })
     }
 }
 
@@ -162,6 +165,7 @@ pub enum Resp {
     Library(Library),
     History(Vec<Track>),
     Uploads(Vec<Track>),
+    Account { name: Option<String>, photo: Option<String> },
     /// Upload finished: how many files went up, and which failed.
     Uploaded { done: usize, failed: Vec<String> },
     /// Every source's lyrics for a song (empty when nobody has them).
@@ -335,6 +339,10 @@ impl Backend {
                 }
                 Req::History => Resp::History(ytm::history(api).await?),
                 Req::Uploads => Resp::Uploads(ytm::uploads(api).await?),
+                Req::Account => {
+                    let (name, photo) = ytm::account(api).await?;
+                    Resp::Account { name, photo }
+                }
                 Req::Upload(files) => {
                     let session = api.account().ok_or_else(|| anyhow::anyhow!("sign in to upload music"))?;
                     let (mut done, mut failed) = (0, Vec::new());
@@ -583,7 +591,15 @@ impl Backend {
 
     /// Find a stream URL, trying the fastest source that can play the song.
     async fn resolve(&self, video_id: &str) -> anyhow::Result<(Source, ResolvedStream)> {
+        // High quality needs the signed-in player's solver. Until it's prepared (a new
+        // install, a new player version: ~5 s or more), play standard quality at once.
+        let solver_ready = self.jsc.ready();
+        if self.hq.load(Ordering::Relaxed) && !solver_ready && self.api.account().is_some() {
+            log::info!("{video_id}: solver not ready yet, standard quality for now");
+            self.warm_signed_in();
+        }
         if self.hq.load(Ordering::Relaxed)
+            && solver_ready
             && let Some(session) = self.api.account()
             && self.is_premium(&session).await
         {
