@@ -411,6 +411,22 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
     let row = Rect::from_min_max(pos2(full.left() + 16.0, full.top() + 6.0), pos2(full.right() - 16.0, full.bottom()));
     let cy = row.center().y;
 
+    // Narrow windows give way in steps so nothing overlaps: the transport tightens, the
+    // volume slider folds into its icon (hover to show it), then the time goes (the
+    // progress line still shows it on hover). The title shortens to keep clear on the left.
+    let time_g = (total > 0.0).then(|| {
+        let txt = format!("{} / {}", fmt_time(pos as u32), fmt_time(total as u32));
+        widgets::galley(ui, &txt, theme::regular(13.0), theme::text_dim(), 200.0)
+    });
+    let time_w = time_g.as_ref().map_or(0.0, |g| g.size().x);
+    // Room between the repeat button's edge (plus a gap) and the lyrics/queue/expand buttons.
+    // The volume with its slider takes 140 px plus the time; the icon alone, 36.
+    let free = |half: f32| row.right() - 120.0 - (row.center().x + half + 12.0);
+    let tight = free(141.0) < 140.0 + time_w;
+    let half = if tight { 125.0 } else { 141.0 };
+    let compact_vol = free(half) < 140.0 + time_w;
+    let show_time = free(half) >= if compact_vol { 36.0 } else { 140.0 } + time_w;
+
     // Left: now playing
     if let Some(t) = &track {
         let art = Rect::from_center_size(pos2(row.left() + 30.0, cy), Vec2::splat(56.0));
@@ -426,7 +442,9 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
             app.actions.push(Action::OpenNowPlaying(true));
         }
         let x = art.right() + 14.0;
-        let w = (row.width() * 0.3 - 110.0).max(80.0);
+        // Title, artists and the heart (about 48 px) end before the shuffle button.
+        let room = row.center().x - half - 18.0 - 14.0 - 48.0 - x;
+        let w = (row.width() * 0.3 - 110.0).max(80.0).min(room).max(40.0);
         let tr = text_at(ui, pos2(x, cy - 19.0), &t.title, theme::semibold(15.0), theme::TEXT, w);
         let tresp = ui.interact(tr, ui.id().with("np-title"), Sense::click());
         if named(tresp, &t.title).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
@@ -482,10 +500,11 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
         }
         resp.clicked()
     };
-    if ctl(ui, -124.0, icon::SHUFFLE, "Shuffle up next", false, 18.0) {
+    let (outer, inner) = if tight { (108.0, 56.0) } else { (124.0, 64.0) };
+    if ctl(ui, -outer, icon::SHUFFLE, "Shuffle up next", false, 18.0) {
         app.shuffle_upcoming();
     }
-    if ctl(ui, -64.0, icon::SKIP_BACK, "Previous", false, 22.0) {
+    if ctl(ui, -inner, icon::SKIP_BACK, "Previous", false, 22.0) {
         app.prev();
     }
     let (rep_icon, rep_on) = match app.repeat {
@@ -493,10 +512,10 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
         Repeat::All => (icon::REPEAT, true),
         Repeat::One => (icon::REPEAT_1, true),
     };
-    if ctl(ui, 64.0, icon::SKIP_FORWARD, "Next", false, 22.0) {
+    if ctl(ui, inner, icon::SKIP_FORWARD, "Next", false, 22.0) {
         app.next();
     }
-    if ctl(ui, 124.0, rep_icon, "Repeat", rep_on, 18.0) {
+    if ctl(ui, outer, rep_icon, "Repeat", rep_on, 18.0) {
         app.repeat = match app.repeat {
             Repeat::Off => Repeat::All,
             Repeat::All => Repeat::One,
@@ -559,12 +578,65 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
             app.actions.push(Action::OpenNowPlaying(true));
         }
     }
-    // Volume
+    // Volume: a slider beside its icon, or in a narrow window the icon alone with the
+    // slider in a small popup above it while the pointer is over either.
     let vol = app.audio.volume();
-    let slider = Rect::from_min_size(pos2(rx - 96.0, cy - 10.0), vec2(90.0, 20.0));
-    let vresp = ui.interact(slider, ui.id().with("vol"), Sense::click_and_drag());
+    let vi = if compact_vol {
+        Rect::from_center_size(pos2(rx - 16.0, cy), Vec2::splat(32.0))
+    } else {
+        let slider = Rect::from_min_size(pos2(rx - 96.0, cy - 10.0), vec2(90.0, 20.0));
+        volume_slider(app, ui, slider, "vol");
+        Rect::from_center_size(pos2(slider.left() - 18.0, cy), Vec2::splat(32.0))
+    };
+    let vglyph = if vol == 0.0 { icon::VOLUME_X } else if vol < 0.5 { icon::VOLUME_1 } else { icon::VOLUME_2 };
+    let mresp = named(ui.interact(vi, ui.id().with("mute"), Sense::click()), "Mute");
+    icon_at(ui, vi.center(), vglyph, 18.0, if mresp.hovered() { theme::TEXT } else { theme::text_dim() });
+    if compact_vol {
+        let pop_id = ui.id().with("vol-pop");
+        let pop = Rect::from_center_size(pos2(vi.center().x, full.top() - 30.0), vec2(140.0, 40.0));
+        // Stays open across the gap between icon and popup, and while dragging.
+        let keep = ui.ctx().pointer_hover_pos().is_some_and(|p| pop.union(vi).expand(4.0).contains(p))
+            || ui.input(|i| i.pointer.any_down());
+        let open = mresp.hovered() || (ui.data(|d| d.get_temp::<bool>(pop_id).unwrap_or(false)) && keep);
+        ui.data_mut(|d| d.insert_temp(pop_id, open));
+        let a = theme::anim_bool(ui.ctx(), pop_id.with("a"), open, 0.12);
+        if a > 0.0 {
+            egui::Area::new(pop_id).order(egui::Order::Foreground).fixed_pos(pop.min).interactable(open).show(ui.ctx(), |ui| {
+                ui.set_opacity(a);
+                let (r, _) = ui.allocate_exact_size(pop.size(), Sense::hover());
+                ui.painter().rect_filled(r, 20.0, Color32::from_rgb(38, 34, 42));
+                ui.painter().rect_stroke(r, 20.0, egui::Stroke::new(1.0, theme::glass(0.08)), egui::StrokeKind::Inside);
+                volume_slider(app, ui, Rect::from_center_size(r.center(), vec2(r.width() - 32.0, 20.0)), "s");
+            });
+        }
+        // Scrolling over the icon still sets the volume.
+        let scroll = if mresp.hovered() { ui.input(|i| i.smooth_scroll_delta.y) } else { 0.0 };
+        if scroll != 0.0 {
+            app.audio.set_volume((vol + scroll / 600.0).clamp(0.0, 1.0));
+        }
+    }
+    if mresp.clicked() {
+        let stash = ui.id().with("unmute");
+        if vol > 0.0 {
+            ui.data_mut(|d| d.insert_temp(stash, vol));
+            app.audio.set_volume(0.0);
+        } else {
+            let v = ui.data(|d| d.get_temp::<f32>(stash)).unwrap_or(0.6);
+            app.audio.set_volume(v);
+        }
+    }
+    if let Some(g) = time_g.filter(|_| show_time) {
+        let gap = if compact_vol { 4.0 } else { 10.0 };
+        ui.painter().galley(pos2(vi.left() - gap - g.size().x, cy - g.size().y / 2.0), g, theme::text_dim());
+    }
+}
+
+/// The volume track: click or drag to set, scroll over it to nudge.
+fn volume_slider(app: &mut App, ui: &mut Ui, slider: Rect, salt: &str) {
+    let vol = app.audio.volume();
+    let vresp = ui.interact(slider, ui.id().with(salt), Sense::click_and_drag());
     vresp.widget_info(|| egui::WidgetInfo::slider(true, vol as f64, "Volume"));
-    let vh = theme::anim_bool(ui.ctx(), "vol-h", vresp.hovered() || vresp.dragged(), 0.15);
+    let vh = theme::anim_bool(ui.ctx(), ui.id().with((salt, "h")), vresp.hovered() || vresp.dragged(), 0.15);
     let track_r = Rect::from_center_size(slider.center(), vec2(slider.width(), 4.0));
     ui.painter().rect_filled(track_r, 2.0, theme::glass(0.15));
     let fill = Rect::from_min_size(track_r.min, vec2(track_r.width() * vol, 4.0));
@@ -580,24 +652,6 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
         if scroll != 0.0 {
             app.audio.set_volume((vol + scroll / 600.0).clamp(0.0, 1.0));
         }
-    }
-    let vglyph = if vol == 0.0 { icon::VOLUME_X } else if vol < 0.5 { icon::VOLUME_1 } else { icon::VOLUME_2 };
-    let vi = Rect::from_center_size(pos2(slider.left() - 18.0, cy), Vec2::splat(32.0));
-    let mresp = named(ui.interact(vi, ui.id().with("mute"), Sense::click()), "Mute");
-    icon_at(ui, vi.center(), vglyph, 18.0, if mresp.hovered() { theme::TEXT } else { theme::text_dim() });
-    if mresp.clicked() {
-        let stash = ui.id().with("unmute");
-        if vol > 0.0 {
-            ui.data_mut(|d| d.insert_temp(stash, vol));
-            app.audio.set_volume(0.0);
-        } else {
-            let v = ui.data(|d| d.get_temp::<f32>(stash)).unwrap_or(0.6);
-            app.audio.set_volume(v);
-        }
-    }
-    if total > 0.0 {
-        let txt = format!("{} / {}", fmt_time(pos as u32), fmt_time(total as u32));
-        ui.painter().text(pos2(vi.left() - 10.0, cy), Align2::RIGHT_CENTER, txt, theme::regular(13.0), theme::text_dim());
     }
 }
 
