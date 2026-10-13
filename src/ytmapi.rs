@@ -117,7 +117,15 @@ impl Api {
             // A refused anonymous request is usually a stale visitor ID or client version.
             Err(e) if account.is_none() && is_retryable(&e) => {
                 log::info!("{endpoint}: {e:#}; retrying with a fresh visitor ID");
-                self.call_once(endpoint, &body, None, true).await
+                match self.call_once(endpoint, &body, None, true).await {
+                    // Refused again: YouTube is throttling for a moment. One last try a bit later.
+                    Err(e) if is_refused(&e) => {
+                        log::info!("{endpoint}: {e:#}; one more try in a moment");
+                        tokio::time::sleep(Duration::from_millis(2500)).await;
+                        self.call_once(endpoint, &body, None, false).await
+                    }
+                    r => r,
+                }
             }
             Err(e) if account.is_some() && is_refused(&e) => self.retry_signed_in(endpoint, &body, account.as_deref(), e).await,
             r => r,
@@ -138,7 +146,15 @@ impl Api {
     async fn retry_signed_in(&self, endpoint: &str, body: &Value, account: Option<&Session>, e: anyhow::Error) -> anyhow::Result<Value> {
         log::info!("{endpoint}: {e:#}; trying again");
         tokio::time::sleep(Duration::from_millis(700)).await;
-        self.call_once(endpoint, body, account, false).await
+        match self.call_once(endpoint, body, account, false).await {
+            // Refused twice: YouTube is throttling for a moment. One last try a bit later.
+            Err(e) if is_refused(&e) => {
+                log::info!("{endpoint}: {e:#}; one more try in a moment");
+                tokio::time::sleep(Duration::from_millis(2500)).await;
+                self.call_once(endpoint, body, account, false).await
+            }
+            r => r,
+        }
     }
 
     async fn call_once(&self, endpoint: &str, body: &Value, account: Option<&Session>, fresh: bool) -> anyhow::Result<Value> {
