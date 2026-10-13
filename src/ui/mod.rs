@@ -237,6 +237,20 @@ pub struct App {
     whats_new: Option<String>,
     /// The user picked "Restart to update": install on exit, then relaunch.
     restart_for_update: bool,
+
+    // window
+    /// Clicking × hides the window to the tray instead of quitting.
+    close_to_tray: bool,
+    /// The tray icon, while the window is hidden.
+    tray: Option<crate::tray::Tray>,
+    /// Closing for real (Quit from the tray, restart to update): don't hide.
+    exiting: bool,
+    /// Minimized, or hidden in the tray: the window's geometry isn't worth saving.
+    window_hidden: bool,
+    /// eframe's saved window geometry ("window") from the last time it was visible.
+    good_window: Option<String>,
+    /// The sidebar is a narrow icon rail.
+    sidebar_collapsed: bool,
     actions: Vec<Action>,
     dialog: Option<Dialog>,
     share_pending: Option<String>,
@@ -329,6 +343,12 @@ impl App {
             high_quality: get("high_quality").is_none_or(|v| v == "1"),
             updater: None,
             auto_update: get("auto_update").is_none_or(|v| v == "1"),
+            close_to_tray: get("close_to_tray").is_some_and(|v| v == "1"),
+            tray: None,
+            exiting: false,
+            window_hidden: false,
+            good_window: get("window"),
+            sidebar_collapsed: get("sidebar_collapsed").is_some_and(|v| v == "1"),
             update_checked: None,
             update_announced: false,
             notes_dialog: None,
@@ -841,7 +861,47 @@ impl App {
     /// Close the app so the downloaded update installs, then relaunch it.
     fn restart_to_update(&mut self, ctx: &egui::Context) {
         self.restart_for_update = true;
+        self.quit(ctx);
+    }
+
+    /// Close the app for real, even with "Close to tray" on.
+    fn quit(&mut self, ctx: &egui::Context) {
+        self.exiting = true;
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// "Close to tray": × hides the window behind a tray icon; the icon brings it
+    /// back or quits. eframe keeps running `logic` while the window is hidden.
+    fn tray_window(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) && self.close_to_tray && !self.exiting {
+            let c = ctx.clone();
+            match crate::tray::Tray::new(move || c.request_repaint()) {
+                Ok(t) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    self.tray = Some(t);
+                }
+                // Without an icon there'd be no way back: just close.
+                Err(e) => log::warn!("tray icon unavailable: {e:#}"),
+            }
+        }
+        if self.tray.is_none() {
+            return;
+        }
+        // The first click decides; the icon goes away with it.
+        match crate::tray::take().into_iter().next() {
+            Some(crate::tray::Cmd::Show) => {
+                self.tray = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            Some(crate::tray::Cmd::Quit) => {
+                self.tray = None;
+                self.quit(ctx);
+            }
+            None => {}
+        }
     }
 
     fn toast(&mut self, msg: impl Into<String>) {
@@ -1494,6 +1554,8 @@ impl eframe::App for App {
             }
         }
         fit_window_to_monitor(ctx);
+        self.tray_window(ctx);
+        self.window_hidden = self.tray.is_some() || ctx.input(|i| i.viewport().minimized == Some(true));
         self.sync_discord();
         self.tick_updates(ctx, now);
         let np = widgets::NowPlaying {
@@ -1514,7 +1576,12 @@ impl eframe::App for App {
         // lyrics ask for every frame while they animate (the karaoke sweep must be
         // smooth). Each egui frame re-lays-out the UI, so frame rate is the main CPU cost.
         let playing = self.playing();
-        if self.np_open && playing {
+        if self.tray.is_some() {
+            // Hidden: nothing to draw, only the player bookkeeping.
+            if playing || self.buffering {
+                ctx.request_repaint_after(Duration::from_millis(250));
+            }
+        } else if self.np_open && playing {
             ctx.request_repaint_after(Duration::from_millis(33));
         } else if playing && self.anim_bg && !self.default_theme && shell::pages_bg_moves(self.look()) {
             ctx.request_repaint_after(Duration::from_millis(66));
@@ -1558,7 +1625,7 @@ impl eframe::App for App {
                 }
                 f
             };
-            egui::Panel::bottom("player")
+            egui::Panel::bottom("player").resizable(false)
                 .exact_size(self.bar_height())
                 .frame(frame)
                 .show_separator_line(false)
@@ -1589,14 +1656,14 @@ impl eframe::App for App {
                     .outer_margin(egui::Margin { left: 10, right: 4, top: 10, bottom: 10 })
                     .inner_margin(egui::Margin::symmetric(12, 14)),
             };
-            egui::Panel::left("nav")
-                .exact_size(236.0)
+            egui::Panel::left("nav").resizable(false)
+                .exact_size(shell::SIDEBAR_W - (shell::SIDEBAR_W - shell::RAIL_W) * shell::sidebar_collapse(self, &ctx))
                 .frame(side_frame)
                 .show_separator_line(false)
                 .show(ui, |ui| shell::sidebar(self, ui));
             let q = theme::anim_bool(&ctx, "queue-drawer", self.queue_open && !self.np_open, 0.25);
             if q > 0.01 {
-                egui::Panel::right("queue")
+                egui::Panel::right("queue").resizable(false)
                     .exact_size(340.0 * q)
                     .frame(egui::Frame::new().fill(theme::shade(0.42)).inner_margin(egui::Margin::symmetric(14, 16)))
                     .show_separator_line(false)
@@ -1672,6 +1739,17 @@ impl eframe::App for App {
         storage.set_string("normalize", b(self.normalize));
         storage.set_string("high_quality", b(self.high_quality));
         storage.set_string("auto_update", b(self.auto_update));
+        // eframe has just saved the window's geometry. Minimized or in the tray that's
+        // 0×0 at -32000, which would reopen as a speck: keep the last real one instead.
+        if self.window_hidden {
+            if let Some(w) = &self.good_window {
+                storage.set_string("window", w.clone());
+            }
+        } else {
+            self.good_window = storage.get_string("window");
+        }
+        storage.set_string("close_to_tray", b(self.close_to_tray));
+        storage.set_string("sidebar_collapsed", b(self.sidebar_collapsed));
         // Pretend versions (dev hook) mustn't decide the real "what's new".
         if std::env::var_os("YTM_UPDATE_AS").is_none() {
             storage.set_string("last_version", crate::update::current_version());
@@ -1808,7 +1886,7 @@ impl App {
         if n >= all.len() {
             // Let the last screenshot land, then quit.
             if now - at > step * all.len() as f64 + 1.5 {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                self.quit(ctx);
             }
         } else if self.theme_id != all[n].id {
             self.theme_id = all[n].id.clone();
@@ -1865,6 +1943,16 @@ fn fit_window_to_monitor(ctx: &egui::Context) {
     let (Some(outer), Some(monitor)) = (outer, monitor) else { return };
     ctx.data_mut(|d| d.insert_temp(done, true));
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, monitor);
+    // A saved size below the minimum (closed while minimized saves a tiny one, which
+    // eframe restores as-is) would open a window too small to see: start over centred.
+    let min = egui::Vec2::from(crate::MIN_SIZE);
+    if maximized != Some(true) && (outer.width() < min.x || outer.height() < min.y) {
+        let size = egui::Vec2::from(crate::DEFAULT_SIZE).min(monitor * 0.9).max(min);
+        log::info!("window {outer:?} is below the minimum size; resetting to {size:?}");
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(((monitor - size) / 2.0).max(egui::Vec2::ZERO).to_pos2()));
+        return;
+    }
     // A little slack for the invisible resize borders Windows adds around the frame.
     if maximized != Some(true) && !screen.expand(12.0).contains_rect(outer) {
         log::info!("window {outer:?} exceeds monitor {monitor:?}; maximizing");

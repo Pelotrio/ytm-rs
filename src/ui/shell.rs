@@ -105,85 +105,168 @@ pub fn background(app: &mut App, ui: &mut Ui, screen: Rect, now: f64, only: Opti
 
 // ------------------------------------------------------------------ sidebar
 
+/// The ☰ button at the top of the sidebar: collapses it to an icon rail and back.
+fn menu_button(app: &mut App, ui: &mut Ui) {
+    let (r, resp) = ui.allocate_exact_size(vec2(40.0, 32.0), Sense::click());
+    let label = if app.sidebar_collapsed { "Expand sidebar" } else { "Collapse sidebar" };
+    let resp = named(resp, label).on_hover_text(label);
+    let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
+    ui.painter().circle_filled(r.center(), 18.0, theme::glass(0.08 * h));
+    let color = theme::lerp_color(theme::text_dim(), theme::TEXT, h);
+    for dy in [-5.5, 0.0, 5.5] {
+        let y = r.center().y + dy;
+        ui.painter().line_segment([pos2(r.center().x - 8.0, y), pos2(r.center().x + 8.0, y)], egui::Stroke::new(1.8, color));
+    }
+    if resp.clicked() {
+        app.sidebar_collapsed = !app.sidebar_collapsed;
+    }
+}
+
+/// How the theme draws nav items.
+#[derive(Clone, Copy)]
+struct NavLook {
+    style: crate::preset::NavStyle,
+    radius: f32,
+    accent: Color32,
+}
+
+impl NavLook {
+    fn of(app: &App) -> Self {
+        Self { style: app.look().app.nav, radius: (app.look().chrome.radius * 0.6).clamp(4.0, 16.0), accent: app.accent_color() }
+    }
+}
+
+/// A nav item's background in the theme's nav style; returns its icon colour.
+/// `h` and `s` are the hover and selected animations (0..1).
+fn nav_bg(ui: &Ui, look: NavLook, rect: Rect, h: f32, s: f32) -> Color32 {
+    use crate::preset::NavStyle;
+    let (nav_r, accent) = (look.radius, look.accent);
+    let icon_fg = theme::lerp_color(theme::text_dim(), theme::TEXT, (h + s).min(1.0));
+    match look.style {
+        NavStyle::Pill => {
+            ui.painter().rect_filled(rect, nav_r, theme::glass(0.05 * h + 0.10 * s));
+            icon_fg
+        }
+        NavStyle::Accent => {
+            ui.painter().rect_filled(rect, nav_r, theme::glass(0.05 * h));
+            ui.painter().rect_filled(rect, nav_r, theme::with_alpha(accent, 0.22 * s));
+            theme::lerp_color(icon_fg, accent, s)
+        }
+        NavStyle::Bar => {
+            ui.painter().rect_filled(rect, nav_r, theme::glass(0.05 * h));
+            let bar = Rect::from_center_size(pos2(rect.left() + 2.0, rect.center().y), vec2(3.0, 20.0 * s));
+            ui.painter().rect_filled(bar, 2.0, accent);
+            icon_fg
+        }
+    }
+}
+
+/// Sidebar width expanded and collapsed to an icon rail (points).
+pub const SIDEBAR_W: f32 = 236.0;
+pub const RAIL_W: f32 = 76.0;
+
+/// How collapsed the sidebar is, 0 (full) to 1 (icon rail), eased over the toggle.
+pub fn sidebar_collapse(app: &App, ctx: &egui::Context) -> f32 {
+    let t = ctx.animate_bool_with_time(egui::Id::new("sidebar-collapse"), app.sidebar_collapsed, 0.28);
+    // Ease in-out: starts and lands gently in both directions.
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// One layout for both states, so collapsing animates: the panel narrows while icons
+/// and covers keep their column (24 pt from the left) and the labels fade and clip.
 pub fn sidebar(app: &mut App, ui: &mut Ui) {
-    // Logo
+    const ICON_X: f32 = 24.0;
+    let t = sidebar_collapse(app, ui.ctx());
+    let collapsed = app.sidebar_collapsed;
+    // Labels fade out over the first two thirds of collapsing (and back in late).
+    let a = ((1.0 - t) * 1.5 - 0.5).clamp(0.0, 1.0);
+    // Content width when expanded: text keeps its truncation while the panel narrows.
+    let full_w = ui.available_width() + (SIDEBAR_W - RAIL_W) * t;
+
+    // Menu button, logo
     ui.horizontal(|ui| {
-        ui.add_space(6.0);
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.add_space(4.0);
+        menu_button(app, ui);
+        ui.add_space(8.0);
+        ui.multiply_opacity(a);
         let (r, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
         ui.painter().circle_filled(r.center(), 16.0, theme::RED);
         ui.painter().circle_stroke(r.center(), 9.5, egui::Stroke::new(1.6, Color32::WHITE));
         widgets::play_triangle(ui, r.center() + vec2(0.8, 0.0), 4.6, Color32::WHITE);
-        if named(resp, "Home").clicked() {
+        if named(resp, "Home").clicked() && !collapsed {
             app.actions.push(Action::Go(Page::Home));
         }
-        ui.add_space(4.0);
+        ui.add_space(8.0);
         ui.label(egui::RichText::new("Music").font(theme::bold(22.0)).color(theme::TEXT));
     });
     ui.add_space(22.0);
 
     let mut go_to: Option<Page> = None;
-    let nav_style = app.look().app.nav;
-    let nav_r = (app.look().chrome.radius * 0.6).clamp(4.0, 16.0);
-    let accent = app.accent_color();
-    let mut nav = |ui: &mut Ui, glyph: char, label: &str, page: Page, selected: bool| {
+    let look = NavLook::of(app);
+    let nav = |ui: &mut Ui, glyph: char, label: &str, page: Page, selected: bool, go_to: &mut Option<Page>| {
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 42.0), Sense::click());
-        let resp = named(resp, label);
+        let mut resp = named(resp, label);
+        if collapsed {
+            resp = resp.on_hover_text(label);
+        }
         let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
         let s = theme::anim_bool(ui.ctx(), resp.id.with("s"), selected, 0.2);
-        use crate::preset::NavStyle;
-        let mut icon_fg = theme::lerp_color(theme::text_dim(), theme::TEXT, (h + s).min(1.0));
-        match nav_style {
-            NavStyle::Pill => {
-                ui.painter().rect_filled(rect, nav_r, theme::glass(0.05 * h + 0.10 * s));
-            }
-            NavStyle::Accent => {
-                ui.painter().rect_filled(rect, nav_r, theme::glass(0.05 * h));
-                ui.painter().rect_filled(rect, nav_r, theme::with_alpha(accent, 0.22 * s));
-                icon_fg = theme::lerp_color(icon_fg, accent, s);
-            }
-            NavStyle::Bar => {
-                ui.painter().rect_filled(rect, nav_r, theme::glass(0.05 * h));
-                let bar = Rect::from_center_size(pos2(rect.left() + 2.0, rect.center().y), vec2(3.0, 20.0 * s));
-                ui.painter().rect_filled(bar, 2.0, accent);
-            }
+        let icon_fg = nav_bg(ui, look, rect, h, s);
+        icon_at(ui, pos2(rect.left() + ICON_X, rect.center().y), glyph, 19.0, icon_fg);
+        if a > 0.0 {
+            let fg = theme::lerp_color(theme::text_dim(), theme::TEXT, (h + s).min(1.0));
+            let font = if selected { theme::semibold(15.0) } else { theme::regular(15.0) };
+            ui.painter().text(pos2(rect.left() + 48.0, rect.center().y), Align2::LEFT_CENTER, label, font, theme::with_alpha(fg, a));
         }
-        let fg = theme::lerp_color(theme::text_dim(), theme::TEXT, (h + s).min(1.0));
-        icon_at(ui, pos2(rect.left() + 22.0, rect.center().y), glyph, 19.0, icon_fg);
-        let font = if selected { theme::semibold(15.0) } else { theme::regular(15.0) };
-        ui.painter().text(pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, label, font, fg);
         if resp.clicked() {
-            go_to = Some(page);
+            *go_to = Some(page);
         }
     };
     let p = app.page.clone();
-    nav(ui, icon::HOUSE, "Home", Page::Home, p == Page::Home);
-    nav(ui, icon::COMPASS, "Explore", Page::Explore, p == Page::Explore);
-    nav(ui, icon::LIBRARY, "Library", Page::Library(LibTab::Playlists), matches!(p, Page::Library(_)));
+    nav(ui, icon::HOUSE, "Home", Page::Home, p == Page::Home, &mut go_to);
+    nav(ui, icon::COMPASS, "Explore", Page::Explore, p == Page::Explore, &mut go_to);
+    nav(ui, icon::LIBRARY, "Library", Page::Library(LibTab::Playlists), matches!(p, Page::Library(_)), &mut go_to);
 
     ui.add_space(14.0);
     let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
     ui.painter().rect_filled(line, 0.0, theme::glass(0.08));
-    ui.add_space(14.0);
+    ui.add_space(14.0 - 4.0 * t);
 
     let bottom_h = 50.0;
     let list_h = (ui.available_height() - bottom_h).max(0.0);
     ui.allocate_ui(vec2(ui.available_width(), list_h), |ui| {
         if !app.logged_in {
-            ui.label(egui::RichText::new("Sign in to see your playlists").color(theme::text_dim()));
-            ui.add_space(8.0);
-            if widgets::pill(ui, "Sign in", Some(icon::CIRCLE_USER), false).clicked() {
-                app.actions.push(Action::Go(Page::Settings));
+            // Too wide to squeeze: cross-fade the message and the rail's icon.
+            if t < 0.5 {
+                ui.multiply_opacity(1.0 - 2.0 * t);
+                ui.label(egui::RichText::new("Sign in to see your playlists").color(theme::text_dim()));
+                ui.add_space(8.0);
+                if widgets::pill(ui, "Sign in", Some(icon::CIRCLE_USER), false).clicked() {
+                    app.actions.push(Action::Go(Page::Settings));
+                }
+            } else {
+                ui.multiply_opacity(2.0 * t - 1.0);
+                nav(ui, icon::CIRCLE_USER, "Sign in", Page::Settings, false, &mut go_to);
             }
             return;
         }
-        ui.label(egui::RichText::new("PLAYLISTS").font(theme::semibold(11.5)).color(theme::TEXT_FAINT));
-        ui.add_space(6.0);
-        egui::ScrollArea::vertical().id_salt("sidebar-pl").auto_shrink(false).show(ui, |ui| {
+        // The heading folds away with the labels.
+        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0 * (1.0 - t)), Sense::hover());
+        if a > 0.0 {
+            ui.painter().text(head.left_top(), Align2::LEFT_TOP, "PLAYLISTS", theme::semibold(11.5), theme::with_alpha(theme::TEXT_FAINT, a));
+        }
+        let bars = if t > 0.0 { egui::scroll_area::ScrollBarVisibility::AlwaysHidden } else { egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded };
+        egui::ScrollArea::vertical().id_salt("sidebar-pl").auto_shrink(false).scroll_bar_visibility(bars).show(ui, |ui| {
             let Some(lib) = &app.library else {
                 // The spinner animates every frame: give up on a request that never answered.
                 if app.library_requested.elapsed() < std::time::Duration::from_secs(20) {
-                    ui.spinner();
-                } else {
+                    ui.horizontal(|ui| {
+                        ui.add_space(ICON_X - 8.0);
+                        ui.spinner();
+                    });
+                } else if t < 0.5 {
+                    ui.multiply_opacity(1.0 - 2.0 * t);
                     ui.label(egui::RichText::new("Couldn't load your playlists").color(theme::text_dim()));
                     ui.add_space(8.0);
                     if widgets::pill(ui, "Try again", None, false).clicked() {
@@ -197,15 +280,20 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 if !ui.is_rect_visible(rect) {
                     continue;
                 }
-                let resp = named(resp, &c.title);
+                let mut resp = named(resp, &c.title);
+                if collapsed {
+                    resp = resp.on_hover_text(&c.title);
+                }
                 let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
                 let selected = matches!(&c.target, Target::Playlist(id) if app.page == Page::Playlist(id.clone()));
                 ui.painter().rect_filled(rect, 8.0, theme::glass(0.05 * h + if selected { 0.08 } else { 0.0 }));
-                let img = Rect::from_min_size(rect.min + vec2(6.0, 6.0), Vec2::splat(36.0));
+                let img = Rect::from_center_size(pos2(rect.left() + ICON_X, rect.center().y), Vec2::splat(36.0));
                 paint_cover(ui, img, &c.thumbs, theme::thumb_radius(), 1.0);
-                let w = rect.width() - 58.0;
-                text_at(ui, pos2(img.right() + 10.0, rect.top() + 7.0), &c.title, theme::semibold(13.5), theme::TEXT, w);
-                text_at(ui, pos2(img.right() + 10.0, rect.top() + 26.0), &c.subtitle, theme::regular(12.0), theme::text_dim(), w);
+                if a > 0.0 {
+                    let w = full_w - 58.0;
+                    text_at(ui, pos2(img.right() + 10.0, rect.top() + 7.0), &c.title, theme::semibold(13.5), theme::with_alpha(theme::TEXT, a), w);
+                    text_at(ui, pos2(img.right() + 10.0, rect.top() + 26.0), &c.subtitle, theme::regular(12.0), theme::with_alpha(theme::text_dim(), a), w);
+                }
                 if resp.clicked() {
                     app.actions.push(Action::Open(c.target.clone()));
                 }
@@ -218,16 +306,21 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     });
     let mut restart = false;
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-        nav(ui, icon::SETTINGS, "Settings", Page::Settings, p == Page::Settings);
+        nav(ui, icon::SETTINGS, "Settings", Page::Settings, p == Page::Settings, &mut go_to);
         if let Some(v) = &ready {
             ui.add_space(6.0);
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());
-            let resp = named(resp, "Restart to update").on_hover_cursor(egui::CursorIcon::PointingHand);
+            let mut resp = named(resp, "Restart to update").on_hover_cursor(egui::CursorIcon::PointingHand);
+            if collapsed {
+                resp = resp.on_hover_text(format!("Restart to update to ytm-rs {v}"));
+            }
             let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
-            ui.painter().rect_filled(rect, 12.0, theme::with_alpha(accent, 0.22 + 0.12 * h));
-            icon_at(ui, pos2(rect.left() + 22.0, rect.center().y), icon::SPARKLES, 18.0, Color32::WHITE);
-            ui.painter().text(pos2(rect.left() + 44.0, rect.top() + 17.0), Align2::LEFT_CENTER, "Restart to update", theme::semibold(13.5), Color32::WHITE);
-            ui.painter().text(pos2(rect.left() + 44.0, rect.top() + 35.0), Align2::LEFT_CENTER, format!("ytm-rs {v}"), theme::regular(12.0), theme::with_alpha(Color32::WHITE, 0.75));
+            ui.painter().rect_filled(rect, 12.0, theme::with_alpha(look.accent, 0.22 + 0.12 * h));
+            icon_at(ui, pos2(rect.left() + ICON_X, rect.center().y), icon::SPARKLES, 18.0, Color32::WHITE);
+            if a > 0.0 {
+                ui.painter().text(pos2(rect.left() + 46.0, rect.top() + 17.0), Align2::LEFT_CENTER, "Restart to update", theme::semibold(13.5), theme::with_alpha(Color32::WHITE, a));
+                ui.painter().text(pos2(rect.left() + 46.0, rect.top() + 35.0), Align2::LEFT_CENTER, format!("ytm-rs {v}"), theme::regular(12.0), theme::with_alpha(Color32::WHITE, 0.75 * a));
+            }
             restart = resp.clicked();
         }
     });
@@ -385,14 +478,17 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
     let filled = Rect::from_min_size(line.min, vec2(line.width() * frac, thick));
     ui.painter().rect_filled(filled, 0.0, app.accent_color());
     if h > 0.0 && total > 0.0 {
-        ui.painter().circle_filled(pos2(filled.right(), line.center().y), 7.0 * h, app.accent_color());
+        // The knob and the time tip stick out above the bar, over now playing (a higher
+        // layer than the bar), so they go on a layer above both and outside the bar's clip.
+        let over = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, ui.id().with("seek-over")));
+        over.circle_filled(pos2(filled.right(), line.center().y), 7.0 * h, app.accent_color());
         if let Some(p) = resp.hover_pos() {
             let t = ((p.x - full.left()) / full.width()).clamp(0.0, 1.0) * total;
             let tip = pos2(p.x, line.top() - 16.0);
             let g = widgets::galley(ui, &fmt_time(t as u32), theme::semibold(12.0), Color32::WHITE, 80.0);
             let bg = Rect::from_center_size(tip, g.size() + vec2(12.0, 6.0));
-            ui.painter().rect_filled(bg, 6.0, theme::shade(0.75));
-            ui.painter().galley(bg.min + vec2(6.0, 3.0), g, Color32::WHITE);
+            over.rect_filled(bg, 6.0, theme::shade(0.75));
+            over.galley(bg.min + vec2(6.0, 3.0), g, Color32::WHITE);
         }
     }
     if total > 0.0 {

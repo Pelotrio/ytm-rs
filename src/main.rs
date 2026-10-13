@@ -16,6 +16,7 @@ mod shader;
 mod stream;
 mod theme;
 mod translate;
+mod tray;
 mod turnstile;
 mod ui;
 mod update;
@@ -27,6 +28,10 @@ mod ytmapi;
 use std::sync::{Arc, OnceLock};
 
 use crossbeam_channel::unbounded;
+
+/// Window size on first launch, and the smallest it may be (points).
+pub const DEFAULT_SIZE: [f32; 2] = [1200.0, 780.0];
+pub const MIN_SIZE: [f32; 2] = [760.0, 480.0];
 
 fn main() -> eframe::Result {
     // Child-process modes for the webview windows (see login.rs / turnstile.rs).
@@ -49,8 +54,8 @@ fn main() -> eframe::Result {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("YT Music")
         .with_app_id("ytm-rs")
-        .with_inner_size([1200.0, 780.0])
-        .with_min_inner_size([760.0, 480.0])
+        .with_inner_size(DEFAULT_SIZE)
+        .with_min_inner_size(MIN_SIZE)
         .with_icon(
             eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/icon.png"))
                 .expect("bundled icon is a valid PNG"),

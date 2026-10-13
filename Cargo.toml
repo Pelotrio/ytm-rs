@@ -34,6 +34,10 @@ tao = "0.37.1"
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "time"] }
 wry = "0.57.0"
 rfd = "0.17.2"
+tray-icon = "0.26.1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
 opt-level = 3

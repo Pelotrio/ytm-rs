@@ -811,6 +811,18 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
         app.request_art();
     }
 
+    // ---- window
+    section_label(ui, "Window", None);
+    settings_card(ui, |ui| {
+        setting_row(ui, "Close to tray", Some("Clicking × hides the window and keeps the music playing. Click the tray icon to bring it back, or right-click it to quit."), |ui| {
+            toggle(ui, &mut app.close_to_tray, "Close to tray");
+        });
+        divider(ui);
+        setting_row(ui, "Collapse sidebar", Some("Show only icons in the sidebar, for narrow windows. The menu button at its top does the same."), |ui| {
+            toggle(ui, &mut app.sidebar_collapsed, "Collapse sidebar");
+        });
+    });
+
     // ---- connections
     let mut discord_enabled = app.discord_enabled;
     section_label(ui, "Connections", None);
