@@ -3,8 +3,10 @@
 mod art;
 mod audio;
 mod backend;
+mod deeplink;
 mod discord;
 mod images;
+mod jam;
 mod innertube;
 mod jsc;
 mod login;
@@ -51,6 +53,15 @@ fn main() -> eframe::Result {
             turnstile::child_main(dir.into());
             return Ok(());
         }
+    }
+    // A jam link (`ytm-rs://jam/CODE` or the https share link): hand it to the running
+    // instance if there is one, else join once this one is up. Before `init_logging`,
+    // which would truncate the running instance's log file.
+    if let Some(code) = deeplink::from_args() {
+        if deeplink::forward_to_running(&code) {
+            return Ok(());
+        }
+        deeplink::push(code);
     }
     init_logging();
 
@@ -100,6 +111,14 @@ fn main() -> eframe::Result {
                     c.request_repaint();
                 }
             };
+
+            // Jam links from later launches arrive over a pipe (first instance only).
+            deeplink::listen(wake);
+            // Keep `ytm-rs:` links pointing at this copy; dev builds leave it alone
+            // (even with YTM_UPDATE_FORCE).
+            if update::installed() && !cfg!(debug_assertions) {
+                deeplink::register_protocol();
+            }
 
             let volume = cc
                 .storage

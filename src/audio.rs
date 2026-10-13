@@ -24,6 +24,9 @@ pub enum AudioCmd {
     Resume,
     Stop,
     Seek(Duration),
+    /// Seek to where `pos` will have moved on to by the time the seek lands (`pos` was
+    /// current at `at`): following someone else's playback (listen together).
+    SeekLive { pos: Duration, at: std::time::Instant },
     Volume(f32),
 }
 
@@ -301,7 +304,12 @@ fn run(
                 status.playing.store(false, Ordering::Relaxed);
                 status.set_position(0);
             }
-            Ok(AudioCmd::Seek(pos)) => {
+            Ok(cmd @ (AudioCmd::Seek(_) | AudioCmd::SeekLive { .. })) => {
+                let (pos, live) = match cmd {
+                    AudioCmd::SeekLive { pos, at } => (pos + at.elapsed(), Some((pos, at))),
+                    AudioCmd::Seek(pos) => (pos, None),
+                    _ => unreachable!(),
+                };
                 seek_seq += 1;
                 if current == 0 {
                     continue;
@@ -322,13 +330,15 @@ fn run(
                     std::thread::spawn(move || {
                         let seekable = !pos.is_zero();
                         let res = stream::decoder(s, seekable).map_err(|e| e.to_string()).and_then(|mut d| {
+                            // Building it may have waited for the download: catch up.
+                            let pos = live.map_or(pos, |(p, at)| p + at.elapsed());
                             if seekable {
                                 rodio::Source::try_seek(&mut d, pos).map_err(|e| e.to_string())?;
                             }
-                            Ok(d)
+                            Ok((d, pos))
                         });
                         match res {
-                            Ok(decoder) => {
+                            Ok((decoder, pos)) => {
                                 let _ = tx.send(AudioCmd::Replace { generation, seek, decoder, at: pos, seekable });
                             }
                             Err(e) => {

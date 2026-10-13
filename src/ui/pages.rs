@@ -39,6 +39,7 @@ pub fn page(app: &mut App, ui: &mut Ui, now: f64) {
             Page::Library(tab) => library(app, ui, *tab, now),
             Page::Settings => settings(app, ui),
             Page::Transfer => super::transfer::page(app, ui, now),
+            Page::Jam => super::jam::page(app, ui),
         }
         ui.add_space(40.0);
     });
@@ -90,6 +91,7 @@ impl Rows {
             time: self.now,
             level: self.level,
             liked: liked.contains(&t.id),
+            added_by: None,
         }
     }
 }

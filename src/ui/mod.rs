@@ -3,6 +3,7 @@
 //! Layout: animated album-art background (shader.rs) → sidebar, top bar and page
 //! content → player bar → now-playing overlay (slides up) → toasts.
 
+mod jam;
 mod notes;
 mod nowplaying;
 mod pages;
@@ -44,6 +45,8 @@ pub enum Page {
     Settings,
     /// Transfer from Spotify.
     Transfer,
+    /// Listen together.
+    Jam,
 }
 
 #[derive(Clone, Copy, PartialEq, Hash, Debug)]
@@ -228,6 +231,8 @@ pub struct App {
     /// The Spotify transfer, running on the network runtime.
     transfer: Arc<crate::transfer::Transfer>,
     xfer: transfer::Setup,
+    /// Listen together: the room we're in, if any.
+    jam: jam::Session,
     signing_in: Arc<AtomicBool>,
     toast: Option<(String, f64)>,
 
@@ -404,6 +409,7 @@ impl App {
             signing_in: Default::default(),
             transfer: transfer_handle,
             xfer: Default::default(),
+            jam: Default::default(),
             toast: None,
             actions: Vec::new(),
             dialog: None,
@@ -442,6 +448,7 @@ impl App {
             Ok("history") => app.go(Page::Library(LibTab::History)),
             Ok("settings") => app.go(Page::Settings),
             Ok("transfer") => app.go(Page::Transfer),
+            Ok("jam") => app.go(Page::Jam),
             Ok(p) if p.starts_with("album:") => app.go(Page::Album(p[6..].to_owned())),
             Ok(p) if p.starts_with("artist:") => app.go(Page::Artist(p[7..].to_owned())),
             Ok(p) if p.starts_with("playlist:") => app.go(Page::Playlist(p[9..].to_owned())),
@@ -454,6 +461,12 @@ impl App {
         if std::env::var("YTM_NOWPLAYING").is_ok() {
             app.np_open = true;
         }
+        app.jam.name = get("jam_name").unwrap_or_default();
+        // Dev hook: YTM_QUEUE opens the queue drawer.
+        if std::env::var_os("YTM_QUEUE").is_some() {
+            app.queue_open = true;
+        }
+        jam::dev_hooks(&mut app);
         app.audio.set_normalize(app.normalize);
         app
     }
@@ -776,7 +789,7 @@ impl App {
         self.lyric_view.reset();
         self.backend.request(Req::Lyrics(track.clone()));
         // Keep the queue topped up so autoplay never stalls at the end.
-        if self.autoplay && !self.radio_pending && self.index.is_some_and(|i| i + 1 >= self.queue.len()) {
+        if self.autoplay && !self.radio_pending && !self.jam.guest() && self.index.is_some_and(|i| i + 1 >= self.queue.len()) {
             self.radio_pending = true;
             self.backend.request(Req::Radio(track.id));
         }
@@ -796,6 +809,9 @@ impl App {
     }
 
     fn next(&mut self) {
+        if self.jam.guest() {
+            return jam::request(self, crate::jam::Cmd::Skip);
+        }
         let Some(i) = self.index else { return };
         if i + 1 < self.queue.len() {
             self.index = Some(i + 1);
@@ -808,6 +824,9 @@ impl App {
     }
 
     fn prev(&mut self) {
+        if self.jam.guest() {
+            return jam::request(self, crate::jam::Cmd::Prev);
+        }
         if self.audio.status.position() > Duration::from_secs(3) {
             self.audio.send(AudioCmd::Seek(Duration::ZERO));
             return;
@@ -822,6 +841,9 @@ impl App {
         if self.index.is_none() {
             return;
         }
+        if self.jam.guest() {
+            return jam::request(self, crate::jam::Cmd::Toggle);
+        }
         if let Some(at) = self.resume_at {
             self.play_current_at(at);
             return;
@@ -832,6 +854,9 @@ impl App {
     }
 
     fn shuffle_upcoming(&mut self) {
+        if self.jam.guest() {
+            return self.toast("Only the host can shuffle the jam");
+        }
         let start = self.index.map_or(0, |i| i + 1);
         if start < self.queue.len() {
             shuffle(&mut self.queue[start..]);
@@ -901,12 +926,7 @@ impl App {
         }
         // The first click decides; the icon goes away with it.
         match crate::tray::take().into_iter().next() {
-            Some(crate::tray::Cmd::Show) => {
-                self.tray = None;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            }
+            Some(crate::tray::Cmd::Show) => self.show_window(ctx),
             Some(crate::tray::Cmd::Quit) => {
                 self.tray = None;
                 self.quit(ctx);
@@ -915,11 +935,28 @@ impl App {
         }
     }
 
+    /// Bring the window back (from the tray, or minimized) and to the front.
+    fn show_window(&mut self, ctx: &egui::Context) {
+        self.tray = None;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
     fn toast(&mut self, msg: impl Into<String>) {
         self.toast = Some((msg.into(), -1.0));
     }
 
     fn apply(&mut self, a: Action) {
+        // In someone else's jam, playback changes become requests to the host.
+        let a = if self.jam.guest() {
+            match jam::guest_action(self, a) {
+                Some(a) => a,
+                None => return,
+            }
+        } else {
+            a
+        };
         match a {
             // Clicking the song that's already playing pauses/resumes it, not restart it.
             Action::Play(tracks, i) if tracks.get(i).is_some_and(|t| self.current_id() == Some(t.id.as_str())) && self.resume_at.is_none() => {
@@ -1077,6 +1114,7 @@ impl App {
         }
         while let Ok(ev) = self.ch.audio_rx.try_recv() {
             match ev {
+                AudioEvent::Finished { generation } if generation == self.generation && self.jam.guest() => {}
                 AudioEvent::Finished { generation } if generation == self.generation => {
                     if self.repeat == Repeat::One {
                         self.play_current();
@@ -1090,6 +1128,7 @@ impl App {
         }
         while let Ok(ev) = self.ch.media_rx.try_recv() {
             match ev {
+                MediaControlEvent::Play | MediaControlEvent::Pause if self.jam.guest() => self.toggle(),
                 MediaControlEvent::Play if self.resume_at.is_some() => self.toggle(),
                 MediaControlEvent::Play => self.audio.send(AudioCmd::Resume),
                 MediaControlEvent::Pause | MediaControlEvent::Stop => self.audio.send(AudioCmd::Pause),
@@ -1607,9 +1646,15 @@ impl eframe::App for App {
             self.upload_files(files);
         }
         transfer::poll(self, ctx, now);
+        for code in crate::deeplink::take() {
+            self.show_window(ctx);
+            jam::open_link(self, code);
+        }
         for a in std::mem::take(&mut self.actions) {
             self.apply(a);
         }
+        jam::tick(self);
+        jam::dev_script(self, ctx, now);
         if self.page_changed < 0.0 {
             self.page_changed = now;
         }
@@ -1810,6 +1855,7 @@ impl eframe::App for App {
         storage.set_string("repeat", repeat.into());
         let b = |v: bool| if v { "1" } else { "0" }.to_owned();
         storage.set_string("autoplay", b(self.autoplay));
+        storage.set_string("jam_name", self.jam.name.clone());
         storage.set_string("normalize", b(self.normalize));
         storage.set_string("high_quality", b(self.high_quality));
         storage.set_string("auto_update", b(self.auto_update));

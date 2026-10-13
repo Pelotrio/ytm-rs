@@ -520,6 +520,8 @@ pub struct RowOpts {
     pub time: f64,
     pub level: f32,
     pub liked: bool,
+    /// In a jam: who added the song.
+    pub added_by: Option<String>,
 }
 
 const ROW_H: f32 = 56.0;
@@ -598,6 +600,11 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
         (true, _, _) => None,
         (false, Some(p), None) => Some(format!("{} \u{2022} {p}", t.artist_line())),
         (false, _, _) => Some(t.artist_line()),
+    };
+    let sub = match (sub, &o.added_by) {
+        (Some(s), Some(by)) if !s.is_empty() => Some(format!("{s} \u{2022} Added by {by}")),
+        (_, Some(by)) => Some(format!("Added by {by}")),
+        (sub, _) => sub,
     };
     let title_y = if sub.is_some() { cy - 18.0 } else { cy - 9.0 };
     text_at(ui, pos2(x, title_y), &t.title, theme::semibold(14.5), title_col, title_w);

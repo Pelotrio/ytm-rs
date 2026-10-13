@@ -227,6 +227,11 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     nav(ui, icon::HOUSE, "Home", Page::Home, p == Page::Home, &mut go_to);
     nav(ui, icon::COMPASS, "Explore", Page::Explore, p == Page::Explore, &mut go_to);
     nav(ui, icon::LIBRARY, "Library", Page::Library(LibTab::Playlists), matches!(p, Page::Library(_)), &mut go_to);
+    let jam_label = match app.jam.member_count() {
+        n if app.jam.active() && n > 0 => format!("Jam · {n} listening"),
+        _ => "Listen together".to_owned(),
+    };
+    nav(ui, icon::USERS, &jam_label, Page::Jam, p == Page::Jam, &mut go_to);
 
     ui.add_space(14.0);
     let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
@@ -781,13 +786,13 @@ pub fn queue_list(app: &mut App, ui: &mut Ui, salt: &str) {
         let start = app.index.unwrap_or(0);
         ui.checkbox(&mut app.autoplay, egui::RichText::new("Autoplay similar songs").color(theme::text_dim()));
         ui.add_space(6.0);
-        let (queue, liked, acts, has_current) = (&app.queue, &app.liked, &mut app.actions, app.index.is_some());
+        let (queue, liked, acts, has_current, by) = (&app.queue, &app.liked, &mut app.actions, app.index.is_some(), &app.jam.by);
         widgets::visible_rows(ui, queue.len() - start, |ui, k| {
             let i = start + k;
             let t = &queue[i];
             // The first row is the current song.
             let current = k == 0 && has_current;
-            let o = widgets::RowOpts { current, ..rows.opts(liked, t, None, false) };
+            let o = widgets::RowOpts { current, added_by: by.get(&t.id).cloned(), ..rows.opts(liked, t, None, false) };
             let resp = widgets::track_row(ui, t, &o, acts);
             if resp.clicked() {
                 // The playing row pauses/resumes instead of doing nothing.

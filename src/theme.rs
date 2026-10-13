@@ -144,6 +144,11 @@ pub mod icon {
     pub const EXPAND: char = '\u{e21a}';
     pub const SHRINK: char = '\u{e220}';
     pub const UPLOAD: char = '\u{e19e}';
+    pub const USERS: char = '\u{e1a4}';
+    pub const COPY: char = '\u{e09e}';
+    pub const LINK: char = '\u{e102}';
+    pub const CROWN: char = '\u{e1d6}';
+    pub const HEADPHONES: char = '\u{e0f1}';
 }
 
 const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
