@@ -35,6 +35,8 @@ pub struct Setup {
     seen: Option<Phase>,
     /// Dev hooks applied (YTM_TRANSFER_LINK / _START).
     dev: bool,
+    /// When the transfer finished (app time); the sidebar card leaves a few seconds later.
+    done_at: Option<f64>,
     /// When the last review decision was made (app time), so a double click decides one song, not two.
     decided_at: f64,
 }
@@ -1192,6 +1194,19 @@ pub fn settings_section(app: &mut App, ui: &mut Ui) {
     }
 }
 
+/// Whether the sidebar shows the transfer card: while it runs, waits or failed, and for
+/// a few seconds after it finishes (the summary stays on the transfer page).
+pub fn sidebar_visible(app: &App, now: f64) -> bool {
+    match app.transfer.job.lock().unwrap().as_ref().map(|j| &j.phase) {
+        None => false,
+        Some(Phase::Done) => app.xfer.done_at.is_none_or(|t| now - t < DONE_LINGER),
+        Some(_) => true,
+    }
+}
+
+/// Seconds the "Done" card stays in the sidebar.
+const DONE_LINGER: f64 = 6.0;
+
 /// The card above Settings in the sidebar while a transfer runs, waits or just finished.
 pub fn sidebar_card(app: &mut App, ui: &mut Ui, collapsed: bool, fade: f32, icon_x: f32) {
     let (frac, status) = {
@@ -1238,7 +1253,7 @@ pub fn sidebar_card(app: &mut App, ui: &mut Ui, collapsed: bool, fade: f32, icon
 }
 
 /// Once a frame: tell the user when the transfer needs them or finished.
-pub fn poll(app: &mut App) {
+pub fn poll(app: &mut App, ctx: &egui::Context, now: f64) {
     // Dev hook: YTM_TRANSFER_LINK=<link> fills in the playlist link.
     if !app.xfer.dev
         && app.xfer.link.is_empty()
@@ -1253,9 +1268,16 @@ pub fn poll(app: &mut App) {
             None => (None, String::new(), 0),
         }
     };
+    if let Some(t) = app.xfer.done_at.filter(|_| phase == Some(Phase::Done)) {
+        // Redraw once more when the card is due to leave.
+        if now - t < DONE_LINGER {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(DONE_LINGER - (now - t) + 0.05));
+        }
+    }
     if phase == app.xfer.seen {
         return;
     }
+    app.xfer.done_at = (phase == Some(Phase::Done)).then_some(now);
     let on_page = app.page == Page::Transfer;
     match &phase {
         Some(Phase::Review) if !on_page => app.toast(format!("Spotify transfer: {} songs need a look", fmt_n(doubts))),

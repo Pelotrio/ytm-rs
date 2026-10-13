@@ -233,7 +233,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     ui.painter().rect_filled(line, 0.0, theme::glass(0.08));
     ui.add_space(14.0 - 4.0 * t);
 
-    let transferring = app.transfer.job.lock().unwrap().is_some();
+    let transferring = super::transfer::sidebar_visible(app, ui.input(|i| i.time));
     let bottom_h = if transferring { 114.0 } else { 50.0 };
     let list_h = (ui.available_height() - bottom_h).max(0.0);
     ui.allocate_ui(vec2(ui.available_width(), list_h), |ui| {

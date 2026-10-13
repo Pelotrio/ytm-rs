@@ -862,27 +862,55 @@ fn signed_out(e: &anyhow::Error) -> bool {
     e.chain().any(|c| c.downcast_ref::<crate::ytmapi::ApiError>().is_some_and(|a| a.status == 401))
 }
 
-fn query(t: &Track) -> String {
-    format!("{} {}", t.name, t.artists.join(" ")).trim().to_owned()
+/// What to search for, best first: the plain title and the main artist, the way a
+/// person types it ("GO The Kid LAROI"), then everything Spotify lists. YouTube Music
+/// answers a query full of "(feat. ...)" and every featured artist with the featured
+/// artist's other songs, not the song.
+fn queries(t: &Track) -> Vec<String> {
+    let title = plain_title(&t.name);
+    let first = t.artists.first().map(String::as_str).unwrap_or_default();
+    let mut out = vec![format!("{title} {first}").trim().to_owned()];
+    let full = format!("{} {}", t.name, t.artists.join(" ")).trim().to_owned();
+    if !out.contains(&full) {
+        out.push(full);
+    }
+    out
+}
+
+/// The title without "(feat. ...)", "[Remastered]" or " - 2011 Remaster".
+fn plain_title(s: &str) -> &str {
+    let cut = s.find(['(', '[']).into_iter().chain(s.find(" - ")).min().unwrap_or(s.len());
+    match s[..cut].trim() {
+        "" => s.trim(),
+        t => t,
+    }
 }
 
 /// The best song result for a Spotify track, and whether it's surely the same song.
 /// YouTube's top hit is sometimes another song by the same artist or someone's cover,
-/// so the first five are ranked by title and artist and the top hit only wins ties.
+/// so the first five of each search are ranked by title and artist and the top hit only
+/// wins ties. The fuller query runs only when the plain one finds nothing sure.
 async fn search_song(api: &Api, t: &Track) -> Result<Option<(YtTrack, bool)>> {
-    let hits = ytm::search_tracks_signed_in(api, &query(t), ytm::Filter::Songs).await?;
+    let mut hits: Vec<YtTrack> = Vec::new();
+    for q in queries(t) {
+        let found = ytm::search_tracks_signed_in(api, &q, ytm::Filter::Songs).await?;
+        hits.extend(found.into_iter().take(5).filter(|h| !hits.iter().any(|x| x.id == h.id)).collect::<Vec<_>>());
+        if let Some(b) = best(&hits, t).filter(|(_, sure)| *sure) {
+            return Ok(Some(b));
+        }
+    }
     Ok(best(&hits, t))
 }
 
 fn best(hits: &[YtTrack], t: &Track) -> Option<(YtTrack, bool)> {
     // max_by_key keeps the last of equal scores, so walk from the bottom up.
-    let hit = hits.iter().take(5).rev().max_by_key(|h| score(h, t))?;
+    let hit = hits.iter().rev().max_by_key(|h| score(h, t))?;
     Some((hit.clone(), matches(hit, t)))
 }
 
 /// What to offer for a doubtful song: the top songs, then videos.
 async fn candidates(api: &Api, t: &Track) -> Result<Vec<(YtTrack, bool)>> {
-    let q = query(t);
+    let q = queries(t).swap_remove(0);
     let (songs, videos) = tokio::try_join!(ytm::search_tracks_signed_in(api, &q, ytm::Filter::Songs), ytm::search_tracks_signed_in(api, &q, ytm::Filter::Videos))?;
     let mut out: Vec<(YtTrack, bool)> = Vec::new();
     for (hit, video) in songs.into_iter().take(5).map(|s| (s, false)).chain(videos.into_iter().take(3).map(|v| (v, true))) {
@@ -992,6 +1020,15 @@ mod tests {
     }
 
     #[test]
+    fn plain_queries() {
+        assert_eq!(queries(&track("GO (feat. Juice WRLD)", &["The Kid LAROI", "Juice WRLD"]))[0], "GO The Kid LAROI");
+        assert_eq!(queries(&track("Drunk And Nasty (feat. Sharc)", &["Pi'erre Bourne", "Sharc"]))[0], "Drunk And Nasty Pi'erre Bourne");
+        assert_eq!(queries(&track("Numb", &["Linkin Park"])), vec!["Numb Linkin Park"]);
+        assert_eq!(plain_title("Wonderwall - Remastered"), "Wonderwall");
+        assert_eq!(plain_title("(What's the Story) Morning Glory?"), "(What's the Story) Morning Glory?");
+    }
+
+    #[test]
     fn likes_playlists() {
         for name in ["Liked Songs", "likes", " Likes ", "LIKED SONGS"] {
             assert!(is_likes(name), "{name}");
@@ -1004,6 +1041,31 @@ mod tests {
 
 #[cfg(test)]
 mod live {
+    /// The songs that came back doubtful with the old query: `cargo test --release -- --ignored matching_live --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn matching_live() {
+        let dir = directories::ProjectDirs::from("", "", "ytm-rs").unwrap().data_dir().to_path_buf();
+        let api = crate::ytmapi::Api::new(reqwest::Client::new(), &dir);
+        assert!(api.account().is_some(), "not signed in");
+        let songs: &[(&str, &[&str])] = &[
+            ("GO (feat. Juice WRLD)", &["The Kid LAROI", "Juice WRLD"]),
+            ("Drunk And Nasty (feat. Sharc)", &["Pi'erre Bourne", "Sharc"]),
+            ("Miss The Rage (feat. Playboi Carti)", &["Trippie Redd", "Playboi Carti"]),
+            ("Nuketown (feat. Juice WRLD)", &["Ski Mask The Slump God", "Juice WRLD"]),
+            ("One Dance", &["Drake", "Wizkid", "Kyla"]),
+            ("Shinunoga E-Wa", &["Fujii Kaze"]),
+        ];
+        let mut sure = 0;
+        for (name, artists) in songs {
+            let t = super::Track { name: name.to_string(), artists: artists.iter().map(|a| a.to_string()).collect(), local: false, art: None };
+            let r = super::search_song(&api, &t).await.unwrap();
+            println!("{name} -> {:?}", r.as_ref().map(|(h, s)| (h.title.clone(), h.artist_line(), *s)));
+            sure += r.is_some_and(|(_, s)| s) as usize;
+        }
+        assert_eq!(sure, songs.len());
+    }
+
     /// `YTM_DATA_DIR=<profile> cargo test --release -- --ignored liked_music_live --nocapture`
     #[tokio::test]
     #[ignore]

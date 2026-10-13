@@ -1566,7 +1566,7 @@ impl eframe::App for App {
         if !files.is_empty() {
             self.upload_files(files);
         }
-        transfer::poll(self);
+        transfer::poll(self, ctx, now);
         for a in std::mem::take(&mut self.actions) {
             self.apply(a);
         }
