@@ -314,7 +314,14 @@ fn host_send(app: &mut App) {
     let s = &mut app.jam;
     let Some(conn) = &s.conn else { return };
     if sig != s.sent_sig {
-        log::info!("jam: sending state ({} songs, {} at {} ms, playing {})", state.queue.len(), state.vid, state.pos, state.playing);
+        log::info!(
+            "jam: sending state ({} songs, {} KB, {} at {} ms, playing {})",
+            state.queue.len(),
+            serde_json::to_vec(&state).map_or(0, |v| v.len() / 1024),
+            state.vid,
+            state.pos,
+            state.playing
+        );
         conn.send_state(&state);
         s.sent_sig = sig;
         s.sent_from = app.index.unwrap_or(0).saturating_sub(BEFORE);
@@ -577,9 +584,11 @@ fn lobby(app: &mut App, ui: &mut Ui) {
         dim(ui, "Type the code from the host, or open the link they shared.");
         ui.add_space(10.0);
         let mut join_now = false;
-        ui.horizontal(|ui| {
-            let field_w = (ui.available_width() - 110.0).max(120.0);
-            let (rect, _) = ui.allocate_exact_size(vec2(field_w, 42.0), Sense::hover());
+        // Button on the right edge, the field filling the rest, both one height.
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), 42.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            join_now |= pill(ui, "Join", None, true).clicked();
+            ui.add_space(10.0);
+            let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 42.0), Sense::hover());
             ui.painter().rect_filled(rect, 10.0, theme::glass(0.08));
             let inner = rect.shrink2(vec2(14.0, 4.0));
             let edit = ui.put(
@@ -595,9 +604,7 @@ fn lobby(app: &mut App, ui: &mut Ui) {
             if edit.changed() {
                 app.jam.error = None;
             }
-            join_now = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            ui.add_space(10.0);
-            join_now |= pill(ui, "Join", None, true).clicked();
+            join_now |= edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         });
         if join_now {
             let code = app.jam.code_input.clone();
