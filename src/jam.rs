@@ -71,6 +71,9 @@ pub struct RoomState {
     /// Who added which song (by video ID), for songs guests added.
     #[serde(default)]
     pub by: HashMap<String, String>,
+    /// Which member added which song (video ID → member ID), for the per-guest cap.
+    #[serde(default)]
+    pub owner: HashMap<String, String>,
     pub vid: String,
     /// Position in ms at `ts`.
     pub pos: u64,
@@ -125,7 +128,7 @@ pub enum Event {
     State(RoomState, Instant),
     Tick(Tick, Instant),
     /// For the host: a guest's request.
-    Req { name: String, cmd: Cmd },
+    Req { from: String, name: String, cmd: Cmd },
     /// A request the server turned down (`denied`, `rate`), the room keeps going.
     Notice(String),
     /// The connection is gone for good: a reason to show.
@@ -222,7 +225,7 @@ enum In {
     },
     State(Stamped<RoomState>),
     Tick(Stamped<Tick>),
-    Req { name: String, cmd: Cmd },
+    Req { from: String, name: String, cmd: Cmd },
     Pong { c: i64, s: i64 },
     Error { code: String, msg: Option<String> },
     Ended,
@@ -388,7 +391,7 @@ impl Conn {
                             let at = self.local_instant(t.ts);
                             self.emit(Event::Tick(t.v, at));
                         }
-                        In::Req { name, cmd } => self.emit(Event::Req { name, cmd }),
+                        In::Req { from, name, cmd } => self.emit(Event::Req { from, name, cmd }),
                         In::Pong { c, s } => {
                             let rtt = now_ms() - c;
                             if rtt >= 0 && rtt < best_rtt {

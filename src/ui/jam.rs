@@ -23,6 +23,8 @@ const TICK_EVERY: Duration = Duration::from_secs(15);
 /// Songs before / after the current one sent to guests (liked-songs queues are huge).
 const BEFORE: usize = 20;
 const AFTER: usize = 100;
+/// Songs one guest may have waiting in the queue at once.
+const GUEST_WAITING: usize = 5;
 
 #[derive(Default)]
 pub struct Session {
@@ -39,6 +41,8 @@ pub struct Session {
     members: Vec<Member>,
     /// Who added which song (video ID → name), for songs guests added.
     pub by: HashMap<String, String>,
+    /// Who added which song (video ID → member ID).
+    owner: HashMap<String, String>,
     /// The code typed on the page.
     code_input: String,
     /// The name others see (saved); empty: the account's name.
@@ -257,9 +261,9 @@ fn on_event(app: &mut App, e: Event) {
             app.jam.last = Some((t, at));
             sync(app);
         }
-        Event::Req { name, cmd } => {
+        Event::Req { from, name, cmd } => {
             log::info!("jam: {name} asks {cmd:?}");
-            host_request(app, name, cmd);
+            host_request(app, from, name, cmd);
         }
         Event::Notice(m) => {
             log::info!("jam: {m}");
@@ -299,7 +303,8 @@ fn host_state(app: &App) -> (RoomState, u64) {
     playing.hash(&mut h);
     app.generation.hash(&mut h);
     let by = app.jam.by.iter().filter(|(id, _)| queue.iter().any(|t| &t.id == *id)).map(|(k, v)| (k.clone(), v.clone())).collect();
-    let state = RoomState { queue, index: index - from, by, vid, pos: pos.as_millis() as u64, playing };
+    let owner = app.jam.owner.iter().filter(|(id, _)| queue.iter().any(|t| &t.id == *id)).map(|(k, v)| (k.clone(), v.clone())).collect();
+    let state = RoomState { queue, index: index - from, by, owner, vid, pos: pos.as_millis() as u64, playing };
     (state, h.finish() | 1)
 }
 
@@ -339,9 +344,23 @@ fn host_send(app: &mut App) {
     }
 }
 
-fn host_request(app: &mut App, name: String, cmd: Cmd) {
+/// Songs `member` added that haven't played yet.
+fn waiting(app: &App, member: &str) -> usize {
+    let start = app.index.map_or(0, |i| i + 1);
+    app.queue.get(start..).unwrap_or_default().iter().filter(|t| app.jam.owner.get(&t.id).is_some_and(|m| m == member)).count()
+}
+
+fn host_request(app: &mut App, from: String, name: String, cmd: Cmd) {
     if !app.jam.is_host() {
         return;
+    }
+    if let Cmd::Add { track } | Cmd::Next { track } = &cmd {
+        // Their app checks this too; two adds can cross the latest state, though.
+        if waiting(app, &from) >= GUEST_WAITING && from != app.jam.you {
+            log::info!("jam: {name} already has {GUEST_WAITING} songs waiting");
+            return;
+        }
+        app.jam.owner.insert(track.id.clone(), from);
     }
     match cmd {
         Cmd::Add { track } | Cmd::Next { track } if track.id.is_empty() => {}
@@ -403,6 +422,7 @@ fn set_control(app: &mut App, on: bool, queue: bool) {
 fn apply_state(app: &mut App, state: RoomState, at: Instant) {
     let tick = Tick { vid: state.vid.clone(), pos: state.pos, playing: state.playing };
     app.jam.by = state.by;
+    app.jam.owner = state.owner;
     if state.queue.is_empty() {
         app.queue.clear();
         app.index = None;
@@ -491,6 +511,11 @@ pub fn request(app: &mut App, cmd: Cmd) {
     }
     if !cmd.is_control() && !app.jam.queue {
         app.toast("The host turned off adding songs");
+        return;
+    }
+    if !cmd.is_control() && waiting(app, &app.jam.you) >= GUEST_WAITING {
+        log::info!("jam: {GUEST_WAITING} songs already waiting");
+        app.toast(format!("You have {GUEST_WAITING} songs waiting. Add more once one plays"));
         return;
     }
     match &cmd {
