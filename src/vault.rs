@@ -65,7 +65,7 @@ mod store {
         let _one = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // A secret of an exact multiple of CHUNK ends with an empty part, so reading knows where it stops.
         let mut parts: Vec<&[u8]> = secret.chunks(CHUNK).collect();
-        if secret.len() % CHUNK == 0 {
+        if secret.len().is_multiple_of(CHUNK) {
             parts.push(&[]);
         }
         for (i, part) in parts.iter().enumerate() {
