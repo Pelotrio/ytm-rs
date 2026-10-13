@@ -232,6 +232,10 @@ impl Backend {
         Ok(Self { rt: Arc::new(rt), api, http, tx, audio, wake, prefetched: Default::default(), current: Default::default(), data_dir, lyrics, translate, jsc, premium: Arc::new(tokio::sync::Mutex::new(Err(None))), hq: Default::default() })
     }
 
+    pub fn api(&self) -> Arc<ytmapi::Api> {
+        self.api.clone()
+    }
+
     pub fn http(&self) -> &reqwest::Client {
         &self.http
     }

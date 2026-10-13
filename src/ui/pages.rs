@@ -38,6 +38,7 @@ pub fn page(app: &mut App, ui: &mut Ui, now: f64) {
             Page::Artist(id) => artist(app, ui, id, now),
             Page::Library(tab) => library(app, ui, *tab, now),
             Page::Settings => settings(app, ui),
+            Page::Transfer => super::transfer::page(app, ui, now),
         }
         ui.add_space(40.0);
     });
@@ -260,7 +261,7 @@ fn explore(app: &mut App, ui: &mut Ui, now: f64) {
     card_row(ui, "ex-charts", "Charts", &e.charts, &mut app.actions);
 }
 
-fn page_title(ui: &mut Ui, title: &str) {
+pub(super) fn page_title(ui: &mut Ui, title: &str) {
     ui.add_space(14.0);
     ui.label(RichText::new(title).font(theme::bold(34.0)).color(theme::TEXT));
 }
@@ -651,7 +652,7 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
     settings_card(ui, |ui| {
         if app.logged_in {
             let name = app.account_name.clone().unwrap_or_else(|| "YouTube Music".to_owned());
-            setting_row(ui, &name, Some("Signed in with Google. Your home feed, library and likes come from this account."), |ui| {
+            setting_row(ui, &name, Some("Signed in with Google. Your home feed, library and likes come from this account. Saved encrypted in Windows Credential Manager."), |ui| {
                 sign_out = pill(ui, "Sign out", Some(icon::LOG_OUT), false).clicked();
             });
         } else {
@@ -835,6 +836,9 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
         app.set_discord_enabled(discord_enabled);
     }
 
+    // ---- import
+    super::transfer::settings_section(app, ui);
+
     // ---- updates
     section_label(ui, "Updates", None);
     let state = app.updater.as_ref().map(|u| u.state());
@@ -956,7 +960,7 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
 }
 
 /// Small heading above a settings card, with an optional value on the right.
-fn section_label(ui: &mut Ui, title: &str, value: Option<&str>) {
+pub(super) fn section_label(ui: &mut Ui, title: &str, value: Option<&str>) {
     ui.add_space(30.0);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
     ui.painter().text(pos2(rect.left() + 2.0, rect.center().y), Align2::LEFT_CENTER, title, theme::bold(17.0), theme::TEXT);
@@ -966,7 +970,7 @@ fn section_label(ui: &mut Ui, title: &str, value: Option<&str>) {
     ui.add_space(10.0);
 }
 
-fn settings_card(ui: &mut Ui, body: impl FnOnce(&mut Ui)) {
+pub(super) fn settings_card(ui: &mut Ui, body: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
         .fill(theme::glass(0.06))
         .stroke(egui::Stroke::new(1.0, theme::glass(0.05)))
@@ -998,7 +1002,7 @@ pub(super) fn setting_row(ui: &mut Ui, title: &str, desc: Option<&str>, control:
     control(&mut cui);
 }
 
-fn divider(ui: &mut Ui) {
+pub(super) fn divider(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
     ui.painter().rect_filled(rect, 0.0, theme::glass(0.07));
 }

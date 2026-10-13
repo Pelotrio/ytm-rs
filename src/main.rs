@@ -15,6 +15,7 @@ mod preset;
 mod shader;
 mod stream;
 mod theme;
+mod transfer;
 mod translate;
 mod tray;
 mod turnstile;
@@ -23,6 +24,7 @@ mod update;
 mod webmusic;
 mod ytdlp;
 mod ytm;
+mod vault;
 mod ytmapi;
 
 use std::sync::{Arc, OnceLock};
@@ -38,7 +40,11 @@ fn main() -> eframe::Result {
     let mut args = std::env::args_os().skip(1);
     if let (Some(flag), Some(dir)) = (args.next(), args.next()) {
         if flag == login::FLAG {
-            login::child_main(dir.into());
+            login::child_main(login::Site::Google, dir.into());
+            return Ok(());
+        }
+        if flag == login::SPOTIFY_FLAG {
+            login::child_main(login::Site::Spotify, dir.into());
             return Ok(());
         }
         if flag == turnstile::FLAG {

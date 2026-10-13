@@ -233,7 +233,8 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     ui.painter().rect_filled(line, 0.0, theme::glass(0.08));
     ui.add_space(14.0 - 4.0 * t);
 
-    let bottom_h = 50.0;
+    let transferring = app.transfer.job.lock().unwrap().is_some();
+    let bottom_h = if transferring { 114.0 } else { 50.0 };
     let list_h = (ui.available_height() - bottom_h).max(0.0);
     ui.allocate_ui(vec2(ui.available_width(), list_h), |ui| {
         if !app.logged_in {
@@ -307,6 +308,9 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     let mut restart = false;
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
         nav(ui, icon::SETTINGS, "Settings", Page::Settings, p == Page::Settings, &mut go_to);
+        if transferring {
+            super::transfer::sidebar_card(app, ui, collapsed, a, ICON_X);
+        }
         if let Some(v) = &ready {
             ui.add_space(6.0);
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());

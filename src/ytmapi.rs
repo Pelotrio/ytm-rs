@@ -119,6 +119,7 @@ impl Api {
                 log::info!("{endpoint}: {e:#}; retrying with a fresh visitor ID");
                 self.call_once(endpoint, &body, None, true).await
             }
+            Err(e) if account.is_some() && is_refused(&e) => self.retry_signed_in(endpoint, &body, account.as_deref(), e).await,
             r => r,
         }
     }
@@ -126,7 +127,18 @@ impl Api {
     /// Like `call`, but a signed-in account is required.
     pub async fn call_signed_in(&self, endpoint: &str, body: Value) -> anyhow::Result<Value> {
         let account = self.account().ok_or_else(|| anyhow::anyhow!("sign in first"))?;
-        self.call_once(endpoint, &body, Some(&account), false).await
+        match self.call_once(endpoint, &body, Some(&account), false).await {
+            Err(e) if is_refused(&e) => self.retry_signed_in(endpoint, &body, Some(&account), e).await,
+            r => r,
+        }
+    }
+
+    /// YouTube now and then refuses a signed-in request (403) and takes the same one a
+    /// moment later. A refused request changed nothing, so it's safe to send again.
+    async fn retry_signed_in(&self, endpoint: &str, body: &Value, account: Option<&Session>, e: anyhow::Error) -> anyhow::Result<Value> {
+        log::info!("{endpoint}: {e:#}; trying again");
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        self.call_once(endpoint, body, account, false).await
     }
 
     async fn call_once(&self, endpoint: &str, body: &Value, account: Option<&Session>, fresh: bool) -> anyhow::Result<Value> {
@@ -229,6 +241,10 @@ fn now_secs() -> u64 {
 }
 
 /// The text between `start` and the next `end`.
+fn is_refused(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<ApiError>().is_some_and(|a| a.status == 403)
+}
+
 pub fn between<'a>(s: &'a str, start: &str, end: &str) -> Option<&'a str> {
     let i = s.find(start)? + start.len();
     let j = s[i..].find(end)?;

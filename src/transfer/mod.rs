@@ -1,0 +1,957 @@
+//! Copy a Spotify playlist, or Liked Songs, into YouTube Music (spot2ytm, built in).
+//!
+//! A transfer runs on the network runtime while the app keeps playing: read the
+//! Spotify playlist, search YouTube Music for every song a few at a time, search the
+//! doubtful ones again, let the user review what's still doubtful, then create a
+//! private playlist or like the songs. The UI reads the shared [`Job`] each frame.
+//! Progress is saved as it goes, so quitting or losing the connection never repeats work.
+
+pub mod spotify;
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, bail};
+use futures_util::{StreamExt, stream};
+
+use crate::model::Track as YtTrack;
+use crate::ytm;
+use crate::ytmapi::Api;
+use spotify::{Source, Track};
+
+/// YouTube Music searches in flight at once. More gets the account rate limited on long lists.
+const CONCURRENCY: usize = 8;
+/// The most songs a YouTube Music playlist holds; longer lists are split into parts.
+const PLAYLIST_MAX: usize = 5000;
+/// The credential the Spotify sign-in (`sp_dc` cookie) is saved under.
+const VAULT: &str = "spotify sp_dc";
+
+/// How a song came out of the search.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum Search {
+    Pending,
+    Found(YtTrack),
+    /// A result whose title or artist doesn't match; offered for review.
+    Unsure(YtTrack),
+    Missing,
+    /// Left out during the review.
+    Skipped,
+}
+
+impl Search {
+    pub fn track(&self) -> Option<&YtTrack> {
+        match self {
+            Search::Found(t) | Search::Unsure(t) => Some(t),
+            _ => None,
+        }
+    }
+}
+
+/// Where the songs go.
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+pub enum Dest {
+    /// A new private playlist with this name.
+    Playlist(String),
+    /// The account's Liked Music.
+    Liked,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum Phase {
+    Reading,
+    Searching,
+    /// Searching the doubtful songs again, with videos.
+    Checking,
+    /// Waiting for the user to go through `doubts`.
+    Review,
+    Saving,
+    Done,
+    Failed(String),
+}
+
+impl Phase {
+    pub fn running(&self) -> bool {
+        !matches!(self, Phase::Done | Phase::Failed(_))
+    }
+}
+
+/// A song the user picks for: the alternatives found for it and what they chose.
+pub struct Doubt {
+    pub index: usize,
+    pub candidates: Vec<YtTrack>,
+    /// Which candidates are videos rather than songs.
+    pub videos: Vec<bool>,
+    pub decision: Option<Decision>,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Decision {
+    Keep,
+    Pick(usize),
+    Skip,
+}
+
+pub struct Summary {
+    pub added: usize,
+    /// Songs that matched the same YouTube Music song as an earlier one.
+    pub duplicates: usize,
+    /// Liked Music only: songs that were liked already.
+    pub already: usize,
+    pub playlists: Vec<String>,
+    pub elapsed: Duration,
+}
+
+pub struct Job {
+    pub source: Source,
+    pub name: String,
+    pub dest: Dest,
+    pub phase: Phase,
+    /// Spotify songs read, of the total.
+    pub read: (usize, usize),
+    pub read_secs: Option<f32>,
+    pub tracks: Vec<Track>,
+    pub results: Vec<Search>,
+    /// Removed songs and podcast episodes in the Spotify playlist.
+    pub not_songs: usize,
+    /// When the current search pass started, and how many songs it had left then.
+    search_started: Option<(Instant, usize)>,
+    pub doubts: Vec<Doubt>,
+    /// Liking or adding: done, of the total.
+    pub saving: (usize, usize),
+    pub summary: Option<Summary>,
+    pub paused: bool,
+    started: Instant,
+    /// Playlists already created, so a resumed transfer doesn't make them twice.
+    created: Vec<String>,
+    /// Liked Music: how many of the songs to like are done (they're liked in order).
+    liked_upto: usize,
+}
+
+impl Job {
+    pub fn searched(&self) -> usize {
+        self.results.iter().filter(|r| **r != Search::Pending).count()
+    }
+
+    pub fn count(&self, f: impl Fn(&Search) -> bool) -> usize {
+        self.results.iter().filter(|r| f(r)).count()
+    }
+
+    /// Seconds left in the search, from the pace so far.
+    pub fn eta(&self) -> Option<u64> {
+        let (at, left_then) = self.search_started?;
+        let left = self.results.len() - self.searched();
+        let done = left_then.saturating_sub(left);
+        let secs = at.elapsed().as_secs_f64();
+        (done >= 8 && secs > 1.0).then(|| (left as f64 * secs / done as f64).ceil() as u64)
+    }
+
+    /// The doubt shown now: the first without a decision.
+    pub fn current_doubt(&self) -> Option<usize> {
+        self.doubts.iter().position(|d| d.decision.is_none())
+    }
+}
+
+/// Whether a Spotify playlist is someone's liked songs under another name, which the
+/// transfer offers to add to Liked Music instead of a playlist.
+pub fn is_likes(name: &str) -> bool {
+    let n = name.trim().to_lowercase();
+    matches!(n.as_str(), "liked songs" | "likes")
+}
+
+/// The Spotify side: the signed-in account and its library.
+#[derive(Clone)]
+pub enum Account {
+    /// Signed in, not read yet (read when the transfer page or Settings first shows it).
+    Unknown,
+    SignedOut,
+    Loading,
+    SignedIn { name: String, library: Vec<spotify::Entry> },
+    Failed(String),
+}
+
+/// A transfer that stopped part way, from an earlier run.
+#[derive(Clone)]
+pub struct Resumable {
+    pub source: Source,
+    pub name: String,
+    pub dest: Dest,
+    pub searched: usize,
+    pub total: usize,
+}
+
+pub struct Transfer {
+    pub job: Mutex<Option<Job>>,
+    pub account: Mutex<Account>,
+    pub resumable: Mutex<Option<Resumable>>,
+    /// A pasted playlist link and what it turned out to be.
+    pub lookup: Mutex<Option<(String, Option<Result<spotify::Entry, String>>)>>,
+    /// Spotify sign-in window open.
+    pub signing_in: AtomicBool,
+    cancel: AtomicBool,
+    review_done: tokio::sync::Notify,
+    data_dir: PathBuf,
+    wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+/// The progress file: everything needed to pick a transfer up again.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Saved {
+    version: u32,
+    key: String,
+    name: String,
+    dest: Dest,
+    tracks: Vec<Track>,
+    results: Vec<Search>,
+    not_songs: usize,
+    created: Vec<String>,
+    liked_upto: usize,
+}
+
+const SAVED_VERSION: u32 = 1;
+
+impl Transfer {
+    pub fn new(data_dir: &Path, wake: Arc<dyn Fn() + Send + Sync>) -> Arc<Self> {
+        let this = Arc::new(Self {
+            job: Mutex::new(None),
+            account: Mutex::new(if crate::vault::get(VAULT, data_dir).is_some() { Account::Unknown } else { Account::SignedOut }),
+            lookup: Mutex::new(None),
+            resumable: Mutex::new(None),
+            signing_in: AtomicBool::new(false),
+            cancel: AtomicBool::new(false),
+            review_done: tokio::sync::Notify::new(),
+            data_dir: data_dir.to_owned(),
+            wake,
+        });
+        *this.resumable.lock().unwrap() = this.find_resumable();
+        this
+    }
+
+    fn dir(&self) -> PathBuf {
+        self.data_dir.join("transfers")
+    }
+
+    fn find_resumable(&self) -> Option<Resumable> {
+        let newest = std::fs::read_dir(self.dir()).ok()?.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "json")).max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())?;
+        let s: Saved = serde_json::from_slice(&std::fs::read(newest.path()).ok()?).ok()?;
+        let source = if s.key == "liked" { Source::Liked } else { Source::Playlist(s.key.clone()) };
+        Some(Resumable {
+            source,
+            name: s.name,
+            dest: s.dest,
+            searched: s.results.iter().filter(|r| **r != Search::Pending).count(),
+            total: s.tracks.len(),
+        })
+    }
+
+    fn wake(&self) {
+        (self.wake)()
+    }
+
+    pub fn running(&self) -> bool {
+        self.job.lock().unwrap().as_ref().is_some_and(|j| j.phase.running())
+    }
+
+    /// Sign the Spotify side in or out; `None` signs out.
+    pub fn set_cookie(self: &Arc<Self>, sp_dc: Option<String>, rt: &crate::backend::Backend) {
+        match sp_dc {
+            Some(c) => {
+                if let Err(e) = crate::vault::set(VAULT, &self.data_dir, c.as_bytes()) {
+                    *self.account.lock().unwrap() = Account::Failed(format!("Couldn't save the Spotify sign-in: {e}"));
+                    return;
+                }
+                self.load_account(rt);
+            }
+            None => {
+                crate::vault::delete(VAULT, &self.data_dir);
+                crate::login::forget(&self.spotify_profile());
+                *self.account.lock().unwrap() = Account::SignedOut;
+            }
+        }
+    }
+
+    /// Where the Spotify sign-in window keeps its browser profile.
+    pub fn spotify_profile(&self) -> PathBuf {
+        self.data_dir.join("webview-spotify")
+    }
+
+    fn cookie(&self) -> Option<String> {
+        crate::vault::get(VAULT, &self.data_dir).and_then(|b| String::from_utf8(b).ok())
+    }
+
+    /// Read the signed-in Spotify account and its playlists.
+    pub fn load_account(self: &Arc<Self>, rt: &crate::backend::Backend) {
+        let Some(cookie) = self.cookie() else {
+            *self.account.lock().unwrap() = Account::SignedOut;
+            return;
+        };
+        *self.account.lock().unwrap() = Account::Loading;
+        let this = self.clone();
+        rt.spawn(async move {
+            let res = async {
+                let client = spotify::Client::connect(Some(&cookie), &this.data_dir).await?;
+                client.account().await
+            }
+            .await;
+            *this.account.lock().unwrap() = match res {
+                Ok(a) => Account::SignedIn { name: a.name, library: a.library },
+                Err(e) if e.is::<spotify::SignedOut>() => {
+                    crate::vault::delete(VAULT, &this.data_dir);
+                    Account::Failed(e.to_string())
+                }
+                Err(e) => {
+                    log::warn!("spotify account: {e:#}");
+                    Account::Failed(format!("Couldn't read your Spotify library: {e}"))
+                }
+            };
+            this.wake();
+        });
+    }
+
+    /// Read the account the first time something shows it.
+    pub fn ensure_account(self: &Arc<Self>, rt: &crate::backend::Backend) {
+        if matches!(*self.account.lock().unwrap(), Account::Unknown) {
+            self.load_account(rt);
+        }
+    }
+
+    /// Look up a pasted playlist link (once per link), so the page can show what it is.
+    pub fn look_up(self: &Arc<Self>, rt: &crate::backend::Backend, link: &str) {
+        let link = link.trim().to_owned();
+        {
+            let mut slot = self.lookup.lock().unwrap();
+            if slot.as_ref().is_some_and(|(l, _)| *l == link) {
+                return;
+            }
+            let source = match Source::parse(&link) {
+                Ok(s) => s,
+                Err(e) => {
+                    *slot = (!link.is_empty()).then(|| (link, Some(Err(e.to_string()))));
+                    return;
+                }
+            };
+            if source == Source::Liked {
+                let entry = spotify::Entry { source, name: "Liked Songs".into(), owner: String::new(), count: None, art: None };
+                *slot = Some((link, Some(Ok(entry))));
+                return;
+            }
+            *slot = Some((link.clone(), None));
+        }
+        let this = self.clone();
+        rt.spawn(async move {
+            let res = async {
+                let Source::Playlist(id) = Source::parse(&link)? else { unreachable!() };
+                let client = spotify::Client::connect(this.cookie().as_deref(), &this.data_dir).await?;
+                client.playlist_info(&id).await
+            }
+            .await
+            .map_err(|e| e.to_string());
+            let mut slot = this.lookup.lock().unwrap();
+            if slot.as_ref().is_some_and(|(l, _)| *l == link) {
+                *slot = Some((link, Some(res)));
+            }
+            drop(slot);
+            this.wake();
+        });
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        if let Some(j) = self.job.lock().unwrap().as_mut() {
+            j.paused = paused;
+        }
+    }
+
+    /// Stop the transfer and forget its progress.
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.review_done.notify_one();
+    }
+
+    /// Close a finished or failed transfer, back to the start screen.
+    pub fn dismiss(&self) {
+        let mut job = self.job.lock().unwrap();
+        if job.as_ref().is_some_and(|j| !j.phase.running()) {
+            *job = None;
+        }
+    }
+
+    /// Record a review decision for the current doubt.
+    pub fn decide(&self, decision: Decision) {
+        let mut guard = self.job.lock().unwrap();
+        let Some(job) = guard.as_mut() else { return };
+        if let Some(i) = job.current_doubt() {
+            job.doubts[i].decision = Some(decision);
+            if job.current_doubt().is_none() {
+                self.review_done.notify_one();
+            }
+        }
+    }
+
+    /// Step back to the previous song in the review.
+    pub fn undo_decision(&self) {
+        let mut guard = self.job.lock().unwrap();
+        let Some(job) = guard.as_mut() else { return };
+        let at = job.current_doubt().unwrap_or(job.doubts.len());
+        if at > 0 {
+            job.doubts[at - 1].decision = None;
+        }
+    }
+
+    /// Keep the current picks for every song not reviewed yet.
+    pub fn finish_review(&self) {
+        let mut guard = self.job.lock().unwrap();
+        let Some(job) = guard.as_mut() else { return };
+        for d in &mut job.doubts {
+            d.decision.get_or_insert(Decision::Keep);
+        }
+        self.review_done.notify_one();
+    }
+
+    /// Start a transfer (or resume the saved one for the same source).
+    pub fn start(self: &Arc<Self>, rt: &crate::backend::Backend, source: Source, dest: Dest) {
+        if self.running() {
+            return;
+        }
+        self.cancel.store(false, Ordering::Relaxed);
+        *self.resumable.lock().unwrap() = None;
+        *self.job.lock().unwrap() = Some(Job {
+            name: String::new(),
+            source: source.clone(),
+            dest,
+            phase: Phase::Reading,
+            read: (0, 0),
+            read_secs: None,
+            tracks: Vec::new(),
+            results: Vec::new(),
+            not_songs: 0,
+            search_started: None,
+            doubts: Vec::new(),
+            saving: (0, 0),
+            summary: None,
+            paused: false,
+            started: Instant::now(),
+            created: Vec::new(),
+            liked_upto: 0,
+        });
+        let (this, api) = (self.clone(), rt.api());
+        rt.spawn(async move {
+            let res = this.run(&api).await;
+            let mut guard = this.job.lock().unwrap();
+            if let Some(job) = guard.as_mut() {
+                match res {
+                    Ok(()) => {}
+                    Err(_) if this.cancel.load(Ordering::Relaxed) => {
+                        this.forget(&job.source);
+                        *guard = None;
+                    }
+                    Err(e) => {
+                        log::warn!("spotify transfer: {e:#}");
+                        let saved = !job.tracks.is_empty();
+                        job.phase = Phase::Failed(if saved { format!("{e}. Your progress is saved; try again to pick up where it stopped.") } else { e.to_string() });
+                        drop(guard);
+                        *this.resumable.lock().unwrap() = this.find_resumable();
+                    }
+                }
+            }
+            this.wake();
+        });
+    }
+
+    fn path(&self, source: &Source) -> PathBuf {
+        self.dir().join(format!("{}.json", source.key()))
+    }
+
+    fn forget(&self, source: &Source) {
+        let _ = std::fs::remove_file(self.path(source));
+    }
+
+    /// Throw away a stopped transfer's progress.
+    pub fn discard_saved(&self, source: &Source) {
+        self.forget(source);
+        *self.resumable.lock().unwrap() = self.find_resumable();
+    }
+
+    fn save(&self) {
+        let saved = {
+            let guard = self.job.lock().unwrap();
+            let Some(j) = guard.as_ref() else { return };
+            if j.tracks.is_empty() {
+                return;
+            }
+            Saved {
+                version: SAVED_VERSION,
+                key: j.source.key().to_owned(),
+                name: j.name.clone(),
+                dest: j.dest.clone(),
+                tracks: j.tracks.clone(),
+                results: j.results.clone(),
+                not_songs: j.not_songs,
+                created: j.created.clone(),
+                liked_upto: j.liked_upto,
+            }
+        };
+        let path = self.path(&Source::parse_key(&saved.key));
+        let write = || -> Result<()> {
+            std::fs::create_dir_all(self.dir())?;
+            let tmp = path.with_extension("json.tmp");
+            std::fs::write(&tmp, serde_json::to_vec(&saved)?)?;
+            std::fs::rename(&tmp, &path)?;
+            Ok(())
+        };
+        if let Err(e) = write() {
+            log::warn!("couldn't save transfer progress: {e:#}");
+        }
+    }
+
+    fn load_saved(&self, source: &Source) -> Option<Saved> {
+        let s: Saved = serde_json::from_slice(&std::fs::read(self.path(source)).ok()?).ok()?;
+        (s.version == SAVED_VERSION && s.key == source.key() && s.results.len() == s.tracks.len()).then_some(s)
+    }
+
+    fn with_job<R>(&self, f: impl FnOnce(&mut Job) -> R) -> R {
+        f(self.job.lock().unwrap().as_mut().expect("transfer job"))
+    }
+
+    /// Cancelled: stop. Paused: wait here.
+    async fn checkpoint(&self) -> Result<()> {
+        loop {
+            if self.cancel.load(Ordering::Relaxed) {
+                bail!("cancelled");
+            }
+            if !self.with_job(|j| j.paused) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    async fn run(&self, api: &Api) -> Result<()> {
+        anyhow::ensure!(api.account().is_some(), "Sign in to YouTube Music first");
+        let source = self.with_job(|j| j.source.clone());
+
+        // ---- read the Spotify side, or pick up saved progress
+        match self.load_saved(&source) {
+            Some(s) => self.with_job(|j| {
+                j.read = (s.tracks.len(), s.tracks.len());
+                j.name = s.name;
+                j.tracks = s.tracks;
+                j.results = s.results;
+                j.not_songs = s.not_songs;
+                j.created = s.created;
+                j.liked_upto = s.liked_upto;
+            }),
+            None => {
+                let t = Instant::now();
+                let cookie = self.cookie();
+                anyhow::ensure!(cookie.is_some() || source != Source::Liked, "Sign in to Spotify to copy your Liked Songs");
+                let client = spotify::Client::connect(cookie.as_deref(), &self.data_dir).await?;
+                let progress = |done: usize, total: usize| {
+                    self.with_job(|j| j.read = (done, total));
+                    self.wake();
+                };
+                let playlist = match &source {
+                    Source::Playlist(id) => client.playlist(id, progress).await?,
+                    Source::Liked => client.liked(progress).await?,
+                };
+                let mut playlist = playlist;
+                // Dev hook: YTM_TRANSFER_LIMIT=<n> keeps the first n songs.
+                if let Some(n) = std::env::var("YTM_TRANSFER_LIMIT").ok().and_then(|n| n.parse().ok()) {
+                    playlist.tracks.truncate(n);
+                }
+                self.with_job(|j| {
+                    j.read_secs = Some(t.elapsed().as_secs_f32());
+                    j.read = (playlist.tracks.len(), playlist.tracks.len());
+                    j.results = vec![Search::Pending; playlist.tracks.len()];
+                    j.name = playlist.name;
+                    j.tracks = playlist.tracks;
+                    j.not_songs = playlist.skipped;
+                });
+                self.save();
+            }
+        }
+
+        // ---- search YouTube Music; a pass that hits network trouble leaves songs pending for the next
+        self.with_job(|j| j.phase = Phase::Searching);
+        self.wake();
+        for pass in 0..3 {
+            if pass > 0 {
+                tokio::time::sleep(Duration::from_secs(3 * pass)).await;
+            }
+            if self.search_pass(api).await? == 0 {
+                break;
+            }
+        }
+        let pending = self.with_job(|j| j.count(|r| *r == Search::Pending));
+        anyhow::ensure!(pending == 0, "{pending} songs couldn't be searched (no connection, or YouTube Music is limiting requests)");
+
+        // ---- search the doubtful songs again, with videos, for the review
+        let doubtful: Vec<usize> = self.with_job(|j| {
+            j.phase = Phase::Checking;
+            (0..j.results.len()).filter(|&i| matches!(j.results[i], Search::Unsure(_) | Search::Missing)).collect()
+        });
+        self.wake();
+        let tracks: Vec<Track> = self.with_job(|j| doubtful.iter().map(|&i| j.tracks[i].clone()).collect());
+        let mut found: Vec<(usize, Vec<(YtTrack, bool)>)> = stream::iter(doubtful.iter().copied().zip(tracks))
+            .map(|(i, t)| async move {
+                let _ = self.checkpoint().await;
+                (i, candidates(api, &t).await.unwrap_or_default())
+            })
+            .buffer_unordered(CONCURRENCY)
+            .collect()
+            .await;
+        self.checkpoint().await?;
+        found.sort_by_key(|(i, _)| *i);
+        self.with_job(|j| {
+            for (i, cands) in found {
+                // YouTube's results vary between searches, so the second one often has the exact song.
+                if let Some((t, _)) = cands.iter().find(|(t, video)| !video && matches(t, &j.tracks[i])) {
+                    j.results[i] = Search::Found(t.clone());
+                    continue;
+                }
+                let (candidates, videos) = cands.into_iter().unzip();
+                j.doubts.push(Doubt { index: i, candidates, videos, decision: None });
+            }
+        });
+        self.save();
+
+        // ---- the user goes through what's still doubtful
+        if self.with_job(|j| !j.doubts.is_empty()) {
+            self.with_job(|j| j.phase = Phase::Review);
+            self.wake();
+            while self.with_job(|j| j.current_doubt().is_some()) {
+                self.review_done.notified().await;
+                self.checkpoint().await?;
+            }
+            self.with_job(|j| {
+                for d in std::mem::take(&mut j.doubts) {
+                    match d.decision {
+                        Some(Decision::Pick(k)) if k < d.candidates.len() => j.results[d.index] = Search::Found(d.candidates[k].clone()),
+                        Some(Decision::Skip) => j.results[d.index] = Search::Skipped,
+                        _ => {}
+                    }
+                }
+            });
+            self.save();
+        }
+
+        // ---- add them
+        self.with_job(|j| j.phase = Phase::Saving);
+        self.wake();
+        let (ids, picked, dest) = self.with_job(|j| {
+            if j.dest == Dest::Playlist(String::new()) {
+                j.dest = Dest::Playlist(format!("{} from Spotify", j.name));
+            }
+            let mut seen = HashSet::new();
+            let ids: Vec<String> = j.results.iter().filter_map(Search::track).filter(|t| seen.insert(t.id.clone())).map(|t| t.id.clone()).collect();
+            (ids, j.results.iter().filter(|r| r.track().is_some()).count(), j.dest.clone())
+        });
+        anyhow::ensure!(!ids.is_empty(), "None of the songs were found on YouTube Music");
+        let duplicates = picked - ids.len();
+        // Dev hook: YTM_TRANSFER_DRY=1 does everything but add the songs.
+        let dry = std::env::var_os("YTM_TRANSFER_DRY").is_some();
+        let (playlists, already) = match &dest {
+            _ if dry => (Vec::new(), 0),
+            Dest::Playlist(title) => (self.create_playlists(api, title, &ids).await?, 0),
+            Dest::Liked => (Vec::new(), self.like_all(api, &ids).await?),
+        };
+
+        let elapsed = self.with_job(|j| j.started.elapsed());
+        self.with_job(|j| {
+            j.summary = Some(Summary { added: ids.len() - already, duplicates, already, playlists, elapsed });
+            j.phase = Phase::Done;
+        });
+        self.forget(&source);
+        Ok(())
+    }
+
+    /// One pass over the pending songs; returns how many are still pending (failed).
+    async fn search_pass(&self, api: &Api) -> Result<usize> {
+        let todo: Vec<(usize, Track)> = self.with_job(|j| {
+            let todo: Vec<(usize, Track)> = (0..j.tracks.len()).filter(|&i| j.results[i] == Search::Pending).map(|i| (i, j.tracks[i].clone())).collect();
+            j.search_started = Some((Instant::now(), todo.len()));
+            todo
+        });
+        let mut results = stream::iter(todo)
+            .map(|(i, t)| async move {
+                if let Err(e) = self.checkpoint().await {
+                    return (i, Err(e));
+                }
+                (i, search_song(api, &t).await)
+            })
+            .buffer_unordered(CONCURRENCY);
+        let (mut failed, mut last_save, mut last_wake) = (0, Instant::now(), Instant::now());
+        while let Some((i, res)) = results.next().await {
+            self.checkpoint().await?;
+            let result = match res {
+                Ok(Some((t, true))) => Search::Found(t),
+                Ok(Some((t, false))) => Search::Unsure(t),
+                Ok(None) => Search::Missing,
+                Err(e) if signed_out(&e) => return Err(e.context("YouTube Music signed you out; sign in again and try again")),
+                Err(e) => {
+                    log::debug!("transfer search: {e:#}");
+                    failed += 1;
+                    Search::Pending
+                }
+            };
+            self.with_job(|j| j.results[i] = result);
+            if last_save.elapsed() > Duration::from_secs(2) {
+                self.save();
+                last_save = Instant::now();
+            }
+            // Repaint about 8 times a second, not once a song.
+            if last_wake.elapsed() > Duration::from_millis(120) {
+                self.wake();
+                last_wake = Instant::now();
+            }
+        }
+        self.save();
+        self.wake();
+        Ok(failed)
+    }
+
+    async fn create_playlists(&self, api: &Api, title: &str, ids: &[String]) -> Result<Vec<String>> {
+        let parts: Vec<&[String]> = ids.chunks(PLAYLIST_MAX).collect();
+        self.with_job(|j| j.saving = (0, ids.len()));
+        for (n, part) in parts.iter().enumerate() {
+            if self.with_job(|j| j.created.len()) > n {
+                continue;
+            }
+            self.checkpoint().await?;
+            let part_title = if parts.len() > 1 { format!("{title} ({})", n + 1) } else { title.to_owned() };
+            let id = retry(|| ytm::create_playlist_with(api, &part_title, part)).await.context("Creating the playlist failed")?;
+            self.with_job(|j| {
+                j.created.push(id);
+                j.saving.0 += part.len();
+            });
+            self.save();
+            self.wake();
+        }
+        Ok(self.with_job(|j| j.created.clone()))
+    }
+
+    /// Like every song that isn't liked yet, oldest first, so Liked Music ends up in
+    /// Spotify's order (newest at the top). Returns how many were liked already.
+    async fn like_all(&self, api: &Api, ids: &[String]) -> Result<usize> {
+        let liked: HashSet<String> = retry(|| ytm::playlist(api, "LM", true, 20_000)).await.context("Reading your Liked Music failed")?.tracks.into_iter().map(|t| t.id).collect();
+        let todo: Vec<&String> = ids.iter().rev().filter(|id| !liked.contains(*id)).collect();
+        let already = ids.len() - todo.len();
+        let start = self.with_job(|j| {
+            j.saving = (j.liked_upto.min(todo.len()), todo.len());
+            j.liked_upto.min(todo.len())
+        });
+        let mut last_save = Instant::now();
+        for (n, id) in todo.iter().enumerate().skip(start) {
+            self.checkpoint().await?;
+            let mut tries = 0;
+            loop {
+                tries += 1;
+                match ytm::set_like(api, id, true).await {
+                    Ok(()) => break,
+                    Err(e) if signed_out(&e) => return Err(e.context("YouTube Music signed you out; sign in again and try again")),
+                    Err(e) if tries < 4 => {
+                        log::debug!("like {id}: {e:#}");
+                        tokio::time::sleep(Duration::from_millis(800 * tries)).await;
+                    }
+                    Err(e) => return Err(e.context("Liking songs failed")),
+                }
+            }
+            self.with_job(|j| {
+                j.liked_upto = n + 1;
+                j.saving.0 = n + 1;
+            });
+            if last_save.elapsed() > Duration::from_secs(2) {
+                self.save();
+                last_save = Instant::now();
+            }
+            self.wake();
+        }
+        Ok(already)
+    }
+}
+
+impl Source {
+    fn parse_key(key: &str) -> Self {
+        if key == "liked" { Source::Liked } else { Source::Playlist(key.to_owned()) }
+    }
+}
+
+/// A signed-in request, tried up to three times: YouTube Music now and then refuses one
+/// (a 403 or a timeout) and takes the same request a moment later.
+async fn retry<T, F: std::future::Future<Output = Result<T>>>(mut f: impl FnMut() -> F) -> Result<T> {
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        match f().await {
+            Err(e) if tries < 3 && !signed_out(&e) => {
+                log::debug!("transfer: {e:#}; retrying");
+                tokio::time::sleep(Duration::from_millis(1000 * tries)).await;
+            }
+            r => return r,
+        }
+    }
+}
+
+fn signed_out(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<crate::ytmapi::ApiError>().is_some_and(|a| a.status == 401))
+}
+
+fn query(t: &Track) -> String {
+    format!("{} {}", t.name, t.artists.join(" ")).trim().to_owned()
+}
+
+/// The best song result for a Spotify track, and whether it's surely the same song.
+/// YouTube's top hit is sometimes another song by the same artist or someone's cover,
+/// so the first five are ranked by title and artist and the top hit only wins ties.
+async fn search_song(api: &Api, t: &Track) -> Result<Option<(YtTrack, bool)>> {
+    let hits = ytm::search_tracks_signed_in(api, &query(t), ytm::Filter::Songs).await?;
+    Ok(best(&hits, t))
+}
+
+fn best(hits: &[YtTrack], t: &Track) -> Option<(YtTrack, bool)> {
+    // max_by_key keeps the last of equal scores, so walk from the bottom up.
+    let hit = hits.iter().take(5).rev().max_by_key(|h| score(h, t))?;
+    Some((hit.clone(), matches(hit, t)))
+}
+
+/// What to offer for a doubtful song: the top songs, then videos.
+async fn candidates(api: &Api, t: &Track) -> Result<Vec<(YtTrack, bool)>> {
+    let q = query(t);
+    let (songs, videos) = tokio::try_join!(ytm::search_tracks_signed_in(api, &q, ytm::Filter::Songs), ytm::search_tracks_signed_in(api, &q, ytm::Filter::Videos))?;
+    let mut out: Vec<(YtTrack, bool)> = Vec::new();
+    for (hit, video) in songs.into_iter().take(5).map(|s| (s, false)).chain(videos.into_iter().take(3).map(|v| (v, true))) {
+        // The same song is often listed twice, from the album and a single.
+        let label = |t: &YtTrack| (t.title.to_lowercase(), t.artist_line().to_lowercase());
+        if !out.iter().any(|(h, _)| h.id == hit.id || (!video && label(h) == label(&hit))) {
+            out.push((hit, video));
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a result has the track's title and one of its artists.
+fn matches(hit: &YtTrack, t: &Track) -> bool {
+    title_matches(hit, t) && artist_matches(hit, t)
+}
+
+fn title_matches(hit: &YtTrack, t: &Track) -> bool {
+    let want = base_title(&t.name);
+    // YouTube writes Japanese and other titles as "はつこい - Hatsukoi": either half may be the Spotify title.
+    std::iter::once(hit.title.as_str()).chain(hit.title.split(" - ")).map(base_title).any(|got| !want.is_empty() && !got.is_empty() && (want.contains(&got) || got.contains(&want)))
+}
+
+fn artist_matches(hit: &YtTrack, t: &Track) -> bool {
+    let artists = norm(&hit.artist_line());
+    t.artists.iter().map(|a| norm(a)).any(|a| !a.is_empty() && artists.contains(&a))
+}
+
+/// Lowercase alphanumerics, with "(feat. ...)" / " - Remastered" style suffixes cut off.
+fn base_title(s: &str) -> String {
+    let cut = s.find(['(', '[']).into_iter().chain(s.find(" - ")).min().unwrap_or(s.len());
+    norm(&s[..cut])
+}
+
+fn norm(s: &str) -> String {
+    s.replace('&', "and").chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+/// Versions that aren't the original recording unless the Spotify title says so.
+const VARIANTS: &[&str] = &["remix", "edit", "mix", "live", "karaoke", "instrumental", "cover", "sped up", "slowed", "acoustic", "version", "made famous", "originally performed"];
+
+fn score(hit: &YtTrack, t: &Track) -> i32 {
+    let (want, got) = (base_title(&t.name), base_title(&hit.title));
+    let mut score = if want == got {
+        4
+    } else if !want.is_empty() && !got.is_empty() && (want.contains(&got) || got.contains(&want)) {
+        2
+    } else {
+        0
+    };
+    let artists = norm(&hit.artist_line());
+    for (i, artist) in t.artists.iter().enumerate() {
+        let artist = norm(artist);
+        if !artist.is_empty() && artists.contains(&artist) {
+            score += if i == 0 { 3 } else { 1 };
+        }
+    }
+    let (spotify, youtube) = (t.name.to_lowercase(), hit.title.to_lowercase());
+    score -= VARIANTS.iter().filter(|v| youtube.contains(*v) && !spotify.contains(*v)).count() as i32;
+    score
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Link;
+
+    fn hit(title: &str, artists: &str) -> YtTrack {
+        YtTrack {
+            id: title.into(),
+            title: title.into(),
+            artists: vec![Link { name: artists.into(), id: None }],
+            album: None,
+            duration: None,
+            thumbs: vec![],
+            track_nr: None,
+            plays: None,
+        }
+    }
+
+    fn track(name: &str, artists: &[&str]) -> Track {
+        Track { name: name.into(), artists: artists.iter().map(|a| a.to_string()).collect(), local: false, art: None }
+    }
+
+    #[test]
+    fn ranking() {
+        let pick = |t: &Track, hits: Vec<YtTrack>| best(&hits, t).unwrap().0.id;
+        // Another song by the same artist on top.
+        let t = track("One Dance", &["Drake", "Wizkid", "Kyla"]);
+        assert_eq!(pick(&t, vec![hit("Passionfruit", "Drake"), hit("One Dance", "Drake, Wizkid & Kyla")]), "One Dance");
+        // A cover or edit by someone else.
+        let t = track("No Lie", &["Sean Paul", "Dua Lipa"]);
+        assert_eq!(pick(&t, vec![hit("No Lie (Relax Edit)", "Release"), hit("No Lie", "Sean Paul & Dua Lipa")]), "No Lie");
+        // Ties go to YouTube's own order.
+        let t = track("Numb", &["Linkin Park"]);
+        let (a, mut b) = (hit("Numb", "Linkin Park"), hit("Numb", "Linkin Park"));
+        b.id = "second".into();
+        assert_eq!(pick(&t, vec![a, b]), "Numb");
+        // Only a different song by the same artist: picked, but flagged for review.
+        let t = track("Chimp", &["Juice WRLD"]);
+        assert!(!best(&[hit("Lucid Dreams", "Juice WRLD")], &t).unwrap().1);
+        assert!(best(&[hit("Chimp", "Juice WRLD")], &t).unwrap().1);
+        // Original-script titles with the romanized one after a dash, and "&" for "and".
+        assert!(best(&[hit("死ぬのがいいわ - Shinunoga E-Wa", "Fujii Kaze")], &track("Shinunoga E-Wa", &["Fujii Kaze"])).unwrap().1);
+        let t = track("Silk & Cologne (EI8HT & Offset) - Spider-Verse Remix", &["EI8HT", "Offset"]);
+        assert!(best(&[hit("Silk and Cologne (Spider-Verse Remix)", "EI8HT & Offset")], &t).unwrap().1);
+    }
+
+    #[test]
+    fn likes_playlists() {
+        for name in ["Liked Songs", "likes", " Likes ", "LIKED SONGS"] {
+            assert!(is_likes(name), "{name}");
+        }
+        for name in ["Liked Songs 2", "Vibe", "My likes mix", "Liked Music"] {
+            assert!(!is_likes(name), "{name}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod live {
+    /// `YTM_DATA_DIR=<profile> cargo test --release -- --ignored liked_music_live --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn liked_music_live() {
+        let dir = std::path::PathBuf::from(std::env::var("YTM_DATA_DIR").unwrap());
+        let api = crate::ytmapi::Api::new(reqwest::Client::new(), &dir);
+        assert!(api.account().is_some(), "no session in the vault");
+        for limit in [100, 1000, 20_000] {
+            let t = std::time::Instant::now();
+            match crate::ytm::playlist(&api, "LM", true, limit).await {
+                Ok(p) => println!("limit {limit}: {} tracks in {:?}", p.tracks.len(), t.elapsed()),
+                Err(e) => println!("limit {limit}: {e:#}"),
+            }
+        }
+    }
+}

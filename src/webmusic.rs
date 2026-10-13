@@ -30,6 +30,10 @@ pub struct Session {
     page_id: Option<String>,
 }
 
+/// The credential the session is saved under (see [`crate::vault`]).
+const VAULT: &str = "google session";
+/// Where versions up to 0.2.12 kept the session, in plain text; moved into the
+/// credential store on first launch.
 const FILE: &str = "account.json";
 /// Where versions up to 0.2.11 kept the session (rustypipe's cache).
 const LEGACY: &str = "rustypipe_cache.json";
@@ -41,7 +45,15 @@ impl Session {
 
     /// `None` when signed out. A session saved by an older version is carried over.
     pub fn load(data_dir: &Path) -> Option<Self> {
-        if let Some(s) = std::fs::read(data_dir.join(FILE)).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+        if let Some(s) = crate::vault::get(VAULT, data_dir).and_then(|b| serde_json::from_slice(&b).ok()) {
+            return Some(s);
+        }
+        if let Some(s) = std::fs::read(data_dir.join(FILE)).ok().and_then(|b| serde_json::from_slice::<Self>(&b).ok()) {
+            // Only delete the plain copy once the credential store has it.
+            if s.save(data_dir) {
+                let _ = std::fs::remove_file(data_dir.join(FILE));
+                log::info!("signed-in session moved into the credential store");
+            }
             return Some(s);
         }
         let cache: Value = serde_json::from_str(&std::fs::read_to_string(data_dir.join(LEGACY)).ok()?).ok()?;
@@ -49,19 +61,31 @@ impl Session {
         let index = auth["session_index"].as_u64().or_else(|| auth["session_index"].as_str()?.parse().ok()).unwrap_or(0);
         let s = Self::new(auth["cookie"].as_str()?.to_owned(), index as u32, auth["channel_syncid"].as_str().map(str::to_owned));
         log::info!("signed-in session carried over from the previous version");
-        s.save(data_dir);
+        if s.save(data_dir) {
+            Self::forget_legacy(data_dir);
+        }
         Some(s)
     }
 
-    pub fn save(&self, data_dir: &Path) {
-        if let Err(e) = std::fs::write(data_dir.join(FILE), serde_json::to_vec(self).unwrap_or_default()) {
-            log::warn!("couldn't save the session: {e}");
+    /// Save to the credential store; false when it refused.
+    pub fn save(&self, data_dir: &Path) -> bool {
+        match crate::vault::set(VAULT, data_dir, &serde_json::to_vec(self).unwrap_or_default()) {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("couldn't save the session: {e:#}");
+                false
+            }
         }
     }
 
     /// Sign out: forget the session, including an older version's copy of it.
     pub fn remove(data_dir: &Path) {
+        crate::vault::delete(VAULT, data_dir);
         let _ = std::fs::remove_file(data_dir.join(FILE));
+        Self::forget_legacy(data_dir);
+    }
+
+    fn forget_legacy(data_dir: &Path) {
         let legacy = data_dir.join(LEGACY);
         if let Some(mut cache) = std::fs::read(&legacy).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok())
             && let Some(obj) = cache.as_object_mut().filter(|o| o.contains_key("auth_cookie"))
@@ -245,11 +269,20 @@ mod tests {
 
         let s = Session::load(&dir).unwrap();
         assert_eq!((s.cookie.as_str(), s.session_index, s.page_id.as_deref()), ("SAPISID=abc; SID=x", 1, Some("brand")));
-        assert!(dir.join(FILE).exists());
+        // Kept in the credential store only.
+        assert!(!dir.join(FILE).exists());
+        assert!(crate::vault::get(VAULT, &dir).is_some());
         assert!(s.authorization("https://music.youtube.com").unwrap().starts_with("SAPISIDHASH "));
+
+        // A plain account.json from 0.2.12 moves into the store too.
+        std::fs::write(dir.join(FILE), serde_json::to_vec(&s).unwrap()).unwrap();
+        crate::vault::delete(VAULT, &dir);
+        assert_eq!(Session::load(&dir).unwrap().cookie, s.cookie);
+        assert!(!dir.join(FILE).exists());
 
         Session::remove(&dir);
         assert!(Session::load(&dir).is_none());
+        assert!(crate::vault::get(VAULT, &dir).is_none());
         let left: Value = serde_json::from_slice(&std::fs::read(dir.join(LEGACY)).unwrap()).unwrap();
         assert!(left.get("auth_cookie").is_none() && left.get("clients").is_some());
         let _ = std::fs::remove_dir_all(&dir);

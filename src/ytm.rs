@@ -52,6 +52,7 @@ pub enum Filter {
     Artists,
     /// Playlists made by YouTube Music (not the community ones).
     Playlists,
+    Videos,
 }
 
 impl Filter {
@@ -61,18 +62,29 @@ impl Filter {
             Filter::Albums => "EgWKAQIYAWoQEAMQBBAJEAoQBRAREBAQFQ%3D%3D",
             Filter::Artists => "EgWKAQIgAWoQEAMQBBAJEAoQBRAREBAQFQ%3D%3D",
             Filter::Playlists => "EgeKAQQoADgBahIQAxAEEAkQDhAKEAUQERAQEBU%3D",
+            Filter::Videos => "EgWKAQIQAWoQEAMQBBAJEAoQBRAREBAQFQ%3D%3D",
         }
     }
 }
 
 async fn search(api: &Api, query: &str, filter: Filter) -> anyhow::Result<Vec<Value>> {
-    let v = api.call("search", json!({ "query": query, "params": filter.params() }), false).await?;
+    search_as(api, query, filter, false).await
+}
+
+async fn search_as(api: &Api, query: &str, filter: Filter, auth: bool) -> anyhow::Result<Vec<Value>> {
+    let v = api.call("search", json!({ "query": query, "params": filter.params() }), auth).await?;
     let sections = &v["contents"]["tabbedSearchResultsRenderer"]["tabs"][0]["tabRenderer"]["content"]["sectionListRenderer"]["contents"];
     Ok(arr(sections).iter().flat_map(|s| arr(&s["musicShelfRenderer"]["contents"]).iter().cloned()).collect())
 }
 
 pub async fn search_songs(api: &Api, query: &str) -> anyhow::Result<Vec<Track>> {
     Ok(search(api, query, Filter::Songs).await?.iter().filter_map(|i| list_item(&i["musicResponsiveListItemRenderer"])).collect())
+}
+
+/// Song or video rows, searched as the signed-in account: signed-out searches miss
+/// some major-label releases entirely (the Spotify transfer needs those).
+pub async fn search_tracks_signed_in(api: &Api, query: &str, filter: Filter) -> anyhow::Result<Vec<Track>> {
+    Ok(search_as(api, query, filter, true).await?.iter().filter_map(|i| list_item(&i["musicResponsiveListItemRenderer"])).collect())
 }
 
 pub async fn search_cards(api: &Api, query: &str, filter: Filter) -> anyhow::Result<Vec<Card>> {
@@ -464,6 +476,22 @@ pub async fn create_playlist(api: &Api, title: &str, video_id: Option<&str>) -> 
     }
     let value = write(api, "playlist/create", body).await?;
     value["playlistId"].as_str().map(str::to_owned).ok_or_else(|| anyhow::anyhow!("YouTube Music did not return a playlist"))
+}
+
+/// Create a private playlist holding `video_ids`, added in batches so long lists go through.
+pub async fn create_playlist_with(api: &Api, title: &str, video_ids: &[String]) -> anyhow::Result<String> {
+    const BATCH: usize = 200;
+    // YouTube Music errors out on titles containing these.
+    let title: String = title.chars().filter(|c| !matches!(c, '<' | '>')).collect();
+    let mut batches = video_ids.chunks(BATCH);
+    let first = batches.next().unwrap_or_default();
+    let value = write(api, "playlist/create", json!({"title": title, "description": "", "privacyStatus": "PRIVATE", "videoIds": first})).await?;
+    let id = value["playlistId"].as_str().map(str::to_owned).ok_or_else(|| anyhow::anyhow!("YouTube Music did not return a playlist"))?;
+    for batch in batches {
+        let actions: Vec<Value> = batch.iter().map(|v| json!({"action": "ACTION_ADD_VIDEO", "addedVideoId": v, "dedupeOption": "DEDUPE_OPTION_SKIP"})).collect();
+        write(api, "browse/edit_playlist", json!({"playlistId": id, "actions": actions})).await?;
+    }
+    Ok(id)
 }
 
 pub async fn edit_playlist(api: &Api, id: &str, title: &str, description: &str, privacy: Option<&str>) -> anyhow::Result<()> {

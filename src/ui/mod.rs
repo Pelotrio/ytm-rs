@@ -7,6 +7,7 @@ mod notes;
 mod nowplaying;
 mod pages;
 mod shell;
+mod transfer;
 mod karaoke;
 mod lyric_prefs;
 mod widgets;
@@ -41,6 +42,8 @@ pub enum Page {
     Playlist(String),
     Artist(String),
     Settings,
+    /// Transfer from Spotify.
+    Transfer,
 }
 
 #[derive(Clone, Copy, PartialEq, Hash, Debug)]
@@ -222,6 +225,9 @@ pub struct App {
 
     // account / misc
     logged_in: bool,
+    /// The Spotify transfer, running on the network runtime.
+    transfer: Arc<crate::transfer::Transfer>,
+    xfer: transfer::Setup,
     signing_in: Arc<AtomicBool>,
     toast: Option<(String, f64)>,
 
@@ -293,6 +299,10 @@ impl App {
             backend.request(Req::Library);
             backend.warm_signed_in();
         }
+        let transfer_handle = {
+            let b = backend.clone();
+            crate::transfer::Transfer::new(backend.data_dir(), Arc::new(move || b.wake()))
+        };
         let mut app = Self {
             backend,
             audio,
@@ -392,6 +402,8 @@ impl App {
             record_angle: 0.0,
             logged_in,
             signing_in: Default::default(),
+            transfer: transfer_handle,
+            xfer: Default::default(),
             toast: None,
             actions: Vec::new(),
             dialog: None,
@@ -418,7 +430,7 @@ impl App {
             app.go(Page::Search(q));
         }
         // An explicit page replaces the smoke search, so its query shouldn't linger.
-        if matches!(std::env::var("YTM_PAGE").as_deref(), Ok("home" | "explore" | "library" | "uploads" | "liked" | "history" | "settings")) {
+        if matches!(std::env::var("YTM_PAGE").as_deref(), Ok("home" | "explore" | "library" | "uploads" | "liked" | "history" | "settings" | "transfer")) {
             app.search_text.clear();
         }
         match std::env::var("YTM_PAGE").as_deref() {
@@ -429,6 +441,7 @@ impl App {
             Ok("liked") => app.go(Page::Library(LibTab::Songs)),
             Ok("history") => app.go(Page::Library(LibTab::History)),
             Ok("settings") => app.go(Page::Settings),
+            Ok("transfer") => app.go(Page::Transfer),
             Ok(p) if p.starts_with("album:") => app.go(Page::Album(p[6..].to_owned())),
             Ok(p) if p.starts_with("artist:") => app.go(Page::Artist(p[7..].to_owned())),
             Ok(p) if p.starts_with("playlist:") => app.go(Page::Playlist(p[9..].to_owned())),
@@ -1417,12 +1430,29 @@ impl App {
         }
     }
 
+    fn start_spotify_sign_in(&self, ctx: &egui::Context) {
+        let xfer = self.transfer.clone();
+        if xfer.signing_in.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let (backend, ctx) = (self.backend.clone(), ctx.clone());
+        crate::login::spawn(crate::login::Site::Spotify, xfer.spotify_profile(), move |outcome| {
+            match outcome {
+                crate::login::Outcome::Cookie(c) => xfer.set_cookie(Some(c), &backend),
+                crate::login::Outcome::Cancelled => {}
+                crate::login::Outcome::Failed(e) => backend.report_error(format!("Spotify sign-in window failed: {e}")),
+            }
+            xfer.signing_in.store(false, Ordering::Relaxed);
+            ctx.request_repaint();
+        });
+    }
+
     fn start_sign_in(&self, ctx: &egui::Context) {
         if self.signing_in.swap(true, Ordering::Relaxed) {
             return;
         }
         let (backend, busy, ctx) = (self.backend.clone(), self.signing_in.clone(), ctx.clone());
-        crate::login::spawn(self.backend.login_profile(), move |outcome| {
+        crate::login::spawn(crate::login::Site::Google, self.backend.login_profile(), move |outcome| {
             match outcome {
                 crate::login::Outcome::Cookie(c) => backend.request(Req::SetCookie(c)),
                 crate::login::Outcome::Cancelled => {}
@@ -1536,6 +1566,7 @@ impl eframe::App for App {
         if !files.is_empty() {
             self.upload_files(files);
         }
+        transfer::poll(self);
         for a in std::mem::take(&mut self.actions) {
             self.apply(a);
         }
