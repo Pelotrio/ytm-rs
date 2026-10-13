@@ -281,11 +281,14 @@ fn run(
             Ok(AudioCmd::Pause) => {
                 player.pause();
                 status.playing.store(false, Ordering::Relaxed);
+                // So the UI (and the system media controls it syncs) see it even when idle.
+                wake();
             }
             Ok(AudioCmd::Resume) => {
                 if current != 0 {
                     player.play();
                     status.playing.store(true, Ordering::Relaxed);
+                    wake();
                 }
             }
             Ok(AudioCmd::Stop) => {

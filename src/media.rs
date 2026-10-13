@@ -11,6 +11,8 @@ use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, P
 
 pub struct Media {
     controls: MediaControls,
+    /// The play state last sent, so the per-frame sync only reports changes.
+    playing: Option<bool>,
     #[cfg(windows)]
     thumbbar: Option<Box<std::cell::RefCell<Option<thumbbar::ThumbBar>>>>,
 }
@@ -40,6 +42,7 @@ impl Media {
         let _ = (tx, wake);
         Some(Self {
             controls,
+            playing: None,
             #[cfg(windows)]
             thumbbar,
         })
@@ -55,7 +58,13 @@ impl Media {
         });
     }
 
+    /// Also called every frame with the player's state, so pausing from anywhere (a
+    /// headset, the Windows media flyout, a song ending) updates SMTC and the taskbar.
     pub fn set_playing(&mut self, playing: bool) {
+        if self.playing == Some(playing) {
+            return;
+        }
+        self.playing = Some(playing);
         let _ = self.controls.set_playback(if playing {
             MediaPlayback::Playing { progress: None }
         } else {

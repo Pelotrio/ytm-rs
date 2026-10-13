@@ -814,10 +814,8 @@ impl App {
             return;
         }
         let playing = self.playing();
+        // The media controls catch up in `logic` once the player has switched.
         self.audio.send(if playing { AudioCmd::Pause } else { AudioCmd::Resume });
-        if let Some(m) = &mut self.media {
-            m.set_playing(!playing);
-        }
     }
 
     fn shuffle_upcoming(&mut self) {
@@ -1526,6 +1524,11 @@ impl eframe::App for App {
         let now = ctx.input(|i| i.time);
         self.sync_look();
         self.pump(now);
+        // System media controls and taskbar buttons follow the player however it changed.
+        let playing = self.playing() || self.buffering;
+        if let Some(m) = &mut self.media {
+            m.set_playing(playing);
+        }
         self.request_lyric_extras();
         // Upload: files from the picker, or dropped onto the window.
         let mut files = self.picked_uploads.lock().unwrap().take().unwrap_or_default();

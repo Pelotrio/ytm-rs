@@ -2,7 +2,7 @@
 //! animated background. The lyrics themselves are drawn by `karaoke` (a port of the
 //! better-lyrics renderer); this adds their toolbar and the plain-text fallback.
 
-use egui::{Align2, Color32, Rect, Sense, Ui, Vec2, pos2, vec2};
+use egui::{Color32, Rect, Sense, Ui, Vec2, pos2, vec2};
 
 use super::widgets::{self, icon_button, named, text_at};
 use super::{Action, App, NpTab, karaoke};
@@ -388,14 +388,37 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, id: &str, lyrics: &Lyrics, now
     if out.animating {
         ui.ctx().request_repaint();
     }
-    if out.user_scrolling {
-        // The extension's "resume autoscroll" button.
-        let r = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 70.0), vec2(150.0, 34.0));
-        let resp = ui.interact(r, ui.id().with("lyr-resume"), Sense::click());
-        let resp = named(resp, "Back to the current line");
-        let hover = theme::anim_bool(ui.ctx(), "lyr-resume-h", resp.hovered(), 0.12);
-        ui.painter().rect_filled(r, 17.0, theme::glass(0.12 + 0.08 * hover));
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, "Back to current line", theme::semibold(13.0), Color32::WHITE);
+    // The extension's `.autoscroll-resume-button` (YouTube Music's rem is 10 px): a frosted
+    // pill under the top edge in the lyrics font at 600, 1.75rem; padding .5rem 1rem;
+    // white 5% fill, 1px white 10% border, radius 1rem, over a 5px backdrop blur (which
+    // reads as about twice those on screen). It slides down from -3em to 2em as it fades
+    // in, and its text glows on hover.
+    let shown = theme::anim_bool(ui.ctx(), "lyr-resume", out.user_scrolling, 0.2);
+    if shown > 0.0 {
+        let font = theme::lyric_font(&style.font, crate::preset::Weight::Semibold, 17.5);
+        let g = widgets::galley(ui, "Resume Autoscroll", font, Color32::WHITE, rect.width() - 40.0);
+        let size = g.size() + vec2(20.0, 10.0) + Vec2::splat(2.0);
+        let em = 17.5;
+        let y = rect.top() + 8.0 + egui::lerp(-3.0 * em..=0.5 * em, theme::ease_out(shown));
+        let r = Rect::from_min_size(pos2(rect.center().x - size.x / 2.0, y), size);
+        let resp = ui.interact(r, ui.id().with("lyr-resume-btn"), if out.user_scrolling { Sense::click() } else { Sense::hover() });
+        let resp = named(resp, "Resume Autoscroll").on_hover_cursor(egui::CursorIcon::PointingHand);
+        let hover = theme::anim_bool(ui.ctx(), "lyr-resume-h", resp.hovered() && out.user_scrolling, 0.25);
+        let p = ui.painter().with_clip_rect(rect.expand2(vec2(0.0, 4.0)));
+        p.rect_filled(r, 10.0, theme::with_alpha(Color32::WHITE, 0.10 * shown));
+        p.rect_stroke(r, 10.0, egui::Stroke::new(1.0, theme::with_alpha(Color32::WHITE, 0.2 * shown)), egui::StrokeKind::Inside);
+        let at = r.center() - g.size() / 2.0;
+        if hover > 0.0
+            && let Some((tex, glow_rect, uv)) = app.lyric_view.text_glow(ui.ctx(), g.clone(), at, 15.0)
+        {
+            // `text-shadow: 0 0 1.5rem var(--blyrics-glow-color)`: a real blur of the letters.
+            let glow = crate::preset::paint(&style.glow_color, accent);
+            p.image(tex, glow_rect, uv, theme::with_alpha(glow, hover * shown));
+        }
+        p.galley_with_override_text_color(at, g, theme::with_alpha(Color32::WHITE, shown));
+        if shown < 1.0 {
+            ui.ctx().request_repaint();
+        }
         if resp.clicked() {
             app.lyric_view.resume();
         }

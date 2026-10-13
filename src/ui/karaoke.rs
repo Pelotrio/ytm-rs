@@ -424,6 +424,19 @@ fn flow(fonts: &mut FontsView<'_>, toks: Vec<Tok>, font: &FontId, max_w: f32, li
         Group(Vec<Tok>),
     }
     let mut items: Vec<Item> = Vec::new();
+    // A single piece wider than the line (a line-synced CJK phrase arrives as one, with no
+    // spaces to break at) is split into its characters, sharing its time, so it can wrap.
+    let toks = toks.into_iter().flat_map(|t| {
+        if t.space || joining_script(&t.text) || t.text.chars().count() < 2 || text_size(fonts, &t.text, font).x <= max_w {
+            return vec![t];
+        }
+        let n = t.text.chars().count();
+        t.text
+            .chars()
+            .enumerate()
+            .map(|(i, c)| Tok { text: c.to_string(), start: t.start + t.dur * i as f64 / n as f64, dur: t.dur / n as f64, bg: t.bg, space: false })
+            .collect()
+    });
     for t in toks {
         if t.space {
             items.push(Item::Space);
@@ -742,6 +755,16 @@ impl View {
 
     pub fn resume(&mut self) {
         self.user_until = 0.0;
+    }
+
+    /// CSS `text-shadow: 0 0 <blur>` for a laid-out text at `at`: the same Gaussian the
+    /// lyric glow uses (σ = blur / 2), as a white mask to tint when painting.
+    pub fn text_glow(&mut self, ctx: &egui::Context, g: Arc<Galley>, at: Pos2, blur: f32) -> Option<(TextureId, Rect, Rect)> {
+        let atlas = ctx.fonts(|fv| fv.font_image_size());
+        let ppp = ctx.pixels_per_point();
+        // Cached per position, so a moved or resized view re-renders it.
+        let key = (hash(("text-glow", at.x.round() as i32, at.y.round() as i32, g.job.text.as_str())), usize::MAX);
+        self.glow.blurred_line(ctx, key, blur / 2.0, &[], &[(g, at, 1.0)], atlas, ppp)
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, f: Frame) -> Out {
