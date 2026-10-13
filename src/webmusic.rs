@@ -46,12 +46,14 @@ impl Session {
     /// `None` when signed out. A session saved by an older version is carried over.
     pub fn load(data_dir: &Path) -> Option<Self> {
         if let Some(s) = crate::vault::get(VAULT, data_dir).and_then(|b| serde_json::from_slice(&b).ok()) {
+            // No plain copy may outlive the move (an interrupted one, or an older version run since).
+            Self::forget_plain(data_dir);
             return Some(s);
         }
         if let Some(s) = std::fs::read(data_dir.join(FILE)).ok().and_then(|b| serde_json::from_slice::<Self>(&b).ok()) {
-            // Only delete the plain copy once the credential store has it.
+            // Only delete the plain copies once the credential store has it.
             if s.save(data_dir) {
-                let _ = std::fs::remove_file(data_dir.join(FILE));
+                Self::forget_plain(data_dir);
                 log::info!("signed-in session moved into the credential store");
             }
             return Some(s);
@@ -62,7 +64,7 @@ impl Session {
         let s = Self::new(auth["cookie"].as_str()?.to_owned(), index as u32, auth["channel_syncid"].as_str().map(str::to_owned));
         log::info!("signed-in session carried over from the previous version");
         if s.save(data_dir) {
-            Self::forget_legacy(data_dir);
+            Self::forget_plain(data_dir);
         }
         Some(s)
     }
@@ -81,11 +83,12 @@ impl Session {
     /// Sign out: forget the session, including an older version's copy of it.
     pub fn remove(data_dir: &Path) {
         crate::vault::delete(VAULT, data_dir);
-        let _ = std::fs::remove_file(data_dir.join(FILE));
-        Self::forget_legacy(data_dir);
+        Self::forget_plain(data_dir);
     }
 
-    fn forget_legacy(data_dir: &Path) {
+    /// Remove the plain-text copies older versions kept.
+    fn forget_plain(data_dir: &Path) {
+        let _ = std::fs::remove_file(data_dir.join(FILE));
         let legacy = data_dir.join(LEGACY);
         if let Some(mut cache) = std::fs::read(&legacy).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok())
             && let Some(obj) = cache.as_object_mut().filter(|o| o.contains_key("auth_cookie"))

@@ -478,20 +478,19 @@ pub async fn create_playlist(api: &Api, title: &str, video_id: Option<&str>) -> 
     value["playlistId"].as_str().map(str::to_owned).ok_or_else(|| anyhow::anyhow!("YouTube Music did not return a playlist"))
 }
 
-/// Create a private playlist holding `video_ids`, added in batches so long lists go through.
+/// Create a private playlist holding `video_ids` (a few hundred at most; add more with [`add_videos`]).
 pub async fn create_playlist_with(api: &Api, title: &str, video_ids: &[String]) -> anyhow::Result<String> {
-    const BATCH: usize = 200;
     // YouTube Music errors out on titles containing these.
     let title: String = title.chars().filter(|c| !matches!(c, '<' | '>')).collect();
-    let mut batches = video_ids.chunks(BATCH);
-    let first = batches.next().unwrap_or_default();
-    let value = write(api, "playlist/create", json!({"title": title, "description": "", "privacyStatus": "PRIVATE", "videoIds": first})).await?;
-    let id = value["playlistId"].as_str().map(str::to_owned).ok_or_else(|| anyhow::anyhow!("YouTube Music did not return a playlist"))?;
-    for batch in batches {
-        let actions: Vec<Value> = batch.iter().map(|v| json!({"action": "ACTION_ADD_VIDEO", "addedVideoId": v, "dedupeOption": "DEDUPE_OPTION_SKIP"})).collect();
-        write(api, "browse/edit_playlist", json!({"playlistId": id, "actions": actions})).await?;
-    }
-    Ok(id)
+    let value = write(api, "playlist/create", json!({"title": title, "description": "", "privacyStatus": "PRIVATE", "videoIds": video_ids})).await?;
+    value["playlistId"].as_str().map(str::to_owned).ok_or_else(|| anyhow::anyhow!("YouTube Music did not return a playlist"))
+}
+
+/// Add songs to a playlist in one request, skipping any already in it.
+pub async fn add_videos(api: &Api, playlist_id: &str, video_ids: &[String]) -> anyhow::Result<()> {
+    let actions: Vec<Value> = video_ids.iter().map(|v| json!({"action": "ACTION_ADD_VIDEO", "addedVideoId": v, "dedupeOption": "DEDUPE_OPTION_SKIP"})).collect();
+    write(api, "browse/edit_playlist", json!({"playlistId": playlist_id, "actions": actions})).await?;
+    Ok(())
 }
 
 pub async fn edit_playlist(api: &Api, id: &str, title: &str, description: &str, privacy: Option<&str>) -> anyhow::Result<()> {

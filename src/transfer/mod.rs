@@ -26,6 +26,8 @@ use spotify::{Source, Track};
 const CONCURRENCY: usize = 8;
 /// The most songs a YouTube Music playlist holds; longer lists are split into parts.
 const PLAYLIST_MAX: usize = 5000;
+/// How often progress is written while searching or liking.
+const SAVE_EVERY: Duration = Duration::from_secs(5);
 /// The credential the Spotify sign-in (`sp_dc` cookie) is saved under.
 const VAULT: &str = "spotify sp_dc";
 
@@ -126,8 +128,12 @@ pub struct Job {
     started: Instant,
     /// Playlists already created, so a resumed transfer doesn't make them twice.
     created: Vec<String>,
-    /// Liked Music: how many of the songs to like are done (they're liked in order).
-    liked_upto: usize,
+    /// Songs added to those playlists so far (a batch at a time).
+    added: usize,
+    /// Songs this transfer has liked so far.
+    liked: usize,
+    /// The review is done; a resumed transfer goes straight to adding.
+    reviewed: bool,
 }
 
 impl Job {
@@ -190,6 +196,8 @@ pub struct Transfer {
     pub lookup: Mutex<Option<(String, Option<Result<spotify::Entry, String>>)>>,
     /// Spotify sign-in window open.
     pub signing_in: AtomicBool,
+    /// Bumped on every sign-in or sign-out, so a slow account read can't undo a newer one.
+    account_gen: std::sync::atomic::AtomicU64,
     cancel: AtomicBool,
     review_done: tokio::sync::Notify,
     data_dir: PathBuf,
@@ -207,7 +215,9 @@ struct Saved {
     results: Vec<Search>,
     not_songs: usize,
     created: Vec<String>,
-    liked_upto: usize,
+    added: usize,
+    liked: usize,
+    reviewed: bool,
 }
 
 const SAVED_VERSION: u32 = 1;
@@ -220,6 +230,7 @@ impl Transfer {
             lookup: Mutex::new(None),
             resumable: Mutex::new(None),
             signing_in: AtomicBool::new(false),
+            account_gen: Default::default(),
             cancel: AtomicBool::new(false),
             review_done: tokio::sync::Notify::new(),
             data_dir: data_dir.to_owned(),
@@ -265,6 +276,7 @@ impl Transfer {
                 self.load_account(rt);
             }
             None => {
+                self.account_gen.fetch_add(1, Ordering::Relaxed);
                 crate::vault::delete(VAULT, &self.data_dir);
                 crate::login::forget(&self.spotify_profile());
                 *self.account.lock().unwrap() = Account::SignedOut;
@@ -288,6 +300,7 @@ impl Transfer {
             return;
         };
         *self.account.lock().unwrap() = Account::Loading;
+        let generation = self.account_gen.fetch_add(1, Ordering::Relaxed) + 1;
         let this = self.clone();
         rt.spawn(async move {
             let res = async {
@@ -295,7 +308,11 @@ impl Transfer {
                 client.account().await
             }
             .await;
-            *this.account.lock().unwrap() = match res {
+            let mut account = this.account.lock().unwrap();
+            if this.account_gen.load(Ordering::Relaxed) != generation {
+                return; // signed out or in again meanwhile
+            }
+            *account = match res {
                 Ok(a) => Account::SignedIn { name: a.name, library: a.library },
                 Err(e) if e.is::<spotify::SignedOut>() => {
                     crate::vault::delete(VAULT, &this.data_dir);
@@ -306,6 +323,7 @@ impl Transfer {
                     Account::Failed(format!("Couldn't read your Spotify library: {e}"))
                 }
             };
+            drop(account);
             this.wake();
         });
     }
@@ -409,10 +427,14 @@ impl Transfer {
         self.review_done.notify_one();
     }
 
-    /// Start a transfer (or resume the saved one for the same source).
-    pub fn start(self: &Arc<Self>, rt: &crate::backend::Backend, source: Source, dest: Dest) {
+    /// Start a transfer; `resume` picks up the saved progress for the same source and
+    /// destination, otherwise it starts over.
+    pub fn start(self: &Arc<Self>, rt: &crate::backend::Backend, source: Source, dest: Dest, resume: bool) {
         if self.running() {
             return;
+        }
+        if !resume {
+            self.forget(&source);
         }
         self.cancel.store(false, Ordering::Relaxed);
         *self.resumable.lock().unwrap() = None;
@@ -433,7 +455,9 @@ impl Transfer {
             paused: false,
             started: Instant::now(),
             created: Vec::new(),
-            liked_upto: 0,
+            added: 0,
+            liked: 0,
+            reviewed: false,
         });
         let (this, api) = (self.clone(), rt.api());
         rt.spawn(async move {
@@ -489,7 +513,9 @@ impl Transfer {
                 results: j.results.clone(),
                 not_songs: j.not_songs,
                 created: j.created.clone(),
-                liked_upto: j.liked_upto,
+                added: j.added,
+                liked: j.liked,
+                reviewed: j.reviewed,
             }
         };
         let path = self.path(&Source::parse_key(&saved.key));
@@ -531,8 +557,9 @@ impl Transfer {
         anyhow::ensure!(api.account().is_some(), "Sign in to YouTube Music first");
         let source = self.with_job(|j| j.source.clone());
 
-        // ---- read the Spotify side, or pick up saved progress
-        match self.load_saved(&source) {
+        // ---- read the Spotify side, or pick up saved progress (for the same destination)
+        let dest = self.with_job(|j| j.dest.clone());
+        match self.load_saved(&source).filter(|s| s.dest == dest) {
             Some(s) => self.with_job(|j| {
                 j.read = (s.tracks.len(), s.tracks.len());
                 j.name = s.name;
@@ -540,7 +567,9 @@ impl Transfer {
                 j.results = s.results;
                 j.not_songs = s.not_songs;
                 j.created = s.created;
-                j.liked_upto = s.liked_upto;
+                j.added = s.added;
+                j.liked = s.liked;
+                j.reviewed = s.reviewed;
             }),
             None => {
                 let t = Instant::now();
@@ -589,13 +618,18 @@ impl Transfer {
         // ---- search the doubtful songs again, with videos, for the review
         let doubtful: Vec<usize> = self.with_job(|j| {
             j.phase = Phase::Checking;
+            if j.reviewed {
+                return Vec::new();
+            }
             (0..j.results.len()).filter(|&i| matches!(j.results[i], Search::Unsure(_) | Search::Missing)).collect()
         });
         self.wake();
         let tracks: Vec<Track> = self.with_job(|j| doubtful.iter().map(|&i| j.tracks[i].clone()).collect());
         let mut found: Vec<(usize, Vec<(YtTrack, bool)>)> = stream::iter(doubtful.iter().copied().zip(tracks))
             .map(|(i, t)| async move {
-                let _ = self.checkpoint().await;
+                if self.checkpoint().await.is_err() {
+                    return (i, Vec::new());
+                }
                 (i, candidates(api, &t).await.unwrap_or_default())
             })
             .buffer_unordered(CONCURRENCY)
@@ -633,8 +667,9 @@ impl Transfer {
                     }
                 }
             });
-            self.save();
         }
+        self.with_job(|j| j.reviewed = true);
+        self.save();
 
         // ---- add them
         self.with_job(|j| j.phase = Phase::Saving);
@@ -659,7 +694,8 @@ impl Transfer {
 
         let elapsed = self.with_job(|j| j.started.elapsed());
         self.with_job(|j| {
-            j.summary = Some(Summary { added: ids.len() - already, duplicates, already, playlists, elapsed });
+            let added = if dest == Dest::Liked && !dry { j.liked } else { ids.len() };
+            j.summary = Some(Summary { added, duplicates, already, playlists, elapsed });
             j.phase = Phase::Done;
         });
         self.forget(&source);
@@ -696,7 +732,7 @@ impl Transfer {
                 }
             };
             self.with_job(|j| j.results[i] = result);
-            if last_save.elapsed() > Duration::from_secs(2) {
+            if last_save.elapsed() > SAVE_EVERY {
                 self.save();
                 last_save = Instant::now();
             }
@@ -711,38 +747,66 @@ impl Transfer {
         Ok(failed)
     }
 
+    /// Create the playlist (parts of 5,000 for longer lists) and add the songs a batch at
+    /// a time. Progress is saved after each step, so a retry never makes a second
+    /// playlist or adds a batch twice.
     async fn create_playlists(&self, api: &Api, title: &str, ids: &[String]) -> Result<Vec<String>> {
+        const BATCH: usize = 200;
         let parts: Vec<&[String]> = ids.chunks(PLAYLIST_MAX).collect();
-        self.with_job(|j| j.saving = (0, ids.len()));
+        self.with_job(|j| j.saving = (j.added.min(ids.len()), ids.len()));
         for (n, part) in parts.iter().enumerate() {
-            if self.with_job(|j| j.created.len()) > n {
-                continue;
+            let base = n * PLAYLIST_MAX;
+            let id = match self.with_job(|j| j.created.get(n).cloned()) {
+                Some(id) => id,
+                None => {
+                    self.checkpoint().await?;
+                    let part_title = if parts.len() > 1 { format!("{title} ({})", n + 1) } else { title.to_owned() };
+                    let first = &part[..part.len().min(BATCH)];
+                    // Not retried here: one that timed out may still have made the playlist.
+                    let id = ytm::create_playlist_with(api, &part_title, first).await.context("Creating the playlist failed")?;
+                    self.with_job(|j| {
+                        j.created.push(id.clone());
+                        j.added = base + first.len();
+                        j.saving.0 = j.added;
+                    });
+                    self.save();
+                    self.wake();
+                    id
+                }
+            };
+            loop {
+                let done = self.with_job(|j| j.added.saturating_sub(base)).min(part.len());
+                if done == part.len() {
+                    break;
+                }
+                self.checkpoint().await?;
+                let batch = &part[done..(done + BATCH).min(part.len())];
+                // Adding skips songs already in the playlist, so a repeated batch is harmless.
+                retry(|| ytm::add_videos(api, &id, batch)).await.context("Adding songs to the playlist failed")?;
+                self.with_job(|j| {
+                    j.added = base + done + batch.len();
+                    j.saving.0 = j.added;
+                });
+                self.save();
+                self.wake();
             }
-            self.checkpoint().await?;
-            let part_title = if parts.len() > 1 { format!("{title} ({})", n + 1) } else { title.to_owned() };
-            let id = retry(|| ytm::create_playlist_with(api, &part_title, part)).await.context("Creating the playlist failed")?;
-            self.with_job(|j| {
-                j.created.push(id);
-                j.saving.0 += part.len();
-            });
-            self.save();
-            self.wake();
         }
         Ok(self.with_job(|j| j.created.clone()))
     }
 
     /// Like every song that isn't liked yet, oldest first, so Liked Music ends up in
-    /// Spotify's order (newest at the top). Returns how many were liked already.
+    /// Spotify's order (newest at the top). Returns how many were liked before the
+    /// transfer. Resuming skips what's liked by then, this transfer's likes included.
     async fn like_all(&self, api: &Api, ids: &[String]) -> Result<usize> {
         let liked: HashSet<String> = retry(|| ytm::playlist(api, "LM", true, 20_000)).await.context("Reading your Liked Music failed")?.tracks.into_iter().map(|t| t.id).collect();
         let todo: Vec<&String> = ids.iter().rev().filter(|id| !liked.contains(*id)).collect();
-        let already = ids.len() - todo.len();
-        let start = self.with_job(|j| {
-            j.saving = (j.liked_upto.min(todo.len()), todo.len());
-            j.liked_upto.min(todo.len())
+        let earlier = self.with_job(|j| {
+            j.saving = (j.liked, j.liked + todo.len());
+            j.liked
         });
+        let already = (ids.len() - todo.len()).saturating_sub(earlier);
         let mut last_save = Instant::now();
-        for (n, id) in todo.iter().enumerate().skip(start) {
+        for id in todo {
             self.checkpoint().await?;
             let mut tries = 0;
             loop {
@@ -758,15 +822,16 @@ impl Transfer {
                 }
             }
             self.with_job(|j| {
-                j.liked_upto = n + 1;
-                j.saving.0 = n + 1;
+                j.liked += 1;
+                j.saving.0 = j.liked;
             });
-            if last_save.elapsed() > Duration::from_secs(2) {
+            if last_save.elapsed() > SAVE_EVERY {
                 self.save();
                 last_save = Instant::now();
             }
             self.wake();
         }
+        self.save();
         Ok(already)
     }
 }

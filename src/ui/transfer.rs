@@ -221,7 +221,7 @@ fn setup(app: &mut App, ui: &mut Ui) {
             go = Some(true);
         }
         match go {
-            Some(true) => xfer.start(&app.backend, r.source, r.dest),
+            Some(true) => xfer.start(&app.backend, r.source, r.dest, true),
             Some(false) => xfer.discard_saved(&r.source),
             None => {}
         }
@@ -325,12 +325,15 @@ fn setup(app: &mut App, ui: &mut Ui) {
                 ui.add_space(14.0);
             });
             ui.add_space(gap);
-            let ready = chosen.is_some() && !(app.xfer.to_liked == false && app.xfer.name.trim().is_empty() && chosen.is_none());
+            // Liked Songs are only readable signed in.
+            let needs_sign_in = chosen.as_ref().is_some_and(|c| c.source == Source::Liked) && !matches!(account, Account::SignedIn { .. });
+            let ready = chosen.is_some() && !needs_sign_in;
             if big_button(ui, "Start transfer", accent, ready, ui.available_width()) {
                 start = true;
             }
             ui.add_space(8.0);
             let estimate = match chosen.as_ref().and_then(|c| c.count) {
+                _ if needs_sign_in => "Sign in to Spotify to copy your Liked Songs.".to_owned(),
                 Some(n) => {
                     let secs = (n as u64 / 20).max(5);
                     format!("About {} to search {} songs. You can keep listening meanwhile.", fmt_secs(secs), fmt_n(n))
@@ -371,7 +374,7 @@ fn setup(app: &mut App, ui: &mut Ui) {
         // (YTM_TRANSFER_START=liked tests Liked Music with any playlist.)
         let liked = app.xfer.to_liked && (likes_like(&c) || super::dev_var("YTM_TRANSFER_START") == Some("liked"));
         let dest = if liked { Dest::Liked } else { Dest::Playlist(app.xfer.name.trim().to_owned()) };
-        xfer.start(&app.backend, c.source.clone(), dest);
+        xfer.start(&app.backend, c.source.clone(), dest, false);
         app.xfer.tab = Tab::All;
         app.xfer.pick = None;
         app.xfer.seen = None;
@@ -1139,7 +1142,9 @@ fn failed(app: &mut App, ui: &mut Ui, e: &str) {
     breadcrumb(app, ui);
     page_title(ui, "Transfer stopped");
     ui.add_space(10.0);
-    let resumable = xfer.resumable.lock().unwrap().clone();
+    // Only this transfer's own progress (one that failed before saving any has none).
+    let source = xfer.job.lock().unwrap().as_ref().map(|j| j.source.clone());
+    let resumable = xfer.resumable.lock().unwrap().clone().filter(|r| Some(&r.source) == source.as_ref());
     let (mut retry, mut close) = (false, false);
     settings_card(ui, |ui| {
         setting_row(ui, "Something went wrong", Some(e), |ui| {
@@ -1152,7 +1157,7 @@ fn failed(app: &mut App, ui: &mut Ui, e: &str) {
     });
     if retry && let Some(r) = resumable {
         xfer.dismiss();
-        xfer.start(&app.backend, r.source, r.dest);
+        xfer.start(&app.backend, r.source, r.dest, true);
     } else if close {
         xfer.dismiss();
     }

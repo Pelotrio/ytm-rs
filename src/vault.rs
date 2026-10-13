@@ -27,6 +27,14 @@ fn key(name: &str, data_dir: &Path) -> String {
 mod store {
     /// Credential Manager's limit on one secret.
     const CHUNK: usize = 2560;
+    /// One store operation at a time: writes and deletes from several threads at once
+    /// can be lost (stale parts were left behind in testing).
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(test)]
+    pub fn tests_entry(key: &str, part: usize) -> keyring::Entry {
+        entry(key, part).unwrap()
+    }
 
     fn entry(key: &str, part: usize) -> keyring::Result<keyring::Entry> {
         let user = if part == 0 { key.to_owned() } else { format!("{key} #{}", part + 1) };
@@ -34,6 +42,7 @@ mod store {
     }
 
     pub fn get(key: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let _one = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut out = Vec::new();
         for part in 0.. {
             match entry(key, part)?.get_secret() {
@@ -53,6 +62,7 @@ mod store {
     }
 
     pub fn set(key: &str, secret: &[u8]) -> anyhow::Result<()> {
+        let _one = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // A secret of an exact multiple of CHUNK ends with an empty part, so reading knows where it stops.
         let mut parts: Vec<&[u8]> = secret.chunks(CHUNK).collect();
         if secret.len() % CHUNK == 0 {
@@ -65,6 +75,7 @@ mod store {
     }
 
     pub fn delete(key: &str) -> anyhow::Result<()> {
+        let _one = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         delete_from(key, 0)
     }
 
@@ -136,7 +147,7 @@ pub fn delete(name: &str, data_dir: &Path) {
 mod tests {
     #[test]
     fn round_trip_across_chunks() {
-        let key = "ytm-rs vault test";
+        let key = &format!("ytm-rs vault test {}", std::process::id());
         for len in [0, 10, 2560, 2561, 6000, 100] {
             let secret: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
             super::store::set(key, &secret).unwrap();
@@ -144,5 +155,33 @@ mod tests {
         }
         super::store::delete(key).unwrap();
         assert!(super::store::get(key).unwrap().is_none());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod stress {
+    #[test]
+    #[ignore]
+    fn parallel_stress() {
+        let pid = std::process::id();
+        let handles: Vec<_> = (0..4)
+            .map(|t| {
+                std::thread::spawn(move || {
+                    for round in 0..15 {
+                        let key = format!("ytm-rs stress {pid} {t}");
+                        super::store::set(&key, &vec![7u8; 6000]).unwrap();
+                        super::store::set(&key, &vec![7u8; 100]).unwrap();
+                        assert_eq!(super::store::get(&key).unwrap().unwrap().len(), 100, "round {round}");
+                        super::store::delete(&key).unwrap();
+                        for part in 0..3 {
+                            assert!(matches!(super::store::tests_entry(&key, part).get_secret(), Err(keyring::Error::NoEntry)), "thread {t} round {round} part {part} left");
+                        }
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
     }
 }
