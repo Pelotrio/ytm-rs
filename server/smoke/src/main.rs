@@ -122,10 +122,15 @@ async fn main() -> R {
     let code = new_code();
     println!("room {code} on {}", base());
 
-    step!("GET / -> 200", async {
-        let r = http_get("/").await?;
-        check(r.starts_with("HTTP/1.1 200") && r.ends_with("ytm-rs jam server"), &r)
-    }.await);
+    // The raw HTTP check speaks plain TCP: local `wrangler dev` only.
+    if base().starts_with("ws://") {
+        step!("GET / -> 200", async {
+            let r = http_get("/").await?;
+            check(r.starts_with("HTTP/1.1 200") && r.ends_with("ytm-rs jam server"), &r)
+        }.await);
+    } else {
+        println!("skip GET / -> 200 (TLS)");
+    }
 
     step!("invalid code -> 400", async {
         match connect_async(format!("{}/jam/ABC0OI?create=0&v=1", base())).await {
