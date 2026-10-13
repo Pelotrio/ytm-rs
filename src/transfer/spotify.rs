@@ -644,3 +644,27 @@ mod tests {
         assert!(p.tracks[0].art.is_some());
     }
 }
+
+#[cfg(test)]
+mod library_live {
+    /// `cargo test --release -- --ignored library_live --nocapture` (uses the saved Spotify sign-in)
+    #[tokio::test]
+    #[ignore]
+    async fn library_live() {
+        let dir = directories::ProjectDirs::from("", "", "ytm-rs").unwrap().data_dir().to_path_buf();
+        let cookie = String::from_utf8(crate::vault::get("spotify sp_dc", &dir).expect("signed in")).unwrap();
+        let c = super::Client::connect(Some(&cookie), &dir).await.unwrap();
+        let body = c
+            .query("libraryV3", serde_json::json!({"filters": ["Playlists"], "order": null, "textFilter": null, "features": ["LIKED_SONGS"], "limit": 50, "offset": 0, "flatten": true, "folderUri": null, "includeFoldersWhenFlattening": true}))
+            .await
+            .unwrap();
+        let lib = &body["data"]["me"]["libraryV3"];
+        println!("typename {} total {} keys {:?}", lib["__typename"], lib["totalCount"], lib.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+        for it in lib["items"].as_array().into_iter().flatten().take(6) {
+            let s = it.to_string();
+            println!("ITEM {}", &s[..s.len().min(600)]);
+        }
+        let acc = c.account().await.unwrap();
+        println!("parsed {} entries: {:?}", acc.library.len(), acc.library.iter().take(8).map(|e| &e.name).collect::<Vec<_>>());
+    }
+}

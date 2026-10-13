@@ -269,9 +269,20 @@ fn setup(app: &mut App, ui: &mut Ui) {
                 match &account {
                     Account::SignedIn { .. } if library.is_empty() => dim(ui, "Your Spotify library has no playlists."),
                     Account::SignedIn { .. } => {
-                        for e in library {
-                            source_row(app, ui, e, chosen.as_ref().is_some_and(|c| c.source == e.source), accent);
-                        }
+                        // Five rows show at a time; the rest scroll, so a big library doesn't
+                        // stretch the page.
+                        let row = 64.0 + ui.spacing().item_spacing.y;
+                        let h = row * library.len().min(5) as f32 - ui.spacing().item_spacing.y;
+                        egui::ScrollArea::vertical()
+                            .id_salt("xfer-library")
+                            .auto_shrink([false, true])
+                            .min_scrolled_height(h)
+                            .max_height(h)
+                            .show_rows(ui, 64.0, library.len(), |ui, range| {
+                                for e in &library[range] {
+                                    source_row(app, ui, e, chosen.as_ref().is_some_and(|c| c.source == e.source), accent);
+                                }
+                            });
                     }
                     Account::Unknown | Account::Loading => {
                         ui.horizontal(|ui| {
