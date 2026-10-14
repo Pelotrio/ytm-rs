@@ -12,12 +12,18 @@ const MAX_FRAME: usize = 256 * 1024;
 const GRACE_MS: i64 = 5 * 60 * 1000;
 const BURST: f64 = 20.0;
 const RATE_PER_SEC: f64 = 5.0;
+/// How often a room with people in it reports to Stats, so a room whose
+/// object died without saying so drops out of the live counts.
+const BEAT_MS: i64 = 10 * 60 * 1000;
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let url = req.url()?;
     if url.path() == "/" {
         return Response::ok("ytm-rs jam server");
+    }
+    if url.path() == "/stats" {
+        return stats_stub(&env)?.fetch_with_str("https://stats/stats").await;
     }
     let Some(raw) = url.path().strip_prefix("/jam/") else {
         return Response::error("not found", 404);
@@ -65,15 +71,16 @@ struct Member {
 #[durable_object]
 pub struct Room {
     state: State,
+    env: Env,
 }
 
 impl DurableObject for Room {
-    fn new(state: State, _env: Env) -> Self {
+    fn new(state: State, env: Env) -> Self {
         // Keepalives are answered by the runtime without waking us up.
         if let Ok(pair) = WebSocketRequestResponsePair::new("ping", "pong") {
             state.set_websocket_auto_response(&pair);
         }
-        Self { state }
+        Self { state, env }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -126,7 +133,7 @@ impl DurableObject for Room {
         }
         meta.empty_since = None;
         storage.put("meta", &meta).await?;
-        storage.delete_alarm().await?;
+        storage.set_alarm(BEAT_MS).await?;
 
         let ws = pair.server;
         self.state.accept_web_socket(&ws);
@@ -146,6 +153,8 @@ impl DurableObject for Room {
         for (other, _) in &members {
             send(other, &update);
         }
+        let ev = if create.as_deref() == Some("1") { "create" } else { "join" };
+        self.report(ev, list.len()).await;
         Response::from_websocket(pair.client)
     }
 
@@ -228,6 +237,7 @@ impl DurableObject for Room {
                     send(&other, &json!({ "t": "ended" }));
                     let _ = other.close(Some(1000), Some("ended"));
                 }
+                self.report("end", 0).await;
             }
             "req" => {
                 let cmd = m.remove("cmd").unwrap_or(Value::Null);
@@ -267,8 +277,13 @@ impl DurableObject for Room {
     }
 
     async fn alarm(&self) -> Result<Response> {
-        // Nobody came back during the grace period: forget the room.
-        if self.members(None).is_empty() {
+        let members = self.members(None).len();
+        if members > 0 {
+            // Still going: the alarm is the heartbeat.
+            self.report("beat", members).await;
+            self.state.storage().set_alarm(BEAT_MS).await?;
+        } else {
+            // Nobody came back during the grace period: forget the room.
             self.state.storage().delete_all().await?;
         }
         Response::ok("ok")
@@ -308,6 +323,23 @@ impl Room {
         out
     }
 
+    /// Tells Stats how many people this room has now, and logs the event for
+    /// Workers Logs. Metrics are best effort: a failure never breaks the room.
+    async fn report(&self, ev: &str, members: usize) {
+        let Some(code) = self.state.id().name() else { return };
+        console_log!("{}", json!({ "jam": ev, "room": code, "members": members }));
+        let body = json!({ "code": code, "ev": ev, "members": members }).to_string();
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post).with_body(Some(body.into()));
+        let sent = async {
+            let req = Request::new_with_init("https://stats/report", &init)?;
+            stats_stub(&self.env)?.fetch_with_request(req).await
+        };
+        if let Err(e) = sent.await {
+            console_error!("stats report failed: {e}");
+        }
+    }
+
     fn broadcast(&self, msg: &Value, skip: Option<&WebSocket>) {
         for (ws, _) in self.members(skip) {
             send(&ws, msg);
@@ -326,6 +358,7 @@ impl Room {
         let storage = self.state.storage();
         let Some(mut meta) = storage.get::<Meta>("meta").await? else { return Ok(()) };
         let rest = self.members(Some(ws));
+        self.report("leave", rest.len()).await;
         if rest.is_empty() {
             meta.empty_since = Some(now());
             storage.put("meta", &meta).await?;
@@ -406,4 +439,183 @@ fn valid_cmd(cmd: &Value) -> Option<&str> {
         _ => false,
     };
     ok.then_some(kind)
+}
+
+fn stats_stub(env: &Env) -> Result<Stub> {
+    env.durable_object("STATS")?.id_from_name("global")?.get_stub()
+}
+
+/// A room that hasn't reported in this long is presumed gone (rooms with
+/// people in them report every BEAT_MS).
+const STALE_MS: i64 = 25 * 60 * 1000;
+
+/// One object for the whole service: rooms report joins and leaves here, and
+/// `GET /stats` reads it. Holds counts only, never room codes or names.
+#[durable_object]
+pub struct Stats {
+    sql: SqlStorage,
+}
+
+#[derive(Deserialize)]
+struct Report {
+    code: String,
+    ev: String,
+    members: u32,
+}
+
+#[derive(Deserialize)]
+struct Num {
+    v: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct Day {
+    day: String,
+    rooms: f64,
+    joins: f64,
+    peak_listeners: f64,
+}
+
+impl DurableObject for Stats {
+    fn new(state: State, _env: Env) -> Self {
+        let sql = state.storage().sql();
+        for q in [
+            "CREATE TABLE IF NOT EXISTS live (code TEXT PRIMARY KEY, members INTEGER NOT NULL, started INTEGER NOT NULL, seen INTEGER NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS counters (k TEXT PRIMARY KEY, v INTEGER NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS daily (day TEXT PRIMARY KEY, rooms INTEGER NOT NULL DEFAULT 0, joins INTEGER NOT NULL DEFAULT 0, peak_listeners INTEGER NOT NULL DEFAULT 0)",
+        ] {
+            if let Err(e) = sql.exec(q, None) {
+                console_error!("stats schema: {e}");
+            }
+        }
+        Self { sql }
+    }
+
+    async fn fetch(&self, mut req: Request) -> Result<Response> {
+        let now = now() as i64;
+        self.sql.exec("DELETE FROM live WHERE seen < ?", vec![(now - STALE_MS).into()])?;
+        match req.path().as_str() {
+            "/report" => {
+                let r: Report = req.json().await?;
+                self.record(&r, now)?;
+                Response::ok("ok")
+            }
+            "/stats" => {
+                let mut res = Response::from_json(&self.snapshot(now)?)?;
+                res.headers_mut().set("Cache-Control", "no-store")?;
+                res.headers_mut().set("Access-Control-Allow-Origin", "*")?;
+                Ok(res)
+            }
+            _ => Response::error("not found", 404),
+        }
+    }
+}
+
+impl Stats {
+    fn record(&self, r: &Report, now: i64) -> Result<()> {
+        let day = day_of(now);
+        let code = r.code.as_str();
+        let started = self.num("SELECT started AS v FROM live WHERE code = ?", vec![code.into()])?;
+        if r.members == 0 {
+            // A stretch with people in it just ended.
+            if let Some(started) = started {
+                self.sql.exec("DELETE FROM live WHERE code = ?", vec![code.into()])?;
+                self.bump("sessions", 1)?;
+                self.bump("session_ms", now - started as i64)?;
+            }
+        } else {
+            self.sql.exec(
+                "INSERT INTO live (code, members, started, seen) VALUES (?, ?, ?, ?)
+                 ON CONFLICT(code) DO UPDATE SET members = excluded.members, seen = excluded.seen",
+                vec![code.into(), (r.members as i64).into(), now.into(), now.into()],
+            )?;
+        }
+        self.sql.exec("INSERT OR IGNORE INTO daily (day) VALUES (?)", vec![day.as_str().into()])?;
+        self.sql.exec("INSERT OR IGNORE INTO counters (k, v) VALUES ('since', ?)", vec![now.into()])?;
+        match r.ev.as_str() {
+            "create" => {
+                self.bump("rooms_created", 1)?;
+                self.bump("joins", 1)?;
+                self.sql.exec("UPDATE daily SET rooms = rooms + 1, joins = joins + 1 WHERE day = ?", vec![day.as_str().into()])?;
+            }
+            "join" => {
+                self.bump("joins", 1)?;
+                self.bump("guest_joins", 1)?;
+                self.sql.exec("UPDATE daily SET joins = joins + 1 WHERE day = ?", vec![day.as_str().into()])?;
+            }
+            "end" => self.bump("rooms_ended", 1)?,
+            _ => {}
+        }
+        let (rooms, listeners) = self.live()?;
+        self.peak("peak_rooms", rooms)?;
+        self.peak("peak_listeners", listeners)?;
+        self.sql.exec(
+            "UPDATE daily SET peak_listeners = max(peak_listeners, ?) WHERE day = ?",
+            vec![listeners.into(), day.as_str().into()],
+        )?;
+        Ok(())
+    }
+
+    fn snapshot(&self, now: i64) -> Result<Value> {
+        let c = |k: &str| self.num("SELECT v FROM counters WHERE k = ?", vec![k.into()]).map(|v| v.unwrap_or(0.0) as i64);
+        let (rooms, listeners) = self.live()?;
+        let largest = self.num("SELECT max(members) AS v FROM live", None)?.unwrap_or(0.0) as i64;
+        let (sessions, session_ms) = (c("sessions")?, c("session_ms")?);
+        let avg_min = if sessions > 0 { (session_ms as f64 / sessions as f64 / 60_000.0 * 10.0).round() / 10.0 } else { 0.0 };
+        let daily: Vec<Day> = self
+            .sql
+            .exec("SELECT day, rooms, joins, peak_listeners FROM daily ORDER BY day DESC LIMIT 30", None)?
+            .to_array()?;
+        let since = c("since")?;
+        Ok(json!({
+            "live": { "rooms": rooms, "listeners": listeners, "largest_room": largest },
+            "totals": {
+                "rooms_created": c("rooms_created")?,
+                "joins": c("joins")?,
+                "guest_joins": c("guest_joins")?,
+                "rooms_ended": c("rooms_ended")?,
+                "sessions": sessions,
+                "avg_session_min": avg_min,
+            },
+            "peaks": { "rooms": c("peak_rooms")?, "listeners": c("peak_listeners")? },
+            "daily": daily.iter().map(|d| json!({
+                "day": d.day, "rooms": d.rooms as i64, "joins": d.joins as i64, "peak_listeners": d.peak_listeners as i64,
+            })).collect::<Vec<_>>(),
+            "since": (since > 0).then_some(since),
+            "now": now,
+        }))
+    }
+
+    /// Rooms with people in them, and how many people that is.
+    fn live(&self) -> Result<(i64, i64)> {
+        let rooms = self.num("SELECT count(*) AS v FROM live", None)?.unwrap_or(0.0) as i64;
+        let listeners = self.num("SELECT sum(members) AS v FROM live", None)?.unwrap_or(0.0) as i64;
+        Ok((rooms, listeners))
+    }
+
+    fn num(&self, q: &str, binds: impl Into<Option<Vec<SqlStorageValue>>>) -> Result<Option<f64>> {
+        Ok(self.sql.exec(q, binds)?.to_array::<Num>()?.into_iter().next().and_then(|n| n.v))
+    }
+
+    fn bump(&self, k: &str, by: i64) -> Result<()> {
+        self.sql.exec(
+            "INSERT INTO counters (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = v + excluded.v",
+            vec![k.into(), by.into()],
+        )?;
+        Ok(())
+    }
+
+    fn peak(&self, k: &str, val: i64) -> Result<()> {
+        self.sql.exec(
+            "INSERT INTO counters (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = max(v, excluded.v)",
+            vec![k.into(), val.into()],
+        )?;
+        Ok(())
+    }
+}
+
+/// "YYYY-MM-DD" in UTC.
+fn day_of(ms: i64) -> String {
+    let iso: String = js_sys::Date::new(&(ms as f64).into()).to_iso_string().into();
+    iso[..10].to_string()
 }

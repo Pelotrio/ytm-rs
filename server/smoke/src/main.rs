@@ -108,6 +108,13 @@ async fn http_get(path: &str) -> R<String> {
     Ok(out)
 }
 
+async fn stats() -> R<Value> {
+    let r = http_get("/stats").await?;
+    check(r.starts_with("HTTP/1.1 200"), &r)?;
+    let (start, end) = (r.find('{').ok_or("no json")?, r.rfind('}').ok_or("no json")?);
+    Ok(serde_json::from_str(&r[start..=end])?)
+}
+
 macro_rules! step {
     ($name:expr, $body:expr) => {{
         match $body {
@@ -324,6 +331,35 @@ async fn main() -> R {
         expect_error(&mut ws, "rate").await?;
         send(&mut ws, json!({ "t": "end" })).await
     }.await);
+
+    if base().starts_with("ws://") {
+        step!("stats count rooms, joins and live listeners", async {
+            let before = stats().await?;
+            let code = new_code();
+            let mut h = connect(&code, true, "Host").await?;
+            expect(&mut h, "welcome").await?;
+            let mut g = connect(&code, false, "Guest").await?;
+            expect(&mut g, "welcome").await?;
+            let raw = http_get("/stats").await?;
+            check(!raw.contains(&code), "stats must not leak room codes")?;
+            let mid = stats().await?;
+            let d = |s: &Value, k: &str| s["totals"][k].as_i64().unwrap_or(0);
+            check(d(&mid, "rooms_created") == d(&before, "rooms_created") + 1, &mid.to_string())?;
+            check(d(&mid, "guest_joins") == d(&before, "guest_joins") + 1, &mid.to_string())?;
+            check(mid["live"]["rooms"].as_i64() >= Some(1) && mid["live"]["listeners"].as_i64() >= Some(2), &mid.to_string())?;
+            check(mid["peaks"]["listeners"].as_i64() >= Some(2), "peak listeners")?;
+            check(mid["daily"][0]["rooms"].as_i64() >= Some(1), "daily rooms")?;
+            send(&mut h, json!({ "t": "end" })).await?;
+            expect(&mut g, "ended").await?;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let after = stats().await?;
+            check(d(&after, "rooms_ended") == d(&before, "rooms_ended") + 1, &after.to_string())?;
+            check(d(&after, "sessions") == d(&before, "sessions") + 1, &after.to_string())?;
+            check(after["live"]["listeners"].as_i64() <= Some(mid["live"]["listeners"].as_i64().unwrap_or(0) - 2), &after.to_string())
+        }.await);
+    } else {
+        println!("skip stats (TLS)");
+    }
 
     println!("all checks passed");
     Ok(())

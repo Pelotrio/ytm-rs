@@ -26,6 +26,18 @@ npx wrangler dev              # serves ws://127.0.0.1:8787, no account needed
 cd smoke && cargo run         # end-to-end smoke test against it (JAM_URL overrides the address)
 ```
 
+## Metrics
+
+`GET /stats` returns aggregate JSON from a single `Stats` Durable Object: live rooms and
+listeners (and the biggest room), totals (rooms created, joins, guest joins, rooms ended,
+sessions and their average length), all-time peaks, and the last 30 days of rooms, joins
+and peak listeners (UTC). It never includes room codes or names.
+
+Rooms report on every join, leave and end, plus a heartbeat every 10 minutes while people
+are in them. A room that stops reporting for 25 minutes drops out of the live counts. Each
+report is also logged as JSON (`{"jam": "create", "room": ..., "members": ...}`), so
+Workers Logs can query it.
+
 ## Protocol (v1)
 
 The client side is `src/jam.rs` (connection) and `src/ui/jam.rs` (sync). Here is a summary.
