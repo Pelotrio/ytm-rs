@@ -199,7 +199,7 @@ button { font: inherit; color: inherit; }
   .stat { padding: 26px 16px; }
 }
 
-/* ---------- what's new (feature108-style tabs) ---------- */
+/* ---------- together (feature108-style tabs) ---------- */
 .news { padding-top: 110px; }
 .feat { max-width: var(--max); margin: 0 auto; }
 .feat__tabs { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; }
@@ -264,12 +264,6 @@ button { font: inherit; color: inherit; }
 .feat__faces i:nth-child(3) { background: #8fd3ff; }
 .feat__ring { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: rgba(30, 215, 96, 0.14); }
 .feat__ring svg { width: 18px; height: 18px; fill: none; stroke: #1ed760; stroke-width: 2; stroke-linejoin: round; }
-.more { max-width: var(--max); margin: 40px auto 0; display: flex; align-items: center; flex-wrap: wrap; gap: 12px 18px; }
-.more__label { font: 500 12.5px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--amber); }
-.more__list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; flex: 1; }
-.more__list li { padding: 8px 13px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); font-size: 13.5px; color: var(--ink-2); }
-.more__link { font-size: 14px; font-weight: 600; color: var(--ink); text-decoration: none; white-space: nowrap; }
-.more__link:hover { color: var(--amber); }
 @media (max-width: 960px) {
   .feat__panel { grid-template-columns: 1fr; gap: 36px; }
   .feat__float { left: 12px; bottom: -18px; }

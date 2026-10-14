@@ -54,7 +54,7 @@
 
   onScroll();
 
-  /* ---------------- what's new: tabs that advance on their own ---------------- */
+  /* ---------------- together: tabs that advance on their own ---------------- */
   const feat = $("[data-feat]");
   if (feat) {
     const tabs = $$("[data-feat-tab]", feat);
