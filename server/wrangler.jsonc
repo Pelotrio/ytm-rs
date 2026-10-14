@@ -10,5 +10,6 @@
     "bindings": [{ "name": "ROOMS", "class_name": "Room" }]
   },
   // SQLite-backed Durable Objects are what the free plan allows.
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
+  "observability": { "enabled": true }
 }
