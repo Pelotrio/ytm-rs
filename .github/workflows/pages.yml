@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
       - name: Version asset URLs
-        run: sed -i "s/__V__/${GITHUB_SHA::8}/g" site/index.html site/jam/index.html
+        run: sed -i "s/__V__/${GITHUB_SHA::8}/g" site/index.html site/jam/index.html site/jam/stats/index.html
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
