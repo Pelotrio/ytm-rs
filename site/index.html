@@ -48,11 +48,11 @@
       "@id": "https://grapedjuice.github.io/ytm-rs/#app",
       "name": "ytm-rs",
       "alternateName": "ytm-rs YouTube Music client",
-      "description": "A fast, lightweight, native YouTube Music desktop client written in Rust with egui and rodio. Word-by-word synced lyrics with romanization and translation, 26 themes, 256 kbps audio with Premium, uploads, Discord Rich Presence and automatic updates.",
+      "description": "A fast, lightweight, native YouTube Music desktop client written in Rust with egui and rodio. Word-by-word synced lyrics with romanization and translation, 26 themes, 256 kbps audio with Premium, uploads, listening together, Spotify playlist transfer, Discord Rich Presence and automatic updates.",
       "applicationCategory": "MultimediaApplication",
       "applicationSubCategory": "Music player",
       "operatingSystem": "Windows",
-      "softwareVersion": "0.2.12",
+      "softwareVersion": "0.2.13",
       "fileSize": "7.4MB",
       "url": "https://grapedjuice.github.io/ytm-rs/",
       "downloadUrl": "https://github.com/grapedjuice/ytm-rs/releases/latest",
@@ -106,6 +106,7 @@
     <span>ytm-rs</span>
   </a>
   <nav class="nav__links" aria-label="Sections">
+    <a href="#new">New</a>
     <a href="#lyrics">Lyrics</a>
     <a href="#features">Features</a>
     <a href="#themes">Themes</a>
@@ -131,7 +132,7 @@
   <div class="hero__inner">
     <a class="chip" href="https://github.com/grapedjuice/ytm-rs/releases/latest" rel="noopener">
       <span class="chip__dot"></span>
-      <span data-version>v0.2.12</span> is out
+      <span data-version>v0.2.13</span> is out
       <span class="chip__sep"></span>
       <span class="chip__more">Release notes →</span>
     </a>
@@ -173,10 +174,84 @@
   <p class="stats__note">Measured with v0.2.12 on Windows 11: private memory with a song playing (about 80&nbsp;MB idle, 102&nbsp;MB with lyrics open), and frames drawn with the window idle.</p>
 </section>
 
-<!-- ============ MANIFESTO ============ -->
-<section class="reveal" data-reveal aria-label="Why ytm-rs exists">
-  <div class="reveal__sticky">
-    <p class="reveal__text" data-reveal-text>Your music app shouldn't be a web browser in disguise. ytm-rs draws every pixel itself, decodes audio itself, and talks to YouTube Music directly. It opens fast, stays small, and sleeps when you look away.</p>
+<!-- ============ WHAT'S NEW ============ -->
+<section class="section news" id="new" aria-labelledby="new-title">
+  <div class="section__head">
+    <p class="eyebrow">New in v0.2.13</p>
+    <h2 id="new-title">Bring your friends. Bring your Spotify.</h2>
+  </div>
+
+  <div class="feat" data-feat>
+    <div class="feat__tabs" role="tablist" aria-label="New features">
+      <button role="tab" id="feat-tab-jam" aria-controls="feat-jam" aria-selected="true" data-feat-tab="jam">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        Listen together
+        <i class="feat__bar" aria-hidden="true"></i>
+      </button>
+      <button role="tab" id="feat-tab-transfer" aria-controls="feat-transfer" aria-selected="false" tabindex="-1" data-feat-tab="transfer">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 3l4 4-4 4M21 7H9M7 21l-4-4 4-4M3 17h12"/></svg>
+        Transfer from Spotify
+        <i class="feat__bar" aria-hidden="true"></i>
+      </button>
+    </div>
+
+    <div class="feat__panel is-on" role="tabpanel" id="feat-jam" aria-labelledby="feat-tab-jam" data-feat-panel="jam">
+      <div class="feat__copy">
+        <span class="feat__badge">Jams</span>
+        <h3>Same song, same second, different rooms.</h3>
+        <p>Start a jam and share the code or the link. Friends who open it land straight in ytm-rs and hear what you're playing at the same moment, each streaming it on their own.</p>
+        <ul class="feat__list">
+          <li><b>Up to 16 people</b> in one jam, kept within a tenth of a second of the host.</li>
+          <li><b>You set the rules.</b> Let guests add songs, control playback, both or neither.</li>
+          <li><b>Guest picks play next,</b> marked with who added them.</li>
+        </ul>
+      </div>
+      <figure class="feat__shot">
+        <div class="feat__window">
+          <div class="device__bar" aria-hidden="true"><i></i><i></i><i></i><span>ytm-rs</span></div>
+          <img src="img/shots/jam-770.webp" srcset="img/shots/jam-385.webp 385w, img/shots/jam-770.webp 770w" sizes="(max-width: 960px) 90vw, 620px" width="770" height="720" loading="lazy" alt="A guest's view of a jam in ytm-rs: the code TEST23, a note that the host controls playback, and three people listening to Sparkle by RADWIMPS">
+        </div>
+        <div class="feat__float feat__float--tr" aria-hidden="true">
+          <span class="feat__faces"><i>G</i><i>M</i><i>S</i></span>
+          <span><b>3 listening</b><small>in sync</small></span>
+        </div>
+      </figure>
+    </div>
+
+    <div class="feat__panel" role="tabpanel" id="feat-transfer" aria-labelledby="feat-tab-transfer" data-feat-panel="transfer" hidden>
+      <div class="feat__copy">
+        <span class="feat__badge">Settings → Import</span>
+        <h3>Your Spotify library, moved over in the background.</h3>
+        <p>Pick a playlist or your Liked Songs, or paste any playlist link, and keep listening while ytm-rs finds every song on YouTube Music.</p>
+        <ul class="feat__list">
+          <li><b>Asks when it isn't sure</b> about a match, then makes a private playlist.</li>
+          <li><b>Liked Songs go to Liked Music</b> in the same order as on Spotify.</li>
+          <li><b>Picks up where it left off</b> if a transfer gets interrupted.</li>
+        </ul>
+      </div>
+      <figure class="feat__shot">
+        <div class="feat__window">
+          <div class="device__bar" aria-hidden="true"><i></i><i></i><i></i><span>ytm-rs</span></div>
+          <img src="img/shots/transfer-1115.webp" srcset="img/shots/transfer-558.webp 558w, img/shots/transfer-1115.webp 1115w" sizes="(max-width: 960px) 90vw, 620px" width="1115" height="648" loading="lazy" alt="The Transfer from Spotify page in ytm-rs, listing Liked Songs and playlists to copy, the signed-in Spotify account and the new playlist's name">
+        </div>
+        <div class="feat__float" aria-hidden="true">
+          <span class="feat__ring"><svg viewBox="0 0 24 24"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg></span>
+          <span><b>Liked Songs → Liked Music</b><small>same order as Spotify</small></span>
+        </div>
+      </figure>
+    </div>
+  </div>
+
+  <div class="more">
+    <span class="more__label">And much more</span>
+    <ul class="more__list">
+      <li>Close to tray</li>
+      <li>Play and skip from the taskbar</li>
+      <li>A sidebar that folds away</li>
+      <li>Sign-ins kept in Windows Credential Manager</li>
+      <li>The first song starts right away</li>
+    </ul>
+    <a class="more__link" href="https://github.com/grapedjuice/ytm-rs/releases/latest" rel="noopener">Full release notes →</a>
   </div>
 </section>
 
@@ -270,7 +345,7 @@
     <article class="card" data-glow>
       <span class="card__icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></span>
       <h3>Feels like part of Windows</h3>
-      <p>Media keys and the Windows media flyout, Discord Rich Presence, and controls named for screen readers.</p>
+      <p>Media keys, the Windows media flyout, play and skip buttons on the taskbar, close to tray, Discord Rich Presence, and controls named for screen readers.</p>
     </article>
 
     <article class="card" data-glow>
@@ -555,7 +630,7 @@
     <div class="dl__beam" aria-hidden="true"></div>
     <img class="dl__icon" src="icon-512.png" alt="" width="96" height="96" loading="lazy">
     <h2 id="download-title">Get ytm-rs</h2>
-    <p class="dl__ver"><span data-version>v0.2.12</span> · <span data-size>7.4 MB</span> · Windows · <span data-date>October 2026</span></p>
+    <p class="dl__ver"><span data-version>v0.2.13</span> · <span data-size>7.4 MB</span> · Windows · <span data-date>October 2026</span></p>
     <div class="dl__cta">
       <a class="btn btn--primary btn--lg" href="https://github.com/grapedjuice/ytm-rs/releases/latest" data-dl-direct rel="noopener">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 3v11.17l4.59-4.58L18 11l-6 6-6-6 1.41-1.41L11 14.17V3zM5 19h14v2H5z"/></svg>

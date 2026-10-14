@@ -52,23 +52,55 @@
     });
   }
 
-  // text-reveal: words light up as the sticky block scrolls past
-  const reveal = $("[data-reveal]");
-  const revealText = $("[data-reveal-text]");
-  if (reveal && revealText) {
-    const hl = new Set(["itself,", "directly.", "sleeps"]);
-    revealText.innerHTML = revealText.textContent.trim().split(/\s+/)
-      .map((w) => `<span class="w${hl.has(w) ? " hl" : ""}">${w}</span>`).join(" ");
-    const words = $$(".w", revealText);
-    scrollJobs.push(() => {
-      if (reduced) return;
-      const r = reveal.getBoundingClientRect();
-      const p = clamp(-r.top / (r.height - innerHeight), 0, 1);
-      const n = Math.round(p * 1.15 * words.length);
-      words.forEach((w, i) => w.classList.toggle("on", i < n));
-    });
-  }
   onScroll();
+
+  /* ---------------- what's new: tabs that advance on their own ---------------- */
+  const feat = $("[data-feat]");
+  if (feat) {
+    const tabs = $$("[data-feat-tab]", feat);
+    const DUR = 9000;
+    let cur = 0, t0 = performance.now(), auto = !reduced, visible = false, held = false, p = 0;
+    const show = (i, focus) => {
+      cur = (i + tabs.length) % tabs.length;
+      p = 0;
+      tabs.forEach((t, j) => {
+        const on = j === cur;
+        t.setAttribute("aria-selected", on);
+        t.tabIndex = on ? 0 : -1;
+        t.style.setProperty("--p", 0);
+        const panel = $(`[data-feat-panel="${t.dataset.featTab}"]`, feat);
+        panel.hidden = !on;
+        panel.classList.toggle("is-on", on);
+      });
+      if (focus) tabs[cur].focus();
+      t0 = performance.now();
+    };
+    tabs.forEach((t, i) => {
+      t.addEventListener("click", () => { auto = false; show(i); });
+      t.addEventListener("keydown", (e) => {
+        const d = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+        if (d) { e.preventDefault(); auto = false; show(cur + d, true); }
+      });
+    });
+    // Hovering or scrolling away pauses the timer; it resumes where it stopped.
+    const resume = () => (t0 = performance.now() - p * DUR);
+    feat.addEventListener("pointerenter", () => (held = true));
+    feat.addEventListener("pointerleave", () => { held = false; resume(); });
+    new IntersectionObserver(([e]) => {
+      visible = e.isIntersecting;
+      if (visible) resume();
+    }, { threshold: 0.35 }).observe(feat);
+    const tick = (now) => {
+      if (!auto) return;
+      if (visible && !held) {
+        p = (now - t0) / DUR;
+        if (p >= 1) show(cur + 1);
+        else tabs[cur].style.setProperty("--p", p.toFixed(4));
+      }
+      requestAnimationFrame(tick);
+    };
+    if (auto) requestAnimationFrame(tick);
+  }
 
   /* ---------------- hero headline: karaoke sweep ---------------- */
   const kws = $$(".hero__title .kw");
