@@ -40,6 +40,14 @@
     <td colspan="2" align="center">Home</td>
   </tr>
   <tr>
+    <td width="50%"><img src="docs/screenshots/listen-together.jpg" alt="Listen together: a jam with code TEST23, Copy link and Copy code buttons, and three people listening"></td>
+    <td width="50%"><img src="docs/screenshots/spotify-transfer.jpg" alt="Transfer from Spotify: a public Spotify playlist pasted in, ready to copy into a new YouTube Music playlist"></td>
+  </tr>
+  <tr>
+    <td align="center">Listen together</td>
+    <td align="center">Transfer from Spotify</td>
+  </tr>
+  <tr>
     <td><img src="docs/screenshots/artist.jpg" alt="The Weeknd's artist page with a large header image and his top songs, Blinding Lights playing"></td>
     <td><img src="docs/screenshots/settings-themes.jpg" alt="Settings with appearance switches and the theme gallery"></td>
   </tr>
