@@ -202,6 +202,22 @@ impl Api {
         Ok(serde_json::from_str(&text)?)
     }
 
+    /// GET `url` as the signed-in account, the way the web player sends its stats pings.
+    pub async fn get_signed_in(&self, url: &str, query: &[(&str, &str)]) -> anyhow::Result<()> {
+        let account = self.account().ok_or_else(|| anyhow::anyhow!("sign in first"))?;
+        let req = self
+            .http
+            .get(url)
+            .query(query)
+            .header("User-Agent", webmusic::UA)
+            .header("Origin", ORIGIN)
+            .header("X-Origin", ORIGIN)
+            .header("Referer", ORIGIN)
+            .timeout(Duration::from_secs(15));
+        account.sign(req, ORIGIN)?.send().await?.error_for_status()?;
+        Ok(())
+    }
+
     /// Check a signed-in cookie with YouTube and read which account/channel it is for.
     pub async fn session_from_cookie(&self, cookie: &str) -> anyhow::Result<Session> {
         let html = self

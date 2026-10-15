@@ -487,6 +487,34 @@ pub async fn dislike(api: &Api, video_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Tell YouTube the account played a song, so it lands in watch history (and from
+/// there in Recap, recommendations and "Listen again"), the way music.youtube.com does:
+/// the signed-in player response carries a stats URL that the web player pings once
+/// playback starts. Streams come from other clients, so this asks for the player
+/// response only to get that URL.
+pub async fn report_play(api: &Api, video_id: &str) -> anyhow::Result<()> {
+    let player = api.call_signed_in("player", json!({"videoId": video_id, "contentCheckOk": true, "racyCheckOk": true})).await?;
+    let url = player["playbackTracking"]["videostatsPlaybackUrl"]["baseUrl"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("no playback tracking URL ({})", player["playabilityStatus"]["status"].as_str().unwrap_or("?")))?;
+    let cpn = cpn();
+    api.get_signed_in(url, &[("ver", "2"), ("c", "WEB_REMIX"), ("cpn", &cpn)]).await
+}
+
+/// A client playback nonce: 16 characters from the web player's alphabet.
+fn cpn() -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut x = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0x9e37_79b9_7f4a_7c15, |d| d.as_nanos() as u64) | 1;
+    (0..16)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            ALPHABET[(x & 63) as usize] as char
+        })
+        .collect()
+}
+
 /// Check the response here so a rejected edit never looks successful in the UI.
 async fn write(api: &Api, endpoint: &str, body: Value) -> anyhow::Result<Value> {
     let value = api.call_signed_in(endpoint, body).await?;

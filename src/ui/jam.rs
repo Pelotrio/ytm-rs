@@ -61,6 +61,8 @@ pub struct Session {
     last: Option<(Tick, Instant)>,
     /// The song we started for the room, and when we asked for it.
     loaded: Option<String>,
+    /// The last song reported to YouTube as played, so pauses don't count it twice.
+    reported: Option<String>,
     load_started: Option<Instant>,
     /// How long songs take to start here, so they're opened that far ahead.
     load_ms: u64,
@@ -456,9 +458,12 @@ fn sync(app: &mut App) {
         if tick.playing {
             // Opened a little ahead: by the time it starts, the host is there.
             let ahead = Duration::from_millis(app.jam.load_ms);
+            // Joining a song counts as a play; catching up on the same one doesn't.
+            let report = app.jam.reported.as_deref() != Some(tick.vid.as_str());
+            app.jam.reported = Some(tick.vid.clone());
             app.jam.loaded = Some(tick.vid.clone());
             app.jam.load_started = Some(Instant::now());
-            app.play_current_at(target + ahead);
+            app.play_current_at(target + ahead, report);
         } else if app.jam.loaded.as_deref() != Some(tick.vid.as_str()) || app.resume_at != Some(target) {
             // Paused: show the song at the host's position without loading it.
             app.audio.send(AudioCmd::Stop);

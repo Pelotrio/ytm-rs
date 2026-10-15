@@ -770,11 +770,12 @@ impl App {
     }
 
     fn play_current(&mut self) {
-        self.play_current_at(Duration::ZERO);
+        self.play_current_at(Duration::ZERO, true);
     }
 
     /// Start the current track, opened directly at `at` so nothing plays from 0:00 first.
-    fn play_current_at(&mut self, at: Duration) {
+    /// `report`: a new play for the account's history (not picking up last session's song).
+    fn play_current_at(&mut self, at: Duration, report: bool) {
         let Some(track) = self.current().cloned() else { return };
         self.resume_at = None;
         self.generation += 1;
@@ -783,7 +784,7 @@ impl App {
         self.audio.send(AudioCmd::Stop);
         self.buffering = true;
         self.seek_drag = None;
-        self.backend.request(Req::Play { video_id: track.id.clone(), generation: self.generation, at });
+        self.backend.request(Req::Play { video_id: track.id.clone(), generation: self.generation, at, report });
         if let Some(m) = &mut self.media {
             m.set_track(
                 &track.title,
@@ -858,7 +859,8 @@ impl App {
             return jam::request(self, crate::jam::Cmd::Toggle);
         }
         if let Some(at) = self.resume_at {
-            self.play_current_at(at);
+            // Last session's song, already counted when it started then.
+            self.play_current_at(at, false);
             return;
         }
         let playing = self.playing();

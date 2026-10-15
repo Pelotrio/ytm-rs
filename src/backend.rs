@@ -46,8 +46,9 @@ pub enum Req {
     Radio(String),
     /// Fetch an album/playlist and play it from the start.
     PlayCollection { target: Target, shuffle: bool },
-    /// `at`: start position (non-zero when resuming last session's song).
-    Play { video_id: String, generation: u64, at: std::time::Duration },
+    /// `at`: start position (non-zero when resuming last session's song). `report`: tell
+    /// YouTube about the play (not when picking up a song already counted).
+    Play { video_id: String, generation: u64, at: std::time::Duration, report: bool },
     /// Resolve and download a track ahead of time so skipping to it is instant.
     Prefetch(String),
     Like { video_id: String, like: bool },
@@ -408,7 +409,7 @@ impl Backend {
                     }
                     Resp::PlayQueue { tracks }
                 }
-                Req::Play { video_id, generation, at } => match self.start_playback(&video_id, generation, at).await {
+                Req::Play { video_id, generation, at, report } => match self.start_playback(&video_id, generation, at, report).await {
                     Ok(()) => return Ok(None),
                     Err(e) => Resp::PlayError { generation, msg: format!("{e:#}") },
                 },
@@ -517,7 +518,7 @@ impl Backend {
         Ok(())
     }
 
-    async fn start_playback(&self, video_id: &str, generation: u64, at: std::time::Duration) -> anyhow::Result<()> {
+    async fn start_playback(&self, video_id: &str, generation: u64, at: std::time::Duration, report: bool) -> anyhow::Result<()> {
         let t0 = std::time::Instant::now();
         let prefetched = self.prefetched.lock().unwrap().take();
         let replay = self.current.lock().unwrap().take().filter(|(id, s)| id == video_id && s.is_complete()).map(|(_, s)| s);
@@ -558,6 +559,7 @@ impl Backend {
         // header); from the top, the non-seekable one starts sooner.
         let seek = !at.is_zero();
         let shared2 = shared.clone();
+        let report = (report && self.is_logged_in() && reports_plays()).then(|| (self.clone(), video_id.to_owned()));
         let open = move || -> anyhow::Result<crate::audio::TrackDecoder> {
             let mut d = stream::decoder(shared.clone(), seek)?;
             if seek {
@@ -568,7 +570,16 @@ impl Backend {
         tokio::task::spawn_blocking(move || match open() {
             Ok(decoder) => {
                 log::debug!("play gen {generation}: decoder ready at {at:?} in {:?}", t0.elapsed());
-                audio.send(AudioCmd::Start { generation, decoder, shared: shared2, at })
+                audio.send(AudioCmd::Start { generation, decoder, shared: shared2, at });
+                // Skipped past before it started: that one doesn't count.
+                if let Some((this, id)) = report.filter(|_| audio.status.wanted_gen.load(Ordering::Relaxed) == generation) {
+                    this.rt.spawn(async move {
+                        match ytm::report_play(&this.api, &id).await {
+                            Ok(()) => log::debug!("reported play of {id}"),
+                            Err(e) => log::warn!("couldn't report play of {id}: {e:#}"),
+                        }
+                    });
+                }
             }
             Err(e) => {
                 let _ = tx.send(Resp::PlayError { generation, msg: format!("decode: {e}") });
@@ -729,6 +740,12 @@ impl Backend {
     pub fn is_logged_in(&self) -> bool {
         self.api.account().is_some()
     }
+}
+
+/// Test instances (`YTM_BACKGROUND`) keep plays out of the account's history unless
+/// `YTM_REPORT_PLAYS` is set.
+fn reports_plays() -> bool {
+    std::env::var_os("YTM_BACKGROUND").is_none() || std::env::var_os("YTM_REPORT_PLAYS").is_some()
 }
 
 #[derive(Clone, Copy)]
