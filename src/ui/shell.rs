@@ -670,9 +670,14 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
     if right_btn(ui, if app.np_open { icon::CHEVRON_DOWN } else { icon::CHEVRON_UP }, "Now playing", app.np_open) {
         app.actions.push(Action::OpenNowPlaying(!app.np_open));
     }
-    let queue_open = app.queue_open;
+    // In now playing the queue is its Up next panel; elsewhere, the side panel.
+    let queue_open = if app.np_open { app.np_tab == NpTab::UpNext } else { app.queue_open };
     if right_btn(ui, icon::LIST_MUSIC, "Queue", queue_open) {
-        app.queue_open = !app.queue_open;
+        if app.np_open {
+            app.np_tab = if queue_open { NpTab::Art } else { NpTab::UpNext };
+        } else {
+            app.queue_open = !app.queue_open;
+        }
     }
     // Not lit for a song without lyrics: now playing shows its artwork instead.
     let lyrics_on = app.np_open && app.np_tab == NpTab::Lyrics && !app.no_lyrics();

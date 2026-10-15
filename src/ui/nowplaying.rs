@@ -97,10 +97,6 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
             app.set_fullscreen(ui.ctx(), fs);
         }
         ui.add_space(8.0);
-        let more = icon_button(ui, icon::ELLIPSIS_VERTICAL, 20.0, "Song options", false);
-        let liked = app.liked.contains(&track.id);
-        egui::Popup::menu(&more).show(|ui| widgets::song_menu(ui, &track, liked, &mut app.actions));
-        ui.add_space(8.0);
         // Clicking the active chip again turns it off, leaving just the artwork.
         if widgets::chip(ui, "Up next", app.np_tab == NpTab::UpNext).clicked() {
             app.np_tab = if app.np_tab == NpTab::UpNext { NpTab::Art } else { NpTab::UpNext };
@@ -117,10 +113,8 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
         if lyr.inner.clicked() {
             app.np_tab = if app.np_tab == NpTab::Lyrics { NpTab::Art } else { NpTab::Lyrics };
         }
-        if app.np_tab == NpTab::Lyrics && !no_lyrics {
-            ui.add_space(8.0);
-            lyric_controls(app, ui);
-        }
+        ui.add_space(8.0);
+        options_menu(app, ui, &track, app.np_tab == NpTab::Lyrics && !no_lyrics);
     });
 
     let content = Rect::from_min_max(pos2(area.left(), header.bottom() + 12.0), area.max);
@@ -459,59 +453,65 @@ fn sync_label(k: SyncKind) -> &'static str {
     }
 }
 
-/// The lyrics options, right of the Lyrics chip: one "⋯" button that opens a panel
-/// with the source picker, translation and romanization toggles, and this song's
-/// timing offset, so the header stays clean until you want them.
-fn lyric_controls(app: &mut App, ui: &mut Ui) {
-    let Some((id, set)) = app.lyrics.as_ref() else { return };
-    let id = id.clone();
-    let available = app.lyric_prefs.available(set);
-    let Some(shown) = app.lyric_prefs.choose(&id, set) else { return };
-    let n = available.len();
-
+/// Now playing's one options button, left of the chips: the song's actions, and with
+/// lyrics showing, the source picker, translation and romanization toggles, and this
+/// song's timing offset above them, so the header stays clean until you want them.
+fn options_menu(app: &mut App, ui: &mut Ui, track: &crate::model::Track, lyrics: bool) {
     let (rect, resp) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::click());
-    let resp = named(resp, "Lyrics options").on_hover_text(format!("{} · {}", shown.name(), sync_label(shown.sync()))).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let resp = named(resp, "Options").on_hover_cursor(egui::CursorIcon::PointingHand);
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
     let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered() || open, 0.12);
     ui.painter().circle_filled(rect.center(), 17.0, theme::glass(0.09 + 0.07 * h));
     for dx in [-6.0, 0.0, 6.0] {
         ui.painter().circle_filled(rect.center() + vec2(dx, 0.0), 1.9, theme::with_alpha(Color32::WHITE, 0.75 + 0.25 * h));
     }
-
-    let mut pick = None;
     egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
         ui.set_width(270.0);
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
         ui.add_space(4.0);
-        menu_caption(ui, if n > 1 { "SOURCE" } else { "SOURCE · ONLY ONE FOUND" });
-        for p in &available {
-            if source_row(ui, p.name(), p.sync(), *p == shown) {
-                pick = Some(*p);
-            }
+        if lyrics {
+            lyric_options(app, ui);
+            menu_divider(ui);
         }
-        menu_divider(ui);
-        let tip = format!("Translation · {}", lang_name(&app.lyric_prefs.target));
-        switch_row(ui, &tip, &mut app.show_trans);
-        switch_row(ui, "Romanization", &mut app.show_roman);
-        menu_divider(ui);
-        // This song's timing for the shown source: − +0.0s +
-        let off = app.lyric_prefs.song_offset(&id, shown);
-        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
-        ui.painter().text(pos2(row.left() + 12.0, row.center().y), egui::Align2::LEFT_CENTER, "Timing", theme::regular(14.0), theme::TEXT);
-        let mut sub = ui.new_child(egui::UiBuilder::new().max_rect(row.shrink2(vec2(8.0, 0.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
-        sub.spacing_mut().item_spacing.x = 2.0;
-        if mini_icon(&mut sub, icon::CHEVRON_RIGHT, "Lyrics later (+0.1 s)", true).clicked() {
-            app.lyric_prefs.set_song_offset(&id, shown, off + 0.1);
-        }
-        let label = format!("{off:+.1}s").replace("+0.0", "0.0");
-        if mini_text(&mut sub, &label, false, "This song's lyrics timing. Double-click to reset.").double_clicked() {
-            app.lyric_prefs.set_song_offset(&id, shown, 0.0);
-        }
-        if mini_icon(&mut sub, icon::CHEVRON_LEFT, "Lyrics earlier (−0.1 s)", true).clicked() {
-            app.lyric_prefs.set_song_offset(&id, shown, off - 0.1);
-        }
+        let liked = app.liked.contains(&track.id);
+        widgets::song_actions(ui, track, liked, &mut app.actions);
         ui.add_space(4.0);
     });
+}
+
+fn lyric_options(app: &mut App, ui: &mut Ui) {
+    let Some((id, set)) = app.lyrics.as_ref() else { return };
+    let id = id.clone();
+    let available = app.lyric_prefs.available(set);
+    let Some(shown) = app.lyric_prefs.choose(&id, set) else { return };
+    let n = available.len();
+    let mut pick = None;
+    menu_caption(ui, if n > 1 { "LYRICS SOURCE" } else { "LYRICS SOURCE · ONLY ONE FOUND" });
+    for p in &available {
+        if source_row(ui, p.name(), p.sync(), *p == shown) {
+            pick = Some(*p);
+        }
+    }
+    menu_divider(ui);
+    let tip = format!("Translation · {}", lang_name(&app.lyric_prefs.target));
+    switch_row(ui, &tip, &mut app.show_trans);
+    switch_row(ui, "Romanization", &mut app.show_roman);
+    // This song's timing for the shown source: ‹ +0.0s ›
+    let off = app.lyric_prefs.song_offset(&id, shown);
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
+    ui.painter().text(pos2(row.left() + 12.0, row.center().y), egui::Align2::LEFT_CENTER, "Timing", theme::regular(14.0), theme::TEXT);
+    let mut sub = ui.new_child(egui::UiBuilder::new().max_rect(row.shrink2(vec2(8.0, 0.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    sub.spacing_mut().item_spacing.x = 2.0;
+    if mini_icon(&mut sub, icon::CHEVRON_RIGHT, "Lyrics later (+0.1 s)", true).clicked() {
+        app.lyric_prefs.set_song_offset(&id, shown, off + 0.1);
+    }
+    let label = format!("{off:+.1}s").replace("+0.0", "0.0");
+    if mini_text(&mut sub, &label, false, "This song's lyrics timing. Double-click to reset.").double_clicked() {
+        app.lyric_prefs.set_song_offset(&id, shown, 0.0);
+    }
+    if mini_icon(&mut sub, icon::CHEVRON_LEFT, "Lyrics earlier (−0.1 s)", true).clicked() {
+        app.lyric_prefs.set_song_offset(&id, shown, off - 0.1);
+    }
     if let Some(p) = pick.filter(|p| *p != shown) {
         app.lyric_prefs.pick(&id, set, p);
         log::info!("lyrics: showing {} ({}/{}) by choice", p.key(), available.iter().position(|x| *x == p).map_or(0, |i| i + 1), n);
@@ -539,8 +539,8 @@ fn source_row(ui: &mut Ui, name: &str, sync: SyncKind, current: bool) -> bool {
     if h > 0.0 || current {
         ui.painter().rect_filled(rect, 8.0, theme::glass(0.05 * current as u8 as f32 + 0.08 * h));
     }
-    ui.painter().circle_filled(pos2(rect.left() + 16.0, rect.center().y), 3.5, sync_color(sync));
-    let x = rect.left() + 30.0;
+    ui.painter().circle_filled(pos2(rect.left() + 19.0, rect.center().y), 3.5, sync_color(sync));
+    let x = rect.left() + 40.0;
     text_at(ui, pos2(x, rect.top() + 6.0), name, theme::semibold(13.5), theme::TEXT, rect.right() - x - 34.0);
     text_at(ui, pos2(x, rect.top() + 24.0), sync_label(sync), theme::regular(12.0), theme::text_dim(), rect.right() - x - 34.0);
     if current {

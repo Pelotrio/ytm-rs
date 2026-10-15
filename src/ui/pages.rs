@@ -964,6 +964,28 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
             setting_row(ui, title, Some(desc), |_| {});
         }
     });
+    // ---- downloads, last thing on the page
+    let downloads = app.updater.as_ref().and_then(|u| u.downloads());
+    let text = match downloads {
+        Some(n) => format!("Downloaded {} times", thousands(n)),
+        None => "Counting downloads…".to_owned(),
+    };
+    ui.add_space(28.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, theme::regular(13.0), theme::TEXT_FAINT);
+}
+
+/// 12345 -> "12,345".
+fn thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Small heading above a settings card, with an optional value on the right.

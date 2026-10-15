@@ -380,7 +380,7 @@ fn more_button(ui: &mut Ui, rect: Rect, id: egui::Id, label: &str) -> Response {
 }
 
 fn menu_action(ui: &mut Ui, glyph: Option<char>, label: &str) -> bool {
-    let (rect, response) = ui.allocate_exact_size(vec2(218.0, 32.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width() - 8.0, 32.0), Sense::click());
     let response = named(response, label).on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.hovered() {
         ui.painter().rect_filled(rect, 7.0, theme::glass(0.12));
@@ -399,6 +399,12 @@ fn menu_action(ui: &mut Ui, glyph: Option<char>, label: &str) -> bool {
 pub fn song_menu(ui: &mut Ui, t: &Track, liked: bool, acts: &mut Vec<Action>) {
     ui.set_width(226.0);
     ui.add_space(3.0);
+    song_actions(ui, t, liked, acts);
+    ui.add_space(3.0);
+}
+
+/// The song menu's items, for menus that add their own (now playing's options).
+pub fn song_actions(ui: &mut Ui, t: &Track, liked: bool, acts: &mut Vec<Action>) {
     if menu_action(ui, Some(icon::HEART), if liked { "Remove like" } else { "Like song" }) {
         acts.push(Action::Like(t.id.clone(), !liked));
     }
@@ -434,7 +440,6 @@ pub fn song_menu(ui: &mut Ui, t: &Track, liked: bool, acts: &mut Vec<Action>) {
             acts.push(Action::Open(Target::Artist(id.to_owned())));
         }
     }
-    ui.add_space(3.0);
 }
 
 /// Soft drop shadow under a rounded rect (e.g. artwork).
