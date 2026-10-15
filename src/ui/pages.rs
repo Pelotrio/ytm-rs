@@ -716,12 +716,26 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
         divider(ui);
         setting_row(ui, "Translate into", None, |ui| {
             let current = super::lyric_prefs::LANGUAGES.iter().find(|(c, _)| *c == app.lyric_prefs.target).map_or(app.lyric_prefs.target.as_str(), |(_, n)| n);
-            egui::ComboBox::from_id_salt("lyric-lang").selected_text(current).width(190.0).show_ui(ui, |ui| {
-                for (code, name) in super::lyric_prefs::LANGUAGES {
-                    if ui.selectable_label(app.lyric_prefs.target == *code, *name).clicked() {
-                        app.lyric_prefs.target = (*code).to_owned();
+            let btn = dropdown_button(ui, current, 200.0, "Translate into");
+            let just_opened = btn.clicked();
+            egui::Popup::menu(&btn).show(|ui| {
+                ui.set_width(200.0);
+                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    ui.add_space(4.0);
+                    for (code, name) in super::lyric_prefs::LANGUAGES {
+                        let on = app.lyric_prefs.target == *code;
+                        let row = option_row(ui, name, on);
+                        if on && just_opened {
+                            row.scroll_to_me(Some(egui::Align::Center));
+                        }
+                        if row.clicked() {
+                            app.lyric_prefs.target = (*code).to_owned();
+                            ui.close();
+                        }
                     }
-                }
+                    ui.add_space(4.0);
+                });
             });
         });
         divider(ui);
@@ -964,15 +978,62 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
             setting_row(ui, title, Some(desc), |_| {});
         }
     });
-    // ---- downloads, last thing on the page
+    // ---- sign-off, last thing on the page: the app icon, its name and its download count
     let downloads = app.updater.as_ref().and_then(|u| u.downloads());
     let text = match downloads {
-        Some(n) => format!("Downloaded {} times", thousands(n)),
+        Some(1) => "1 download and counting".to_owned(),
+        Some(n) => format!("{} downloads and counting", thousands(n)),
         None => "Counting downloads…".to_owned(),
     };
-    ui.add_space(28.0);
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, theme::regular(13.0), theme::TEXT_FAINT);
+    ui.add_space(40.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 96.0), Sense::hover());
+    let icon = app_icon(ui.ctx());
+    let icon_rect = Rect::from_center_size(pos2(rect.center().x, rect.top() + 22.0), vec2(44.0, 44.0));
+    ui.painter().image(icon.id(), icon_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+    ui.painter().text(pos2(rect.center().x, rect.top() + 58.0), Align2::CENTER_CENTER, "ytm-rs", theme::bold(17.0), theme::TEXT);
+    ui.painter().text(pos2(rect.center().x, rect.top() + 82.0), Align2::CENTER_CENTER, text, theme::regular(13.0), theme::text_dim());
+}
+
+/// The app icon as a texture, decoded once.
+fn app_icon(ctx: &egui::Context) -> egui::TextureHandle {
+    let id = egui::Id::new("app-icon");
+    if let Some(t) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return t;
+    }
+    let img = image::load_from_memory(include_bytes!("../../assets/icon/icon.png")).map(|i| i.to_rgba8()).unwrap_or_default();
+    let size = [img.width() as usize, img.height() as usize];
+    let t = ctx.load_texture("app-icon", egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()), egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, t.clone()));
+    t
+}
+
+/// A dropdown's closed state: the chosen value and a chevron on a glass pill.
+fn dropdown_button(ui: &mut Ui, value: &str, width: f32, name: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 36.0), Sense::click());
+    let resp = widgets::named(resp, name).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
+    let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered() || open, 0.12);
+    ui.painter().rect_filled(rect, 10.0, theme::glass(0.08 + 0.05 * h));
+    widgets::text_at(ui, pos2(rect.left() + 14.0, rect.center().y - 9.0), value, theme::regular(14.0), theme::TEXT, rect.width() - 44.0);
+    let glyph = if open { theme::icon::CHEVRON_UP } else { theme::icon::CHEVRON_DOWN };
+    widgets::icon_at(ui, pos2(rect.right() - 18.0, rect.center().y), glyph, 15.0, theme::lerp_color(theme::text_dim(), theme::TEXT, h));
+    resp
+}
+
+/// A dropdown option: hover glass, and a check on the chosen one.
+fn option_row(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
+    let resp = widgets::named(resp, label).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.12);
+    if h > 0.0 || selected {
+        ui.painter().rect_filled(rect, 8.0, theme::glass(0.05 * selected as u8 as f32 + 0.08 * h));
+    }
+    let font = if selected { theme::semibold(14.0) } else { theme::regular(14.0) };
+    widgets::text_at(ui, pos2(rect.left() + 12.0, rect.center().y - 9.0), label, font, theme::TEXT, rect.width() - 44.0);
+    if selected {
+        widgets::icon_at(ui, pos2(rect.right() - 16.0, rect.center().y), theme::icon::CHECK, 15.0, theme::TEXT);
+    }
+    resp
 }
 
 /// 12345 -> "12,345".

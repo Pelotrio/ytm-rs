@@ -189,13 +189,31 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
     }
     let toward = if !lyrics_only && cs.side == Side::Right { -slide } else { slide };
     let rect = right.translate(vec2(toward * (1.0 - panel_vis), 0.0));
-    let mut rui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-    rui.set_clip_rect(content.intersect(ui.clip_rect()));
-    rui.multiply_opacity(panel_vis);
-    match panel_tab {
-        NpTab::Lyrics => lyrics_panel(app, &mut rui, rect, now, centered),
-        NpTab::UpNext => super::shell::queue_list(app, &mut rui, "np"),
-        NpTab::Art => {}
+    // Switching between Lyrics and Up next: the old one fades out over the first 55%,
+    // the new one fades in and rises into place from a third of the way.
+    for (tab, key) in [(NpTab::Lyrics, "np-tab-lyrics"), (NpTab::UpNext, "np-tab-upnext")] {
+        let w = ui.ctx().animate_bool_with_time(egui::Id::new(key), panel_tab == tab, 0.45);
+        if w > 0.0 && w < 1.0 {
+            ui.ctx().request_repaint();
+        }
+        let vis = if panel_tab == tab {
+            theme::ease_out((w - 0.35) / 0.65)
+        } else {
+            let x = ((w - 0.45) / 0.55).clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        };
+        if vis <= 0.001 || (tab == NpTab::Lyrics && no_lyrics) {
+            continue;
+        }
+        let rise = if panel_tab == tab { 18.0 * (1.0 - vis) } else { 0.0 };
+        let r = rect.translate(vec2(0.0, rise));
+        let mut rui = ui.new_child(egui::UiBuilder::new().max_rect(r));
+        rui.set_clip_rect(content.intersect(ui.clip_rect()));
+        rui.multiply_opacity(panel_vis * vis);
+        match tab {
+            NpTab::Lyrics => lyrics_panel(app, &mut rui, r, now, centered),
+            _ => super::shell::queue_list(app, &mut rui, "np"),
+        }
     }
 }
 
