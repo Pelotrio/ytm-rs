@@ -23,7 +23,7 @@ pub struct Tray {
 
 impl Tray {
     /// `wake` is called (from the UI thread's message loop) after each click.
-    pub fn new(wake: impl Fn() + Send + Sync + Clone + 'static) -> anyhow::Result<Self> {
+    pub fn new(icon: &crate::appicon::Variant, wake: impl Fn() + Send + Sync + Clone + 'static) -> anyhow::Result<Self> {
         // The handlers are process-wide and can only be set once.
         static HANDLERS: Once = Once::new();
         HANDLERS.call_once(|| {
@@ -44,9 +44,7 @@ impl Tray {
             &MenuItem::with_id("show", "Show YT Music", true, None),
             &MenuItem::with_id("quit", "Quit", true, None),
         ])?;
-        let png = image::load_from_memory(include_bytes!("../assets/icon/icon.png"))?
-            .resize(32, 32, image::imageops::FilterType::Lanczos3)
-            .into_rgba8();
+        let png = icon.rgba(32).ok_or_else(|| anyhow::anyhow!("icon doesn't decode"))?;
         let (w, h) = png.dimensions();
         let icon = TrayIconBuilder::new()
             .with_icon(tray_icon::Icon::from_rgba(png.into_raw(), w, h)?)

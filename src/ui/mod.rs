@@ -254,6 +254,8 @@ pub struct App {
     // window
     /// Clicking × hides the window to the tray instead of quitting.
     close_to_tray: bool,
+    /// Settings › App icon (`appicon::ALL` id).
+    app_icon: &'static str,
     /// The tray icon, while the window is hidden.
     tray: Option<crate::tray::Tray>,
     /// Closing for real (Quit from the tray, restart to update): don't hide.
@@ -298,6 +300,11 @@ impl App {
     ) -> Self {
         let get = |k: &str| storage.and_then(|s| s.get_string(k));
         let discord_enabled = get("discord_enabled").is_none_or(|v| v == "1");
+        let app_icon = crate::appicon::load(backend.data_dir());
+        // Updates reinstall the shortcuts with the classic icon.
+        if app_icon != crate::appicon::CLASSIC {
+            crate::appicon::sync_shortcuts(app_icon, backend.data_dir());
+        }
         let logged_in = backend.is_logged_in();
         // Before any request: a song started at launch (dev hooks) must see this setting.
         backend.set_high_quality(get("high_quality").is_none_or(|v| v == "1"));
@@ -363,6 +370,7 @@ impl App {
             updater: None,
             auto_update: get("auto_update").is_none_or(|v| v == "1"),
             close_to_tray: get("close_to_tray").is_some_and(|v| v == "1"),
+            app_icon,
             tray: None,
             exiting: false,
             window_hidden: false,
@@ -769,6 +777,23 @@ impl App {
         .ok()
     }
 
+    /// Switch the window, tray-to-be and shortcuts to another icon.
+    pub(super) fn set_app_icon(&mut self, ctx: &egui::Context, id: &'static str) {
+        if id == self.app_icon {
+            return;
+        }
+        self.app_icon = id;
+        let v = crate::appicon::get(id);
+        crate::appicon::save(self.backend.data_dir(), id);
+        if cfg!(windows) {
+            crate::appicon::set_window_icon(v);
+        } else if let Some(icon) = v.icon_data() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(Arc::new(icon))));
+        }
+        crate::appicon::sync_shortcuts(id, self.backend.data_dir());
+        log::info!("app icon: {id}");
+    }
+
     fn play_current(&mut self) {
         self.play_current_at(Duration::ZERO, true);
     }
@@ -926,7 +951,7 @@ impl App {
     fn tray_window(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().close_requested()) && self.close_to_tray && !self.exiting {
             let c = ctx.clone();
-            match crate::tray::Tray::new(move || c.request_repaint()) {
+            match crate::tray::Tray::new(crate::appicon::get(self.app_icon), move || c.request_repaint()) {
                 Ok(t) => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));

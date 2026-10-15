@@ -845,6 +845,24 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
         });
     });
 
+    // ---- app icon
+    section_label(ui, "App icon", Some(crate::appicon::get(app.app_icon).name));
+    ui.label(
+        RichText::new("Changes the icon on the window, taskbar, tray and Start menu. A pinned taskbar icon can take a moment to catch up.")
+            .font(theme::regular(13.0))
+            .color(theme::text_dim()),
+    );
+    ui.add_space(12.0);
+    settings_card(ui, |ui| {
+        ui.add_space(14.0);
+        app_icons(app, ui);
+        ui.add_space(14.0);
+        divider(ui);
+        setting_row(ui, "Preview", Some("How it looks on the taskbar and in the tray."), |ui| {
+            icon_preview(ui, crate::appicon::get(app.app_icon));
+        });
+    });
+
     // ---- connections
     let mut discord_enabled = app.discord_enabled;
     section_label(ui, "Connections", None);
@@ -987,24 +1005,79 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
     };
     ui.add_space(40.0);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 96.0), Sense::hover());
-    let icon = app_icon(ui.ctx());
-    let icon_rect = Rect::from_center_size(pos2(rect.center().x, rect.top() + 22.0), vec2(44.0, 44.0));
-    ui.painter().image(icon.id(), icon_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+    icon_at(ui, crate::appicon::get(app.app_icon), Rect::from_center_size(pos2(rect.center().x, rect.top() + 22.0), vec2(44.0, 44.0)));
     ui.painter().text(pos2(rect.center().x, rect.top() + 58.0), Align2::CENTER_CENTER, "ytm-rs", theme::bold(17.0), theme::TEXT);
     ui.painter().text(pos2(rect.center().x, rect.top() + 82.0), Align2::CENTER_CENTER, text, theme::regular(13.0), theme::text_dim());
 }
 
-/// The app icon as a texture, decoded once.
-fn app_icon(ctx: &egui::Context) -> egui::TextureHandle {
-    let id = egui::Id::new("app-icon");
-    if let Some(t) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
-        return t;
+/// The icon picker: a tile per icon in even rows, five across (two when that's too tight).
+fn app_icons(app: &mut App, ui: &mut Ui) {
+    let gap = 12.0;
+    let avail = ui.available_width();
+    let cols = if avail + gap >= 5.0 * (92.0 + gap) { 5.0 } else { 2.0 };
+    let w = ((avail + gap) / cols - gap).floor();
+    let mut picked = None;
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing = vec2(gap, gap);
+        ui.horizontal_wrapped(|ui| {
+            for v in crate::appicon::ALL {
+                if app_icon_tile(ui, v, w, app.app_icon == v.id, app.accent_color()).clicked() {
+                    picked = Some(v.id);
+                }
+            }
+        });
+    });
+    if let Some(id) = picked {
+        app.set_app_icon(ui.ctx(), id);
     }
-    let img = image::load_from_memory(include_bytes!("../../assets/icon/icon.png")).map(|i| i.to_rgba8()).unwrap_or_default();
-    let size = [img.width() as usize, img.height() as usize];
-    let t = ctx.load_texture("app-icon", egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()), egui::TextureOptions::LINEAR);
-    ctx.data_mut(|d| d.insert_temp(id, t.clone()));
-    t
+}
+
+fn app_icon_tile(ui: &mut Ui, v: &crate::appicon::Variant, w: f32, selected: bool, accent: Color32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 112.0), Sense::click());
+    let resp = named(resp, &format!("App icon: {}", v.name)).on_hover_cursor(egui::CursorIcon::PointingHand);
+    if !ui.is_rect_visible(rect) {
+        return resp;
+    }
+    let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
+    let s = theme::anim_bool(ui.ctx(), resp.id.with("s"), selected, 0.2);
+    let painter = ui.painter();
+    painter.rect_filled(rect, 12.0, theme::glass(0.03 + 0.04 * h).lerp_to_gamma(theme::with_alpha(accent, 0.14), s));
+    let ring = theme::glass(0.06).lerp_to_gamma(accent, s);
+    painter.rect_stroke(rect, 12.0, egui::Stroke::new(2.0, ring), egui::StrokeKind::Inside);
+    icon_at(ui, v, Rect::from_center_size(pos2(rect.center().x, rect.top() + 46.0), Vec2::splat(56.0)));
+    // Narrow tiles get a smaller label so "YouTube Music" still fits.
+    let font = theme::semibold(if w >= 108.0 { 13.0 } else { 12.0 });
+    let label = widgets::galley(ui, v.name, font.clone(), theme::TEXT, w - 8.0);
+    widgets::text_at(ui, pos2(rect.center().x - label.size().x / 2.0, rect.top() + 84.0), v.name, font, theme::TEXT, w - 8.0);
+    resp
+}
+
+/// The chosen icon on a dark taskbar, as a running app (24 px) and in the tray (16 px).
+fn icon_preview(ui: &mut Ui, v: &crate::appicon::Variant) {
+    let (rect, _) = ui.allocate_exact_size(vec2(236.0, 48.0), Sense::hover());
+    let rect = Rect::from_min_size(pos2(ui.max_rect().right() - 236.0, rect.top()), rect.size());
+    let painter = ui.painter();
+    painter.rect(rect, 10.0, Color32::from_rgb(28, 28, 28), egui::Stroke::new(1.0, Color32::from_white_alpha(18)), egui::StrokeKind::Inside);
+    let mut x = rect.left() + 12.0;
+    for c in [Color32::from_rgb(58, 123, 213), Color32::from_rgb(242, 179, 61)] {
+        painter.rect_filled(Rect::from_center_size(pos2(x + 18.0, rect.center().y), Vec2::splat(20.0)), 4.0, c);
+        x += 42.0;
+    }
+    let app = Rect::from_center_size(pos2(x + 20.0, rect.center().y), Vec2::splat(40.0));
+    painter.rect_filled(app, 6.0, Color32::from_white_alpha(18));
+    icon_at(ui, v, Rect::from_center_size(app.center() - vec2(0.0, 3.0), Vec2::splat(24.0)));
+    painter.rect_filled(Rect::from_center_size(pos2(app.center().x, app.bottom() - 5.0), vec2(14.0, 3.0)), 2.0, Color32::from_rgb(108, 180, 255));
+    x = app.right() + 10.0;
+    painter.vline(x, Rect::from_center_size(rect.center(), vec2(1.0, 24.0)).y_range(), egui::Stroke::new(1.0, Color32::from_white_alpha(30)));
+    icon_at(ui, v, Rect::from_center_size(pos2(x + 20.0, rect.center().y), Vec2::splat(16.0)));
+    painter.text(pos2(x + 38.0, rect.center().y), Align2::LEFT_CENTER, "9:41 PM", theme::regular(12.0), Color32::from_gray(230));
+}
+
+/// Paint `v` into `rect`, from the ICO entry that fits its size in physical pixels.
+fn icon_at(ui: &Ui, v: &crate::appicon::Variant, rect: Rect) {
+    let px = (rect.width() * ui.ctx().pixels_per_point()).ceil() as u32;
+    let png = v.png(px);
+    egui::Image::from_bytes(format!("bytes://app-icon/{}-{}.png", v.id, png.len()), png).paint_at(ui, rect);
 }
 
 /// A dropdown's closed state: the chosen value and a chevron on a glass pill.

@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod appicon;
 mod art;
 mod audio;
 mod backend;
@@ -73,10 +74,7 @@ fn main() -> eframe::Result {
         .with_app_id("ytm-rs")
         .with_inner_size(DEFAULT_SIZE)
         .with_min_inner_size(MIN_SIZE)
-        .with_icon(
-            eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/icon.png"))
-                .expect("bundled icon is a valid PNG"),
-        );
+        .with_icon(appicon::get(appicon::load(&data_dir())).icon_data().expect("bundled icons are valid PNGs"));
     if background {
         viewport = viewport.with_position([-4000.0, 0.0]).with_inner_size([1920.0, 1057.0]).with_active(false).with_taskbar(false);
     }
@@ -131,10 +129,7 @@ fn main() -> eframe::Result {
             let (audio_tx, audio_rx) = unbounded();
             let audio = audio::spawn(volume, audio_tx, wake);
 
-            let data_dir = match std::env::var_os("YTM_DATA_DIR") {
-                Some(d) => std::path::PathBuf::from(d),
-                None => directories::ProjectDirs::from("", "", "ytm-rs").expect("no home directory").data_dir().to_path_buf(),
-            };
+            let data_dir = data_dir();
             let (resp_tx, resp_rx) = unbounded();
             let backend = backend::Backend::new(data_dir, resp_tx, audio.clone(), Arc::new(wake))?;
 
@@ -142,6 +137,11 @@ fn main() -> eframe::Result {
             ctx.add_bytes_loader(Arc::new(images::HttpImages::new(backend.clone())));
 
             let (media_tx, media_rx) = unbounded();
+            if let Some(h) = hwnd(cc) {
+                appicon::set_hwnd(h);
+                // eframe sets only the small icon; the taskbar button wants the big one.
+                appicon::set_window_icon(appicon::get(appicon::load(backend.data_dir())));
+            }
             let media = media::Media::new(hwnd(cc), media_tx, wake);
 
             // The animated background needs the GL context; without it the UI falls back
@@ -196,4 +196,12 @@ fn init_logging() {
         }
     }
     builder.init();
+}
+
+/// Settings, caches and the sign-in. Dev hook: YTM_DATA_DIR runs on a separate profile.
+fn data_dir() -> std::path::PathBuf {
+    match std::env::var_os("YTM_DATA_DIR") {
+        Some(d) => std::path::PathBuf::from(d),
+        None => directories::ProjectDirs::from("", "", "ytm-rs").expect("no home directory").data_dir().to_path_buf(),
+    }
 }
