@@ -211,6 +211,24 @@ fn fetch_px(px: u32) -> u32 {
     STEPS.into_iter().find(|&s| s >= px).unwrap_or(1200)
 }
 
+/// The cover URL to paint at `px`: that size once it has loaded, else the size shown
+/// last for the same cover. A cover that changes size (going full screen, resizing the
+/// window) keeps showing instead of blanking until the new size arrives, or for good
+/// if that download fails.
+fn steady_url(ctx: &egui::Context, base: &str, px: u32) -> String {
+    let want = sized(base, px);
+    let id = egui::Id::new(("cover-shown", base));
+    let ready = matches!(egui::Image::new(want.as_str()).load_for_size(ctx, Vec2::splat(px as f32)), Ok(egui::load::TexturePoll::Ready { .. }));
+    if ready {
+        ctx.data_mut(|d| d.insert_temp(id, px));
+        return want;
+    }
+    match ctx.data(|d| d.get_temp::<u32>(id)) {
+        Some(shown) if shown != px => sized(base, shown),
+        _ => want,
+    }
+}
+
 /// Paint a cover image (square-cropped, CDN-resized) with a placeholder underneath.
 pub fn paint_cover(ui: &Ui, rect: Rect, thumbs: &[Thumb], radius: f32, zoom: f32) {
     let px = (rect.width() * ui.ctx().pixels_per_point()) as u32;
@@ -237,7 +255,7 @@ pub fn paint_cover_px(ui: &Ui, rect: Rect, thumbs: &[Thumb], radius: f32, zoom: 
         let half = uv.size() / (2.0 * zoom);
         uv = Rect::from_center_size(c, half * 2.0);
     }
-    let url = sized(&t.url, px);
+    let url = steady_url(ui.ctx(), &t.url, px);
     egui::Image::new(url).uv(uv).corner_radius(CornerRadius::same(radius as u8)).paint_at(ui, rect);
 }
 
@@ -250,7 +268,7 @@ pub fn paint_cover_fill(ui: &Ui, rect: Rect, thumbs: &[Thumb], tint: Color32) {
     // Crop the square to the rect's aspect ratio, keeping the centre.
     let aspect = rect.width() / rect.height().max(1.0);
     let size = if aspect >= 1.0 { vec2(uv.width(), uv.height() / aspect) } else { vec2(uv.width() * aspect, uv.height()) };
-    let url = sized(&t.url, px);
+    let url = steady_url(ui.ctx(), &t.url, px);
     egui::Image::new(url).uv(Rect::from_center_size(uv.center(), size)).tint(tint).paint_at(ui, rect);
 }
 
@@ -268,7 +286,7 @@ pub fn paint_disc(ui: &Ui, center: Pos2, r: f32, thumbs: &[Thumb], angle: f32, t
     ui.painter().circle_filled(center, r, theme::glass(0.07));
     let px = fetch_px(px);
     let Some(t) = pick_thumb(thumbs, px.min(544)) else { return };
-    let url = sized(&t.url, px);
+    let url = steady_url(ui.ctx(), &t.url, px);
     // While it loads, the loader wakes the UI once it's ready.
     let Ok(egui::load::TexturePoll::Ready { texture }) = egui::Image::new(url).load_for_size(ui.ctx(), Vec2::splat(r * 2.0)) else { return };
     let uv = t.square_uv();

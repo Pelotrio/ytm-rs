@@ -65,6 +65,7 @@ fn main() -> eframe::Result {
         deeplink::push(code);
     }
     init_logging();
+    stream::init_dev_hooks();
 
     // Dev hook: YTM_BACKGROUND opens the window off-screen, unfocused and off the
     // taskbar, so automated test runs don't pop up over whatever the user is doing.

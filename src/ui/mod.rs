@@ -180,6 +180,8 @@ pub struct App {
     /// Unplayable songs skipped in a row; a run of them stops playback instead of
     /// racing through the queue.
     skip_streak: u32,
+    /// Times the current song was reopened after its download failed.
+    recoveries: u32,
     repeat: Repeat,
     autoplay: bool,
     /// Turn loud tracks down to YouTube's loudness target.
@@ -359,6 +361,7 @@ impl App {
             generation: 0,
             buffering: false,
             skip_streak: 0,
+            recoveries: 0,
             repeat: match get("repeat").as_deref() {
                 Some("all") => Repeat::All,
                 Some("one") => Repeat::One,
@@ -777,6 +780,26 @@ impl App {
         .ok()
     }
 
+    /// The song's download failed partway: pick it up where it stopped from a fresh
+    /// stream, rather than letting it end early and skip to the next one. If that keeps
+    /// failing, stay on the song, ready to resume from there.
+    fn recover(&mut self, at: Duration, reason: &str) {
+        const MAX_RECOVERIES: u32 = 3;
+        if self.recoveries < MAX_RECOVERIES {
+            self.recoveries += 1;
+            log::warn!("playback interrupted at {at:?} ({reason}); reopening (try {})", self.recoveries);
+            self.play_current_at(at, false);
+            return;
+        }
+        log::warn!("playback interrupted at {at:?} ({reason}); giving up");
+        // The player has already run dry; Stop would also reset the position to 0:00.
+        self.audio.status.position_ms.store(at.as_millis() as u64, Ordering::Relaxed);
+        self.resume_at = Some(at);
+        self.buffering = false;
+        let title = self.current().map(|t| t.title.clone()).unwrap_or_default();
+        self.toast(format!("Lost the connection while playing \"{title}\". Press play to pick up where it stopped."));
+    }
+
     /// Switch the window, tray-to-be and shortcuts to another icon.
     pub(super) fn set_app_icon(&mut self, ctx: &egui::Context, id: &'static str) {
         if id == self.app_icon {
@@ -795,6 +818,7 @@ impl App {
     }
 
     fn play_current(&mut self) {
+        self.recoveries = 0;
         self.play_current_at(Duration::ZERO, true);
     }
 
@@ -1163,6 +1187,8 @@ impl App {
                     }
                 }
                 AudioEvent::Finished { .. } => {}
+                AudioEvent::Interrupted { generation, at, reason } if generation == self.generation => self.recover(at, &reason),
+                AudioEvent::Interrupted { .. } => {}
                 AudioEvent::Error(e) => self.toast(e),
             }
         }

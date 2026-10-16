@@ -32,6 +32,9 @@ pub enum AudioCmd {
 
 pub enum AudioEvent {
     Finished { generation: u64 },
+    /// The song's download failed, so playback stopped at `at` (or a seek to `at`
+    /// couldn't be served). Reopening the song there resolves a fresh stream.
+    Interrupted { generation: u64, at: Duration, reason: String },
     Error(String),
 }
 
@@ -326,7 +329,7 @@ fn run(
                 // header, so it may wait for the download) and swap it in. Back to the
                 // start, a fresh non-seekable decoder is enough and opens at once.
                 if let Some(s) = shared.clone() {
-                    let (tx, events, generation, seek) = (tx.clone(), events.clone(), current, seek_seq);
+                    let (tx, events, generation, seek, s_err) = (tx.clone(), events.clone(), current, seek_seq, s.clone());
                     std::thread::spawn(move || {
                         let seekable = !pos.is_zero();
                         let res = stream::decoder(s, seekable).map_err(|e| e.to_string()).and_then(|mut d| {
@@ -341,9 +344,14 @@ fn run(
                             Ok((decoder, pos)) => {
                                 let _ = tx.send(AudioCmd::Replace { generation, seek, decoder, at: pos, seekable });
                             }
-                            Err(e) => {
-                                let _ = events.send(AudioEvent::Error(format!("Seek failed: {e}")));
-                            }
+                            Err(e) => match s_err.error() {
+                                Some(reason) => {
+                                    let _ = events.send(AudioEvent::Interrupted { generation, at: pos, reason });
+                                }
+                                None => {
+                                    let _ = events.send(AudioEvent::Error(format!("Seek failed: {e}")));
+                                }
+                            },
                         }
                     });
                 }
@@ -356,7 +364,12 @@ fn run(
         if current != 0 {
             status.set_position((offset + player.get_pos()).as_millis() as u64);
             if player.empty() {
-                let _ = events.send(AudioEvent::Finished { generation: current });
+                // A failed download ends the decoder early: that's not the song ending.
+                let event = match shared.as_ref().and_then(|s| s.error()) {
+                    Some(reason) => AudioEvent::Interrupted { generation: current, at: offset + player.get_pos(), reason },
+                    None => AudioEvent::Finished { generation: current },
+                };
+                let _ = events.send(event);
                 current = 0;
                 shared = None;
                 status.playing.store(false, Ordering::Relaxed);

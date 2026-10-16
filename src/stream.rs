@@ -18,7 +18,12 @@ use bytes::Bytes;
 
 const BLOCK: u64 = 256 * 1024;
 const WORKERS: usize = 4;
-const RETRIES: u32 = 3;
+/// Tries per block before the download gives up, waiting a little longer each time
+/// (about half a minute in all): long enough to ride out a dropped connection.
+const RETRIES: u32 = 6;
+/// A response that delivers nothing for this long is dead; a slow one that keeps
+/// delivering is fine, however long the block takes.
+const STALL: Duration = Duration::from_secs(20);
 /// googlevideo occasionally starts rejecting a URL partway through (HTTP 403);
 /// a freshly resolved URL for the same video resumes the download.
 const MAX_REFRESHES: u32 = 2;
@@ -98,6 +103,11 @@ impl Shared {
         let _ = self.done.subscribe().wait_for(|d| *d).await;
     }
 
+    /// Why the download stopped early, if it failed.
+    pub fn error(&self) -> Option<String> {
+        self.inner.lock().unwrap().error.clone()
+    }
+
     /// Stop downloading (e.g. a prefetch that was superseded).
     pub fn cancel(&self) {
         self.inner.lock().unwrap().cancelled = true;
@@ -131,6 +141,7 @@ impl Shared {
 
     fn fail(&self, err: String) {
         log::error!("download failed: {err}");
+        FAIL_FROM.store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
         self.inner.lock().unwrap().error = Some(err);
         self.ready.notify_all();
     }
@@ -190,7 +201,12 @@ pub async fn download(http: reqwest::Client, url: String, ua: String, shared: Ar
                 let mut attempt = 0;
                 loop {
                     let (url, version) = slot.url.lock().await.clone();
-                    match fetch(&http, &format!("{url}&range={a}-{b}"), &ua, b - a + 1).await {
+                    let res = if idx >= FAIL_FROM.load(std::sync::atomic::Ordering::Relaxed) {
+                        Err(anyhow::anyhow!("simulated network failure"))
+                    } else {
+                        fetch(&http, &format!("{url}&range={a}-{b}"), &ua, b - a + 1).await
+                    };
+                    match res {
                         Ok(data) => {
                             shared.put(idx, data);
                             break;
@@ -199,7 +215,7 @@ pub async fn download(http: reqwest::Client, url: String, ua: String, shared: Ar
                         Err(e) if attempt < RETRIES && !is_forbidden(&e) => {
                             attempt += 1;
                             log::warn!("range {a}-{b}: {e:#} (retry {attempt})");
-                            tokio::time::sleep(Duration::from_millis(250 * attempt as u64)).await;
+                            tokio::time::sleep(Duration::from_millis(400 * (attempt * attempt) as u64)).await;
                         }
                         Err(e) => {
                             shared.fail(format!("range {a}-{b}: {e:#}"));
@@ -220,18 +236,28 @@ fn is_forbidden(e: &anyhow::Error) -> bool {
         .is_some_and(|s| s == reqwest::StatusCode::FORBIDDEN)
 }
 
+/// Dev hook: YTM_STREAM_FAIL=<block> makes the first download fail from that block on,
+/// as if the connection died mid-song; later downloads work.
+static FAIL_FROM: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+pub fn init_dev_hooks() {
+    if let Some(b) = std::env::var("YTM_STREAM_FAIL").ok().and_then(|v| v.parse().ok()) {
+        FAIL_FROM.store(b, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 async fn fetch(http: &reqwest::Client, url: &str, ua: &str, expect: u64) -> anyhow::Result<Bytes> {
-    let bytes = http
-        .get(url)
-        .header("User-Agent", ua)
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-    anyhow::ensure!(bytes.len() as u64 == expect, "short read: {} of {expect} bytes", bytes.len());
-    Ok(bytes)
+    let stalled = || anyhow::anyhow!("no data for {} s", STALL.as_secs());
+    let mut resp = tokio::time::timeout(STALL, http.get(url).header("User-Agent", ua).send())
+        .await
+        .map_err(|_| stalled())??
+        .error_for_status()?;
+    let mut buf = bytes::BytesMut::with_capacity(expect as usize);
+    while let Some(chunk) = tokio::time::timeout(STALL, resp.chunk()).await.map_err(|_| stalled())?? {
+        buf.extend_from_slice(&chunk);
+    }
+    anyhow::ensure!(buf.len() as u64 == expect, "short read: {} of {expect} bytes", buf.len());
+    Ok(buf.freeze())
 }
 
 pub struct StreamReader {
