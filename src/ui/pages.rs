@@ -66,7 +66,6 @@ pub(super) struct Rows {
     current: Option<String>,
     playing: bool,
     accent: Color32,
-    level: f32,
     now: f64,
 }
 
@@ -76,7 +75,6 @@ impl Rows {
             current: app.current_id().map(str::to_owned),
             playing: app.audio.status.playing.load(Ordering::Relaxed),
             accent: app.accent_color(),
-            level: app.audio.status.level(),
             now,
         }
     }
@@ -89,7 +87,6 @@ impl Rows {
             playing: self.playing,
             accent: self.accent,
             time: self.now,
-            level: self.level,
             liked: liked.contains(&t.id),
             added_by: None,
         }

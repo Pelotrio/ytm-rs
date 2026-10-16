@@ -520,18 +520,45 @@ pub fn pause_bars(ui: &Ui, center: Pos2, r: f32, color: Color32) {
     }
 }
 
-/// Bouncing bars shown on the playing row. Driven by time plus the audio level.
-pub fn equalizer(ui: &Ui, rect: Rect, time: f64, level: f32, playing: bool, color: Color32) {
-    let n = 3;
-    let w = rect.width() / (n as f32 * 1.8);
-    for i in 0..n {
-        let phase = time as f32 * (5.0 + i as f32 * 1.7) + i as f32 * 1.3;
-        let amp = if playing { 0.35 + 0.65 * (0.5 + 0.5 * phase.sin()) * (0.5 + level.min(0.4) * 1.25) } else { 0.25 };
-        let hgt = rect.height() * amp.clamp(0.15, 1.0);
-        let x = rect.left() + i as f32 * w * 1.8 + w / 2.0;
-        let bar = Rect::from_min_max(pos2(x - w / 2.0, rect.bottom() - hgt), pos2(x + w / 2.0, rect.bottom()));
-        ui.painter().rect_filled(bar, 1.0, color);
+/// The playing row's bars: three rounded bars rising and falling at their own slow
+/// pace, settling low when paused. They tell the frame pacing they're on screen, so
+/// they move at a steady rate instead of the page's slower one.
+pub fn equalizer(ui: &Ui, rect: Rect, time: f64, playing: bool, color: Color32) {
+    let ctx = ui.ctx();
+    let on = theme::anim_bool(ctx, ui.id().with("eq"), playing, 0.35);
+    if on > 0.0 {
+        let frame = ctx.cumulative_frame_nr();
+        ctx.data_mut(|d| d.insert_temp(equalizer_id(), frame));
     }
+    let px = ctx.pixels_per_point();
+    let snap = |v: f32| (v * px).round() / px;
+    let bar_w = snap((rect.width() * 0.22).max(2.0));
+    let gap = snap(bar_w * 0.75);
+    let total = bar_w * 3.0 + gap * 2.0;
+    let left = snap(rect.center().x - total / 2.0);
+    let t = time as f32;
+    // Two slow waves per bar, so the motion doesn't visibly repeat.
+    const WAVES: [(f32, f32, f32); 3] = [(4.1, 2.3, 0.0), (3.3, 5.2, 1.9), (4.7, 2.9, 3.7)];
+    for (i, (a, b, off)) in WAVES.into_iter().enumerate() {
+        let wave = 0.5 + 0.3 * (t * a + off).sin() + 0.2 * (t * b + off * 1.7).sin();
+        let rest = [0.35, 0.6, 0.45][i];
+        let amp = rest + (0.3 + 0.7 * wave.clamp(0.0, 1.0) - rest) * on;
+        let h = snap(rect.height() * amp).max(bar_w);
+        let x = left + i as f32 * (bar_w + gap);
+        let bar = Rect::from_min_max(pos2(x, snap(rect.bottom()) - h), pos2(x + bar_w, snap(rect.bottom())));
+        ui.painter().rect_filled(bar, bar_w / 2.0, color);
+    }
+}
+
+/// Last frame the playing bars were drawn on (frame pacing reads it).
+pub fn equalizer_id() -> egui::Id {
+    egui::Id::new("equalizer_frame")
+}
+
+/// Whether the playing bars were on screen last frame.
+pub fn equalizer_shown(ctx: &egui::Context) -> bool {
+    let now = ctx.cumulative_frame_nr();
+    ctx.data(|d| d.get_temp::<u64>(equalizer_id())).is_some_and(|f| f + 1 >= now)
 }
 
 pub struct RowOpts {
@@ -541,7 +568,6 @@ pub struct RowOpts {
     pub playing: bool,
     pub accent: Color32,
     pub time: f64,
-    pub level: f32,
     pub liked: bool,
     /// In a jam: who added the song.
     pub added_by: Option<String>,
@@ -583,7 +609,7 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
     if let Some(n) = o.number {
         let slot = Rect::from_center_size(pos2(x + 12.0, cy), vec2(24.0, 24.0));
         if o.current {
-            equalizer(ui, slot.shrink(5.0), o.time, o.level, o.playing, o.accent);
+            equalizer(ui, slot.shrink(4.0), o.time, o.playing, o.accent);
         } else if h > 0.5 {
             play_triangle(ui, slot.center(), 6.0, theme::TEXT);
         } else {
@@ -595,8 +621,8 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
         let tr = theme::thumb_radius();
         paint_cover(ui, img, &t.thumbs, tr, 1.0);
         if o.current {
-            ui.painter().rect_filled(img, tr, theme::shade(0.55));
-            equalizer(ui, img.shrink(11.0), o.time, o.level, o.playing, Color32::WHITE);
+            ui.painter().rect_filled(img, tr, theme::shade(0.45));
+            equalizer(ui, img.shrink(10.0), o.time, o.playing, Color32::WHITE);
         } else if h > 0.0 {
             ui.painter().rect_filled(img, tr, theme::shade(0.5 * h));
             play_triangle(ui, img.center(), 7.0, theme::with_alpha(Color32::WHITE, h));

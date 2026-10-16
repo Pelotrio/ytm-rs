@@ -1939,7 +1939,8 @@ impl eframe::App for App {
             }
         }
         // Frame pacing: idle costs nothing. The background drifts slowly, so ~15 fps
-        // reads as smooth on pages; the now-playing view runs at 30 fps, and the synced
+        // reads as smooth on pages; the now-playing view runs at 30 fps (25 on a page
+        // showing the playing row's bars), and the synced
         // lyrics ask for every frame while they animate (the karaoke sweep must be
         // smooth). Each egui frame re-lays-out the UI, so frame rate is the main CPU cost.
         let playing = self.playing();
@@ -1950,6 +1951,10 @@ impl eframe::App for App {
             }
         } else if self.np_open && playing {
             ctx.request_repaint_after(Duration::from_millis(33));
+        } else if playing && widgets::equalizer_shown(ctx) {
+            // The playing row's bars need a steady rate to read as smooth; they move
+            // slowly, so 25 fps is plenty.
+            ctx.request_repaint_after(Duration::from_millis(40));
         } else if playing && self.anim_bg && !self.default_theme && shell::pages_bg_moves(self.look()) {
             ctx.request_repaint_after(Duration::from_millis(66));
         } else if playing || self.buffering {
