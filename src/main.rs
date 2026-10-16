@@ -69,6 +69,7 @@ fn main() -> eframe::Result {
         deeplink::push(code);
     }
     init_logging();
+    update::clean_portable();
     stream::init_dev_hooks();
     proxy::init(&data_dir());
 
@@ -87,9 +88,9 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport,
         persist_window: !background,
-        // Dev hook: YTM_DATA_DIR runs on a separate profile (settings, sign-in, caches),
-        // e.g. a clean signed-out one for screenshots.
-        persistence_path: std::env::var_os("YTM_DATA_DIR").map(|d| std::path::PathBuf::from(d).join("app.ron")),
+        // Settings live with the rest of the data: beside the portable exe, or a
+        // YTM_DATA_DIR profile (e.g. a clean signed-out one for screenshots).
+        persistence_path: Some(data_dir().join("app.ron")),
         // No MSAA/depth/stencil: egui doesn't need them and they cost VRAM.
         multisampling: 0,
         depth_buffer: 0,
@@ -195,20 +196,23 @@ fn init_logging() {
             builder.target(env_logger::Target::Pipe(Box::new(file)));
         }
     } else if !cfg!(debug_assertions) {
-        if let Some(dirs) = directories::ProjectDirs::from("", "", "ytm-rs") {
-            let _ = std::fs::create_dir_all(dirs.data_dir());
-            if let Ok(file) = std::fs::File::create(dirs.data_dir().join("ytm-rs.log")) {
-                builder.target(env_logger::Target::Pipe(Box::new(file)));
-            }
+        let dir = data_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(file) = std::fs::File::create(dir.join("ytm-rs.log")) {
+            builder.target(env_logger::Target::Pipe(Box::new(file)));
         }
     }
     builder.init();
 }
 
-/// Settings, caches and the sign-in. Dev hook: YTM_DATA_DIR runs on a separate profile.
+/// Settings, caches and the sign-in: `data` beside the portable build's exe, else the
+/// user's app data. Dev hook: YTM_DATA_DIR runs on a separate profile.
 fn data_dir() -> std::path::PathBuf {
-    match std::env::var_os("YTM_DATA_DIR") {
-        Some(d) => std::path::PathBuf::from(d),
-        None => directories::ProjectDirs::from("", "", "ytm-rs").expect("no home directory").data_dir().to_path_buf(),
+    if let Some(d) = std::env::var_os("YTM_DATA_DIR") {
+        return d.into();
     }
+    if let Some(dir) = update::portable_dir() {
+        return dir.join("data");
+    }
+    directories::ProjectDirs::from("", "", "ytm-rs").expect("no home directory").data_dir().to_path_buf()
 }

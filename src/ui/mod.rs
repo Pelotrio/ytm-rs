@@ -969,7 +969,7 @@ impl App {
             None => now > 8.0,
             Some(t) => now - t > 6.0 * 3600.0 && !matches!(u.state(), State::Ready { .. }),
         };
-        let enabled = self.auto_update && installed() && dev_var("YTM_BACKGROUND").is_none_or(|_| dev_var("YTM_UPDATE_FORCE").is_some());
+        let enabled = self.auto_update && updatable() && dev_var("YTM_BACKGROUND").is_none_or(|_| dev_var("YTM_UPDATE_FORCE").is_some() || dev_var("YTM_UPDATE_FEED").is_some());
         if enabled && due {
             self.update_checked = Some(now);
             u.check();
@@ -2431,11 +2431,11 @@ pub fn shuffle<T>(v: &mut [T]) {
     }
 }
 
-/// Whether this is the installed app (updates only apply there). It can't change while
-/// running, and the check touches the disk, so it runs once.
-fn installed() -> bool {
-    static INSTALLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *INSTALLED.get_or_init(crate::update::installed)
+/// Whether this is the installed or the portable app (updates only apply there). It
+/// can't change while running, and the check touches the disk, so it runs once.
+fn updatable() -> bool {
+    static UPDATABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *UPDATABLE.get_or_init(|| crate::update::installed() || crate::update::portable_dir().is_some())
 }
 
 /// A `YTM_*` dev hook, read once: several are checked every frame.

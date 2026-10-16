@@ -28,7 +28,7 @@
 | **Transfer from Spotify** | Bring your Spotify playlists and Liked Songs over to YouTube Music. ytm-rs finds each song in the background while you keep listening, asks you when it isn't sure about a match, and picks up where it left off if a transfer gets interrupted. Liked Songs can go straight into Liked Music in the same order as on Spotify. |
 | **Themes**              | Pick from 26 presets rebuilt from the [Better Lyrics community themes](https://github.com/better-lyrics/themes), such as Apple Music, Spicy, Spinning Record and reCover. Each one restyles the lyrics, background, cover, player bar, fonts and the rest of the app. |
 | **Desktop integration** | Use system media controls, previous/play/next buttons on the taskbar thumbnail, Discord Rich Presence, and screen-reader-accessible controls. Close to the tray to keep music playing in the background, and collapse the sidebar to a slim row of icons. |
-| **Automatic updates**   | The installed app downloads new versions in the background and installs them when you close it, or right away with **Restart to update**. It shows each release's notes when an update is ready and after it installs.              |
+| **Automatic updates**   | The app (installed or portable) downloads new versions in the background and installs them when you close it, or right away with **Restart to update**. It shows each release's notes when an update is ready and after it installs.              |
 
 ## Screenshots
 
@@ -72,6 +72,10 @@
 Download the latest `ytm-rs-setup-<version>.exe` from [GitHub Releases](https://github.com/grapedjuice/ytm-rs/releases/latest) and run it. The installer works for the current user without administrator access and adds a Start menu shortcut and an entry in Windows Settings for uninstalling.
 
 Once installed, ytm-rs keeps itself up to date. You can turn this off in **Settings → Updates**.
+
+### Portable
+
+Prefer not to install? Download `ytm-rs-portable-<version>.zip` from the same page, unzip it anywhere and run `ytm-rs.exe`. It keeps its settings in a `data` folder beside the exe (as long as `portable.txt` is there) and updates itself in place. Your sign-in is kept by Windows Credential Manager, so on another PC you sign in again. Opening jam links needs the installed app; in the portable one, type the code on the **Listen together** page.
 
 ### Sign in
 

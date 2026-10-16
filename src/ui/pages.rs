@@ -895,12 +895,12 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
     // ---- updates
     section_label(ui, "Updates", None);
     let state = app.updater.as_ref().map(|u| u.state());
-    let installed = super::installed();
+    let installed = super::updatable();
     let (mut check, mut restart) = (false, false);
     settings_card(ui, |ui| {
         use crate::update::State;
         let status = if !installed {
-            "Updates only work in the installed app (this is a development build).".to_owned()
+            "Updates only work in the installed or portable app (this is a development build).".to_owned()
         } else {
             match &state {
                 Some(State::Checking) => "Checking for updates…".to_owned(),

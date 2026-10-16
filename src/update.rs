@@ -3,7 +3,9 @@
 //! The installed app (Inno Setup, per-user) checks the latest release at startup and
 //! every few hours, downloads a newer installer in the background, and runs it
 //! silently when the app closes, or right away when the user picks "Restart to
-//! update". Dev builds (not installed) never update themselves.
+//! update". The portable build (a `portable.txt` beside the exe) downloads the new
+//! portable zip instead and swaps the exe in place as it closes. Dev builds never
+//! update themselves.
 //!
 //! Release notes (the release's Markdown body) are kept per version: the one a check
 //! finds, and any other on request ([`Updater::notes`]), for the update dialog, the
@@ -11,7 +13,7 @@
 //!
 //! Dev hooks: `YTM_UPDATE_FORCE=1` treats any build as installed; `YTM_UPDATE_AS=<ver>`
 //! pretends to be that version; `YTM_UPDATE_DRYRUN=1` logs the install command
-//! instead of running it.
+//! instead of running it; `YTM_UPDATE_FEED=<url>` reads the latest release from there.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -30,6 +32,7 @@ pub enum State {
     Checking,
     UpToDate,
     Downloading { version: String, percent: u8 },
+    /// `installer` is the setup exe, or for the portable build the new ytm-rs.exe.
     Ready { version: String, installer: PathBuf },
     Failed(String),
 }
@@ -53,6 +56,22 @@ pub fn current_version() -> String {
 pub fn installed() -> bool {
     std::env::var_os("YTM_UPDATE_FORCE").is_some()
         || std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("unins000.exe").exists())).unwrap_or(false)
+}
+
+/// The portable build's folder: the zip ships a `portable.txt` beside the exe, which
+/// keeps settings in `data` next to it and has updates replace the exe in place.
+pub fn portable_dir() -> Option<PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    dir.join("portable.txt").exists().then_some(dir)
+}
+
+/// Remove the exe a portable update replaced (it was still running then).
+pub fn clean_portable() {
+    if portable_dir().is_some()
+        && let Ok(exe) = std::env::current_exe()
+    {
+        let _ = std::fs::remove_file(exe.with_extension("exe.old"));
+    }
 }
 
 /// `a` is newer than `b` (dotted numeric versions, a leading "v" ignored).
@@ -176,7 +195,8 @@ impl Updater {
 
     async fn run(&self) -> anyhow::Result<State> {
         let http = client()?;
-        let release: serde_json::Value = http.get(LATEST).send().await?.error_for_status()?.json().await?;
+        let feed = std::env::var("YTM_UPDATE_FEED").unwrap_or_else(|_| LATEST.to_owned());
+        let release: serde_json::Value = http.get(feed).send().await?.error_for_status()?.json().await?;
         let tag = release["tag_name"].as_str().unwrap_or_default();
         if let Some(body) = release["body"].as_str() {
             self.notes.lock().unwrap().insert(tag.trim_start_matches('v').to_owned(), Some(body.to_owned()));
@@ -187,7 +207,8 @@ impl Updater {
             return Ok(State::UpToDate);
         }
         let version = tag.trim_start_matches('v').to_owned();
-        let want = format!("ytm-rs-setup-{version}.exe");
+        let portable = portable_dir().is_some();
+        let want = if portable { format!("ytm-rs-portable-{version}.zip") } else { format!("ytm-rs-setup-{version}.exe") };
         // A release published before its installer was built: nothing to install
         // yet, so this isn't an error. The next check picks it up.
         let Some(asset) = release["assets"].as_array().and_then(|a| a.iter().find(|x| x["name"] == want.as_str())) else {
@@ -223,16 +244,18 @@ impl Updater {
             }
             std::fs::rename(&part, &path)?;
         }
-        // Old installers are no longer needed.
+        // Old downloads are no longer needed.
         if let Ok(rd) = std::fs::read_dir(&self.dir) {
             for e in rd.flatten() {
-                if e.path() != path {
-                    let _ = std::fs::remove_file(e.path());
+                let p = e.path();
+                if p != path {
+                    let _ = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
                 }
             }
         }
-        log::info!("update: {version} ready at {}", path.display());
-        Ok(State::Ready { version, installer: path })
+        let ready = if portable { unzip_exe(&path, &self.dir.join(format!("ytm-rs-{version}")))? } else { path };
+        log::info!("update: {version} ready at {}", ready.display());
+        Ok(State::Ready { version, installer: ready })
     }
 
     /// Run the downloaded installer silently once this process has exited, then
@@ -240,6 +263,9 @@ impl Updater {
     pub fn install(&self, relaunch: bool) {
         let State::Ready { installer, .. } = self.state() else { return };
         let exe = std::env::current_exe().unwrap_or_default();
+        if portable_dir().is_some() {
+            return swap_exe(&installer, &exe, relaunch);
+        }
         // Update the copy that's running: an all-users install lives under Program Files
         // (and the installer will ask for admin rights); otherwise it's per-user.
         let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
@@ -257,16 +283,66 @@ impl Updater {
             return;
         }
         log::info!("update: installing {}", installer.display());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            const DETACHED_PROCESS: u32 = 0x0000_0008;
-            if let Err(e) = std::process::Command::new("cmd").arg("/C").raw_arg(&script).creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS).spawn() {
-                log::warn!("update: couldn't start installer: {e}");
-            }
+        run_detached(&script);
+    }
+}
+
+/// The portable update: Windows lets a running exe be renamed, so move this one aside
+/// and put the new one in its place (the next launch deletes the old one).
+fn swap_exe(new: &Path, exe: &Path, relaunch: bool) {
+    let old = exe.with_extension("exe.old");
+    if std::env::var_os("YTM_UPDATE_DRYRUN").is_some() {
+        log::info!("update (dry run): {} aside to {}, {} in its place", exe.display(), old.display(), new.display());
+        return;
+    }
+    let _ = std::fs::remove_file(&old);
+    if let Err(e) = std::fs::rename(exe, &old) {
+        return log::warn!("update: couldn't move {} aside: {e}", exe.display());
+    }
+    if let Err(e) = std::fs::copy(new, exe) {
+        log::warn!("update: couldn't copy the new version: {e}");
+        let _ = std::fs::rename(&old, exe);
+        return;
+    }
+    log::info!("update: replaced {}", exe.display());
+    if relaunch {
+        // Once this process has saved and exited.
+        run_detached(&format!("ping -n 3 127.0.0.1 >NUL & start \"\" \"{}\"", exe.display()));
+    }
+}
+
+/// `ytm-rs.exe` from a downloaded portable zip, unpacked into `dir` with Windows' own tar.
+fn unzip_exe(zip: &Path, dir: &Path) -> anyhow::Result<PathBuf> {
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir)?;
+    let system = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    let mut cmd = std::process::Command::new(system.join(r"System32\tar.exe"));
+    cmd.arg("-xf").arg(zip).arg("-C").arg(dir);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let status = cmd.status()?;
+    let exe = dir.join("ytm-rs.exe");
+    anyhow::ensure!(status.success() && exe.exists(), "couldn't unpack {}", zip.display());
+    Ok(exe)
+}
+
+/// Run a cmd script detached and windowless, so it outlives this process.
+fn run_detached(script: &str) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        if let Err(e) = std::process::Command::new("cmd").arg("/C").raw_arg(script).creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS).spawn() {
+            log::warn!("update: couldn't run the update: {e}");
         }
     }
+    #[cfg(not(windows))]
+    let _ = script;
 }
 
 fn client() -> anyhow::Result<reqwest::Client> {

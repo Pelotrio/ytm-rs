@@ -1,11 +1,11 @@
 name: Release
 
-# Builds the Windows installer from the tagged source and attaches it to the
-# GitHub release for that tag. Releases are written as drafts (with notes) and
-# published here only once the installer is attached, so the app's updater,
-# which reads the latest published release, never sees one without it. If no
-# release exists yet, one is created as a draft to be given notes and published
-# by hand.
+# Builds the Windows installer and the portable zip from the tagged source and
+# attaches them to the GitHub release for that tag. Releases are written as drafts
+# (with notes) and published here only once both are attached, so the app's
+# updater, which reads the latest published release, never sees one without them.
+# If no release exists yet, one is created as a draft to be given notes and
+# published by hand.
 on:
   push:
     tags: ["v*"]
@@ -45,10 +45,20 @@ jobs:
       - name: Build installer
         run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q installer\ytm-rs.iss'
 
+      # The portable zip: the exe, the marker that makes it portable, README and LICENSE.
+      - name: Build portable zip
+        run: |
+          New-Item -ItemType Directory -Force installer\Output\portable | Out-Null
+          Copy-Item target\release\ytm-rs.exe, installer\portable.txt, README.md, LICENSE installer\Output\portable
+          & "$env:SystemRoot\System32\tar.exe" -a -c -f "installer\Output\ytm-rs-portable-$env:VERSION.zip" -C installer\Output\portable ytm-rs.exe portable.txt README.md LICENSE
+          if ($LASTEXITCODE) { exit 1 }
+
       - uses: actions/upload-artifact@v5
         with:
-          name: ytm-rs-setup-${{ env.VERSION }}
-          path: installer/Output/ytm-rs-setup-${{ env.VERSION }}.exe
+          name: ytm-rs-${{ env.VERSION }}
+          path: |
+            installer/Output/ytm-rs-setup-${{ env.VERSION }}.exe
+            installer/Output/ytm-rs-portable-${{ env.VERSION }}.zip
           if-no-files-found: error
 
       - name: Attach to release
@@ -57,10 +67,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          file="installer/Output/ytm-rs-setup-$VERSION.exe"
+          files=("installer/Output/ytm-rs-setup-$VERSION.exe" "installer/Output/ytm-rs-portable-$VERSION.zip")
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "$file" --clobber
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
             gh release edit "$GITHUB_REF_NAME" --draft=false --latest
           else
-            gh release create "$GITHUB_REF_NAME" "$file" --draft --title "ytm-rs $VERSION" --notes ""
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" --draft --title "ytm-rs $VERSION" --notes ""
           fi
