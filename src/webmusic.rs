@@ -141,7 +141,8 @@ impl Session {
             .header("X-Origin", origin);
         Ok(self
             .sign(req, origin)?
-            .timeout(std::time::Duration::from_secs(10))
+            // The Premium check's browse page is about 1 MB, slow through Tor.
+            .timeout(std::time::Duration::from_secs(if crate::proxy::active().resolve().is_some() { 30 } else { 10 }))
             .json(&body)
             .send()
             .await?

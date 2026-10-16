@@ -126,6 +126,72 @@ pub fn apply(b: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     apply_with(b, active())
 }
 
+/// Tor gives each SOCKS username a circuit of its own, so a new name is a new exit.
+/// 0 = no name (the proxy's own choice).
+static CIRCUIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static HTTP: std::sync::RwLock<Option<reqwest::Client>> = std::sync::RwLock::new(None);
+
+/// The client for YouTube Music and its streams. It's rebuilt when `new_circuit`
+/// picks another exit: pooled connections would otherwise stay on the old one.
+pub fn http() -> reqwest::Client {
+    if let Some(c) = HTTP.read().unwrap().as_ref() {
+        return c.clone();
+    }
+    HTTP.write().unwrap().get_or_insert_with(|| build_for(CIRCUIT.load(std::sync::atomic::Ordering::Relaxed))).clone()
+}
+
+fn build_for(n: u32) -> reqwest::Client {
+    let b = match (n, active().resolve()) {
+        (1.., Some(mut p)) => {
+            let _ = p.set_username(&format!("ytm-rs-{n}"));
+            let _ = p.set_password(Some("x"));
+            reqwest::Proxy::all(p.as_str()).map_or_else(|_| apply(reqwest::Client::builder()), |p| reqwest::Client::builder().proxy(p))
+        }
+        _ => apply(reqwest::Client::builder()),
+    };
+    b.connect_timeout(Duration::from_secs(if active().resolve().is_some() { 15 } else { 5 }))
+        .pool_idle_timeout(Duration::from_secs(30))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36")
+        .build()
+        .unwrap_or_default()
+}
+
+/// Whether the proxy can be asked for another exit: a SOCKS proxy without a sign-in
+/// of its own, i.e. Tor (which isolates circuits by username).
+pub fn can_switch_exit() -> bool {
+    active().resolve().is_some_and(|p| p.scheme().starts_with("socks") && p.username().is_empty())
+}
+
+/// Move to an exit where YouTube Music is offered (it isn't where the current one
+/// is). Asks for a few circuits at once and keeps the first that works; false when
+/// the proxy can't switch or none of them did.
+pub async fn new_circuit(available: impl AsyncFn(&reqwest::Client) -> bool) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    const AT_ONCE: u32 = 4;
+    const ROUNDS: u32 = 3;
+    if !can_switch_exit() {
+        return false;
+    }
+    let base = CIRCUIT.load(Relaxed);
+    for round in 0..ROUNDS {
+        let tries = (1..=AT_ONCE).map(|i| base + round * AT_ONCE + i).map(|n| {
+            let available = &available;
+            async move {
+                let c = build_for(n);
+                anyhow::ensure!(available(&c).await, "no");
+                anyhow::Ok((n, c))
+            }
+        });
+        if let Ok(((n, c), _)) = futures_util::future::select_ok(tries.map(Box::pin)).await {
+            log::info!("proxy: switched to another exit (circuit {n})");
+            CIRCUIT.store(n, Relaxed);
+            *HTTP.write().unwrap() = Some(c);
+            return true;
+        }
+    }
+    false
+}
+
 fn apply_with(b: reqwest::ClientBuilder, s: &Setting) -> reqwest::ClientBuilder {
     match (s, s.resolve()) {
         (_, Some(p)) => match reqwest::Proxy::all(p.as_str()) {
@@ -380,10 +446,17 @@ pub async fn test(s: &Setting) -> anyhow::Result<Duration> {
     }
     let http = apply_with(reqwest::Client::builder().connect_timeout(Duration::from_secs(8)).timeout(Duration::from_secs(12)), s).build()?;
     let t0 = Instant::now();
-    match http.get("https://music.youtube.com/generate_204").send().await.and_then(|r| r.error_for_status()) {
-        Ok(_) => Ok(t0.elapsed()),
-        Err(e) => Err(anyhow::anyhow!(plain(e.without_url(), s.resolve().as_ref()))),
+    if let Err(e) = http.get("https://music.youtube.com/generate_204").send().await.and_then(|r| r.error_for_status()) {
+        anyhow::bail!(plain(e.without_url(), s.resolve().as_ref()));
     }
+    let took = t0.elapsed();
+    // Reaching YouTube isn't enough: where the proxy comes out, YouTube Music must be offered.
+    if !crate::ytmapi::offered_through(&http).await {
+        let tor = s.resolve().is_some_and(|p| p.scheme().starts_with("socks") && p.username().is_empty());
+        anyhow::ensure!(tor, "it connects, but YouTube Music isn't available where this proxy comes out. Try a server in another country.");
+        log::info!("proxy test: this exit isn't offered YouTube Music; the app switches exits by itself");
+    }
+    Ok(took)
 }
 
 /// The usual ways a proxy fails, said plainly.

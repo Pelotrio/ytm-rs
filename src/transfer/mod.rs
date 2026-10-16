@@ -1068,7 +1068,7 @@ mod live {
     #[ignore]
     async fn matching_live() {
         let dir = directories::ProjectDirs::from("", "", "ytm-rs").unwrap().data_dir().to_path_buf();
-        let api = crate::ytmapi::Api::new(reqwest::Client::new(), &dir);
+        let api = crate::ytmapi::Api::new(&dir);
         assert!(api.account().is_some(), "not signed in");
         let songs: &[(&str, &[&str])] = &[
             ("GO (feat. Juice WRLD)", &["The Kid LAROI", "Juice WRLD"]),
@@ -1093,7 +1093,7 @@ mod live {
     #[ignore]
     async fn liked_music_live() {
         let dir = std::path::PathBuf::from(std::env::var("YTM_DATA_DIR").unwrap());
-        let api = crate::ytmapi::Api::new(reqwest::Client::new(), &dir);
+        let api = crate::ytmapi::Api::new(&dir);
         assert!(api.account().is_some(), "no session in the vault");
         for limit in [100, 1000, 20_000] {
             let t = std::time::Instant::now();

@@ -3,6 +3,7 @@
 //! current client version. Parsing lives in `ytm.rs`.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -28,24 +29,41 @@ struct Web {
 }
 
 pub struct Api {
-    http: reqwest::Client,
     file: PathBuf,
     web: tokio::sync::Mutex<Option<Web>>,
     account: RwLock<Option<Arc<Session>>>,
     /// IANA time zone and its current UTC offset in minutes.
     tz: (String, i32),
+    /// Through a proxy, where it connects from was checked this run (a cached visitor
+    /// ID may be from another address), and whether YouTube Music is offered there.
+    checked: std::sync::atomic::AtomicBool,
+    unavailable: std::sync::atomic::AtomicBool,
 }
 
+/// music.youtube.com's "not available in your area" page, served to addresses in a
+/// country without YouTube Music (most Tor exits): the API then answers with no songs.
+#[derive(Debug)]
+struct Unavailable;
+
+impl std::fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("YouTube Music isn't available where your proxy connects from. Try another proxy or server (Settings › Network)")
+    }
+}
+
+impl std::error::Error for Unavailable {}
+
 impl Api {
-    pub fn new(http: reqwest::Client, data_dir: &Path) -> Self {
+    pub fn new(data_dir: &Path) -> Self {
         let file = data_dir.join("ytmapi.json");
         let web = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice::<Web>(&b).ok());
         Self {
-            http,
             file,
             web: tokio::sync::Mutex::new(web),
             account: RwLock::new(Session::load(data_dir).map(Arc::new)),
             tz: local_tz(),
+            checked: Default::default(),
+            unavailable: Default::default(),
         }
     }
 
@@ -62,26 +80,42 @@ impl Api {
     async fn web(&self, fresh: bool) -> Web {
         let mut slot = self.web.lock().await;
         let now = now_secs();
-        let stale = slot.as_ref().is_none_or(|w| fresh || now.saturating_sub(w.at) > REFRESH.as_secs() || w.visitor_data.is_empty());
+        // Tor changes exit every ten minutes or so, so check about as often there.
+        let refresh = if crate::proxy::can_switch_exit() { 9 * 60 } else { REFRESH.as_secs() };
+        let unchecked = crate::proxy::active().resolve().is_some() && !self.checked.load(Relaxed);
+        let stale = unchecked || slot.as_ref().is_none_or(|w| fresh || now.saturating_sub(w.at) > refresh || w.visitor_data.is_empty());
         if stale {
-            match self.read_web().await {
-                Ok(w) => {
-                    let _ = std::fs::write(&self.file, serde_json::to_vec(&w).unwrap_or_default());
-                    *slot = Some(w);
+            let mut switched = false;
+            loop {
+                match self.read_web().await {
+                    Ok(w) => {
+                        let _ = std::fs::write(&self.file, serde_json::to_vec(&w).unwrap_or_default());
+                        *slot = Some(w);
+                        self.unavailable.store(false, Relaxed);
+                    }
+                    Err(e) if e.is::<Unavailable>() => {
+                        // Once per check: a working exit that fails again right away won't be fixed by more.
+                        if !std::mem::replace(&mut switched, true) && crate::proxy::new_circuit(offered_through).await {
+                            continue;
+                        }
+                        log::warn!("{e}");
+                        self.unavailable.store(true, Relaxed);
+                    }
+                    Err(e) => log::warn!("couldn't read music.youtube.com: {e:#}"),
                 }
-                Err(e) => log::warn!("couldn't read music.youtube.com: {e:#}"),
+                break;
             }
+            self.checked.store(true, Relaxed);
         }
         slot.clone().unwrap_or_else(|| Web { version: FALLBACK_VERSION.into(), ..Default::default() })
     }
 
     async fn read_web(&self) -> anyhow::Result<Web> {
-        let resp = self
-            .http
+        let resp = crate::proxy::http()
             .get(ORIGIN)
             .header("User-Agent", webmusic::UA)
             .header("Cookie", CONSENT)
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(20))
             .send()
             .await?
             .error_for_status()?;
@@ -91,6 +125,10 @@ impl Api {
             (!v.is_empty()).then(|| v.to_owned())
         });
         let html = resp.text().await?;
+        // The full page carries its region; the "not available" one is a short stub.
+        if !html.contains("\"INNERTUBE_CONTEXT_GL\"") && html.len() < 100_000 {
+            anyhow::bail!(Unavailable);
+        }
         let visitor_data = cookie
             .or_else(|| between(&html, "\"VISITOR_DATA\":\"", "\"").map(str::to_owned))
             .ok_or_else(|| anyhow::anyhow!("no visitor data on the page"))?;
@@ -159,6 +197,7 @@ impl Api {
 
     async fn call_once(&self, endpoint: &str, body: &Value, account: Option<&Session>, fresh: bool) -> anyhow::Result<Value> {
         let web = self.web(fresh).await;
+        anyhow::ensure!(!self.unavailable.load(Relaxed), Unavailable);
         let mut payload = body.clone();
         payload["context"] = json!({
             "client": {
@@ -175,8 +214,7 @@ impl Api {
             "request": {"useSsl": true},
             "user": {"lockedSafetyMode": false},
         });
-        let mut req = self
-            .http
+        let mut req = crate::proxy::http()
             .post(format!("{ORIGIN}/youtubei/v1/{endpoint}?prettyPrint=false"))
             .header("User-Agent", webmusic::UA)
             .header("Origin", ORIGIN)
@@ -205,8 +243,7 @@ impl Api {
     /// GET `url` as the signed-in account, the way the web player sends its stats pings.
     pub async fn get_signed_in(&self, url: &str, query: &[(&str, &str)]) -> anyhow::Result<()> {
         let account = self.account().ok_or_else(|| anyhow::anyhow!("sign in first"))?;
-        let req = self
-            .http
+        let req = crate::proxy::http()
             .get(url)
             .query(query)
             .header("User-Agent", webmusic::UA)
@@ -220,8 +257,7 @@ impl Api {
 
     /// Check a signed-in cookie with YouTube and read which account/channel it is for.
     pub async fn session_from_cookie(&self, cookie: &str) -> anyhow::Result<Session> {
-        let html = self
-            .http
+        let html = crate::proxy::http()
             .get("https://www.youtube.com/results?search_query=")
             .header("User-Agent", webmusic::UA)
             .header("Cookie", cookie)
@@ -266,6 +302,23 @@ fn is_retryable(e: &anyhow::Error) -> bool {
         Some(a) => a.status == 400 || a.status == 403 || a.status == 429 || a.status >= 500,
         None => e.downcast_ref::<reqwest::Error>().is_some_and(|r| r.is_timeout() || r.is_connect()),
     }
+}
+
+/// Whether music.youtube.com is offered through `http`: its "not available in your
+/// area" stub is a couple of KB, so a few KB of the page tell.
+pub async fn offered_through(http: &reqwest::Client) -> bool {
+    let Ok(mut resp) = http.get(ORIGIN).header("User-Agent", webmusic::UA).header("Cookie", CONSENT).timeout(Duration::from_secs(15)).send().await else {
+        return false;
+    };
+    let mut head = Vec::new();
+    while head.len() < 16 * 1024 {
+        match resp.chunk().await {
+            Ok(Some(b)) => head.extend_from_slice(&b),
+            Ok(None) => return false,
+            Err(_) => return false,
+        }
+    }
+    resp.status().is_success()
 }
 
 fn now_secs() -> u64 {

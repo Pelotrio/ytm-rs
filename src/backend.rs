@@ -192,7 +192,6 @@ type StreamSlot = Arc<std::sync::Mutex<Option<(String, Arc<Shared>)>>>;
 pub struct Backend {
     rt: Arc<Runtime>,
     api: Arc<ytmapi::Api>,
-    http: reqwest::Client,
     tx: Sender<Resp>,
     audio: AudioHandle,
     wake: Arc<dyn Fn() + Send + Sync>,
@@ -227,29 +226,26 @@ impl Backend {
             .build()?;
         std::fs::create_dir_all(&storage)?;
         let data_dir = storage;
-        let http = crate::proxy::apply(reqwest::Client::builder())
-            .connect_timeout(std::time::Duration::from_secs(5))
-            .pool_idle_timeout(std::time::Duration::from_secs(30))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36")
-            .build()?;
+        let http = crate::proxy::http();
         let lyrics = Arc::new(lyrics::Client::new(http.clone(), &data_dir));
-        let translate = Arc::new(crate::translate::Client::new(http.clone(), &data_dir));
+        let translate = Arc::new(crate::translate::Client::new(http, &data_dir));
         let jsc = Arc::new(jsc::Solver::new(&data_dir));
-        let api = Arc::new(ytmapi::Api::new(http.clone(), &data_dir));
+        let api = Arc::new(ytmapi::Api::new(&data_dir));
         if crate::proxy::needs_relay()
             && let Err(e) = rt.block_on(crate::proxy::start_relay())
         {
             log::warn!("proxy relay: {e:#}");
         }
-        Ok(Self { rt: Arc::new(rt), api, http, tx, audio, wake, prefetched: Default::default(), current: Default::default(), data_dir, lyrics, translate, jsc, premium: Arc::new(tokio::sync::Mutex::new(Err(None))), hq: Default::default() })
+        Ok(Self { rt: Arc::new(rt), api, tx, audio, wake, prefetched: Default::default(), current: Default::default(), data_dir, lyrics, translate, jsc, premium: Arc::new(tokio::sync::Mutex::new(Err(None))), hq: Default::default() })
     }
 
     pub fn api(&self) -> Arc<ytmapi::Api> {
         self.api.clone()
     }
 
-    pub fn http(&self) -> &reqwest::Client {
-        &self.http
+    /// The shared client (see `proxy::http`).
+    pub fn http(&self) -> reqwest::Client {
+        crate::proxy::http()
     }
 
     pub fn spawn<F: Future<Output = ()> + Send + 'static>(&self, f: F) {
@@ -359,7 +355,7 @@ impl Backend {
                     let (mut done, mut failed) = (0, Vec::new());
                     for f in &files {
                         let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                        match session.upload(&self.http, f).await {
+                        match session.upload(&self.http(), f).await {
                             Ok(()) => done += 1,
                             Err(e) => {
                                 log::warn!("upload {name}: {e:#}");
@@ -394,7 +390,7 @@ impl Backend {
                 Req::Art { key, url } => {
                     // The backdrop is a 64 px blur; fetch near that, not the 544 px art.
                     let url = model::sized(&url, 2 * crate::art::SIZE);
-                    let bytes = self.http.get(&url).send().await?.error_for_status()?.bytes().await?;
+                    let bytes = self.http().get(&url).send().await?.error_for_status()?.bytes().await?;
                     let art = tokio::task::spawn_blocking(move || crate::art::process(&bytes)).await??;
                     Resp::Art { key, art }
                 }
@@ -606,7 +602,7 @@ impl Backend {
                 Box::pin(async move { Ok(this.resolve_from(source, &id).await?.url) })
             })
         };
-        self.rt.spawn(stream::download(self.http.clone(), s.url, s.user_agent, shared.clone(), Some(refresh)));
+        self.rt.spawn(stream::download(self.http(), s.url, s.user_agent, shared.clone(), Some(refresh)));
         Ok(shared)
     }
 
@@ -660,11 +656,11 @@ impl Backend {
             Source::VisionOs => plain(self.visionos_stream(video_id).await?, innertube::UA),
             Source::WebMusic => {
                 let session = self.api.account().ok_or_else(|| anyhow::anyhow!("signed out"))?;
-                plain(session.audio_stream(&self.http, &self.jsc, video_id).await?, webmusic::UA)
+                plain(session.audio_stream(&self.http(), &self.jsc, video_id).await?, webmusic::UA)
             }
             Source::YtDlp => {
                 let session = self.api.account().ok_or_else(|| anyhow::anyhow!("sign in to play this song"))?;
-                let s = ytdlp::resolve(&self.http, &self.data_dir, &session.cookie, video_id).await?;
+                let s = ytdlp::resolve(&self.http(), &self.data_dir, &session.cookie, video_id).await?;
                 // yt-dlp's JSON doesn't carry YouTube's loudness figure.
                 ResolvedStream { url: s.url, size: s.size, duration_ms: s.duration_ms, user_agent: s.user_agent, loudness_db: None }
             }
@@ -679,7 +675,7 @@ impl Backend {
         self.rt.spawn(async move {
             let Some(session) = this.api.account() else { return };
             if this.is_premium(&session).await
-                && let Err(e) = this.jsc.warm(&this.http).await
+                && let Err(e) = this.jsc.warm(&this.http()).await
             {
                 log::warn!("solver warm-up failed: {e:#}");
             }
@@ -695,7 +691,7 @@ impl Backend {
             Err(Some(at)) if at.elapsed() < PREMIUM_RETRY => return false,
             Err(_) => {}
         }
-        match session.is_premium(&self.http).await {
+        match session.is_premium(&self.http()).await {
             Ok(p) => {
                 log::info!("account has Premium: {p}");
                 *premium = Ok(p);
@@ -711,14 +707,14 @@ impl Backend {
 
     async fn visionos_stream(&self, video_id: &str) -> anyhow::Result<innertube::Stream> {
         let vd = self.api.visitor_data(false).await?;
-        match innertube::audio_stream(&self.http, video_id, &vd).await {
+        match innertube::audio_stream(&self.http(), video_id, &vd).await {
             Ok(s) => Ok(s),
             Err(e) if needs_account(&e) => Err(e),
             Err(e) => {
                 // A stale/flagged visitor ID is the usual cause; retry once with a fresh one.
                 log::info!("visionOS player: {e:#}; retrying with new visitor data");
                 let vd = self.api.visitor_data(true).await?;
-                innertube::audio_stream(&self.http, video_id, &vd).await
+                innertube::audio_stream(&self.http(), video_id, &vd).await
             }
         }
     }

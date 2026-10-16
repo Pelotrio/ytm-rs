@@ -101,7 +101,7 @@ impl BytesLoader for HttpImages {
         drop(cache);
 
         let (http, cache, uri, backend) =
-            (self.backend.http().clone(), self.cache.clone(), uri.to_owned(), self.backend.clone());
+            (self.backend.http(), self.cache.clone(), uri.to_owned(), self.backend.clone());
         let file = disk_path(&self.dir, &uri);
         self.backend.spawn(async move {
             if let Ok(bytes) = std::fs::read(&file) {
