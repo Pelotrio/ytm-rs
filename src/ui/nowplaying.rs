@@ -128,7 +128,7 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
         app.np_tab
     };
     // Linear 0..1 over the transition; each part eases its own slice of it.
-    let shown = ui.ctx().animate_bool_with_time(egui::Id::new("np-panel"), app.np_tab != NpTab::Art, 0.6);
+    let shown = ui.ctx().animate_bool_with_time(egui::Id::new("np-panel"), app.np_tab != NpTab::Art, 0.6 * theme::SPEED);
     if shown > 0.0 && shown < 1.0 {
         // Every frame while sliding, not the now-playing view's usual 30 fps.
         ui.ctx().request_repaint();
@@ -192,7 +192,7 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
     // Switching between Lyrics and Up next: the old one fades out over the first 55%,
     // the new one fades in and rises into place from a third of the way.
     for (tab, key) in [(NpTab::Lyrics, "np-tab-lyrics"), (NpTab::UpNext, "np-tab-upnext")] {
-        let w = ui.ctx().animate_bool_with_time(egui::Id::new(key), panel_tab == tab, 0.45);
+        let w = ui.ctx().animate_bool_with_time(egui::Id::new(key), panel_tab == tab, 0.45 * theme::SPEED);
         if w > 0.0 && w < 1.0 {
             ui.ctx().request_repaint();
         }
@@ -389,7 +389,8 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, id: &str, lyrics: &Lyrics, now
         trans.hash(&mut h);
         h.finish()
     };
-    let frame = karaoke::Frame { lyrics, key, roman, trans, t, playing, now, rect, style: &style, accent, centered };
+    let scale = app.lyric_prefs.text_scale;
+    let frame = karaoke::Frame { lyrics, key, roman, trans, t, playing, now, rect, style: &style, accent, centered, scale };
     // The view lives in `app`; the frame borrows `app` for decorations, so swap it out.
     let mut view = std::mem::take(&mut app.lyric_view);
     let out = if karaoke::dev_off("view") { karaoke::Out { seek: None, animating: true, user_scrolling: false } } else { view.show(ui, frame) };

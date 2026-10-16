@@ -256,7 +256,7 @@ pub fn paint_cover_px(ui: &Ui, rect: Rect, thumbs: &[Thumb], radius: f32, zoom: 
         uv = Rect::from_center_size(c, half * 2.0);
     }
     let url = steady_url(ui.ctx(), &t.url, px);
-    egui::Image::new(url).uv(uv).corner_radius(CornerRadius::same(radius as u8)).paint_at(ui, rect);
+    paint_remote(ui, &url, rect, radius, uv, Color32::WHITE);
 }
 
 /// Paint the cover cropped to fill `rect` (any aspect), tinted, for full-bleed backdrops.
@@ -269,7 +269,7 @@ pub fn paint_cover_fill(ui: &Ui, rect: Rect, thumbs: &[Thumb], tint: Color32) {
     let aspect = rect.width() / rect.height().max(1.0);
     let size = if aspect >= 1.0 { vec2(uv.width(), uv.height() / aspect) } else { vec2(uv.width() * aspect, uv.height()) };
     let url = steady_url(ui.ctx(), &t.url, px);
-    egui::Image::new(url).uv(Rect::from_center_size(uv.center(), size)).tint(tint).paint_at(ui, rect);
+    paint_remote(ui, &url, rect, 0.0, Rect::from_center_size(uv.center(), size), tint);
 }
 
 /// Start loading a cover at `px` without drawing it, so it's ready when it appears.
@@ -672,7 +672,7 @@ pub fn shelf_header(ui: &mut Ui, title: &str, strap: Option<&str>, strap_thumb: 
         if let Some(url) = strap_thumb {
             let (r, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
             ui.painter().circle_filled(r.center(), 20.0, theme::glass(0.1));
-            egui::Image::new(url.to_owned()).corner_radius(20).paint_at(ui, r);
+            paint_remote(ui, url, r, 20.0, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
             ui.add_space(4.0);
         }
         ui.vertical(|ui| {
@@ -744,7 +744,7 @@ pub fn h_scroll<R>(ui: &mut Ui, id: &str, nudge: i32, count: usize, item_width: 
     }
     let mut area = egui::ScrollArea::horizontal().id_salt(sid).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
     if let Some(t) = target {
-        let v = ui.ctx().animate_value_with_time(anim_id, t, 0.35);
+        let v = ui.ctx().animate_value_with_time(anim_id, t, 0.35 * theme::SPEED);
         area = area.horizontal_scroll_offset(v);
         if (v - t).abs() < 0.5 {
             ui.ctx().data_mut(|d| d.remove::<f32>(target_id));
@@ -786,16 +786,54 @@ mod shelf_scroll_tests {
     }
 }
 
+/// The skeleton's light band sweeping across `r`, for anything still loading.
+pub fn shimmer_band(ui: &Ui, r: Rect, radius: f32, time: f64) {
+    let phase = ((time * 0.8) % 1.6) as f32 - 0.3;
+    let x = r.left() + (r.width() + 400.0) * phase - 200.0;
+    let band = Rect::from_min_max(pos2((x - 120.0).max(r.left()), r.top()), pos2((x + 120.0).min(r.right()), r.bottom()));
+    if band.width() > 0.0 {
+        ui.painter().rect_filled(band, radius, theme::glass(0.04));
+    }
+}
+
+/// Paint a remote image into `rect`: the skeleton's shimmer while it downloads (not
+/// egui's spinner), then a quick fade-in. One already loaded just shows.
+pub fn paint_remote(ui: &Ui, url: &str, rect: Rect, radius: f32, uv: Rect, tint: Color32) {
+    const FADE: f64 = 0.22;
+    let ctx = ui.ctx();
+    let now = ctx.input(|i| i.time);
+    let id = egui::Id::new(("img-fade", url));
+    match egui::Image::new(url).load_for_size(ctx, rect.size()) {
+        Ok(egui::load::TexturePoll::Ready { texture }) => {
+            // Fade only what was seen loading; Some(None) = waiting, Some(Some(t)) = fading since t.
+            let a = match ctx.data(|d| d.get_temp::<Option<f64>>(id)) {
+                Some(Some(t0)) if now - t0 < FADE => ((now - t0) / FADE) as f32,
+                Some(None) => {
+                    ctx.data_mut(|d| d.insert_temp(id, Some(now)));
+                    0.0
+                }
+                _ => 1.0,
+            };
+            if a < 1.0 {
+                ctx.request_repaint();
+            }
+            egui::Image::from_texture(texture).uv(uv).corner_radius(CornerRadius::same(radius as u8)).tint(tint.gamma_multiply(theme::ease_out(a))).paint_at(ui, rect);
+        }
+        Ok(egui::load::TexturePoll::Pending { .. }) => {
+            ctx.data_mut(|d| d.insert_temp::<Option<f64>>(id, None));
+            shimmer_band(ui, rect, radius, now);
+            ctx.request_repaint_after(std::time::Duration::from_millis(66));
+        }
+        // A failed image keeps its plain placeholder.
+        Err(_) => {}
+    }
+}
+
 /// Shimmering placeholder blocks while a page loads.
 pub fn skeleton(ui: &mut Ui, time: f64, rows: usize, card: f32) {
     let shimmer = |ui: &Ui, r: Rect, radius: f32| {
-        let phase = ((time * 0.8) % 1.6) as f32 - 0.3;
-        let x = r.left() + (r.width() + 400.0) * phase - 200.0;
         ui.painter().rect_filled(r, radius, theme::glass(0.06));
-        let band = Rect::from_min_max(pos2((x - 120.0).max(r.left()), r.top()), pos2((x + 120.0).min(r.right()), r.bottom()));
-        if band.width() > 0.0 {
-            ui.painter().rect_filled(band, radius, theme::glass(0.04));
-        }
+        shimmer_band(ui, r, radius, time);
     };
     let top = ui.cursor().top();
     for _ in 0..rows {

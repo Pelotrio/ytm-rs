@@ -467,7 +467,8 @@ fn artist(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
         // Cover-fit: crop the image's top band to the hero's aspect.
         let vis_h = (img_ratio / (w / hero_h)).min(1.0);
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, vis_h));
-        egui::Image::new(t.url.clone()).uv(uv).corner_radius(14).paint_at(ui, hero);
+        ui.painter().rect_filled(hero, 14.0, theme::glass(0.07));
+        widgets::paint_remote(ui, &t.url, hero, 14.0, uv, Color32::WHITE);
     } else {
         ui.painter().rect_filled(hero, 14.0, theme::with_alpha(accent, 0.25));
     }
@@ -737,6 +738,18 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
                     ui.add_space(4.0);
                 });
             });
+        });
+        divider(ui);
+        setting_row(ui, "Text size", Some("Make the lyrics larger or smaller. Works on top of the theme's own size."), |ui| {
+            let (min, max, step) = super::lyric_prefs::TEXT_SCALE;
+            let v = &mut app.lyric_prefs.text_scale;
+            if ui.add_enabled(*v < max - 0.01, egui::Button::new("+").min_size(vec2(28.0, 26.0))).on_hover_text("Larger").clicked() {
+                *v = ((*v + step) * 10.0).round() / 10.0;
+            }
+            ui.label(egui::RichText::new(format!("{:.0}%", *v * 100.0)).font(theme::semibold(13.0)));
+            if ui.add_enabled(*v > min + 0.01, egui::Button::new("−").min_size(vec2(28.0, 26.0))).on_hover_text("Smaller").clicked() {
+                *v = ((*v - step) * 10.0).round() / 10.0;
+            }
         });
         divider(ui);
         // Offsets: seconds taken off the lyrics clock, as the extension's dock sets them.

@@ -17,7 +17,12 @@ pub struct Prefs {
     pub song_offsets: HashMap<String, f32>,
     /// videoId → source picked for that song.
     pub pins: HashMap<String, Provider>,
+    /// Lyrics text size, as a multiple of the theme's own size.
+    pub text_scale: f32,
 }
+
+/// The range and step of the lyrics text size setting.
+pub const TEXT_SCALE: (f32, f32, f32) = (0.6, 1.8, 0.1);
 
 /// Languages offered for translation.
 pub const LANGUAGES: &[(&str, &str)] = &[
@@ -77,6 +82,7 @@ impl Prefs {
             global_offset: num("lyric_offset"),
             word_trim: num("lyric_trim_word"),
             line_trim: num("lyric_trim_line"),
+            text_scale: get("lyric_scale").and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0).clamp(TEXT_SCALE.0, TEXT_SCALE.1),
             song_offsets: get("lyric_song_offsets").and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
             pins: get("lyric_pins")
                 .and_then(|s| serde_json::from_str::<HashMap<String, String>>(&s).ok())
@@ -92,6 +98,7 @@ impl Prefs {
         storage.set_string("lyric_offset", format!("{:.1}", self.global_offset));
         storage.set_string("lyric_trim_word", format!("{:.1}", self.word_trim));
         storage.set_string("lyric_trim_line", format!("{:.1}", self.line_trim));
+        storage.set_string("lyric_scale", format!("{:.2}", self.text_scale));
         storage.set_string("lyric_song_offsets", serde_json::to_string(&self.song_offsets).unwrap_or_default());
         let pins: HashMap<&String, &str> = self.pins.iter().map(|(k, p)| (k, p.key())).collect();
         storage.set_string("lyric_pins", serde_json::to_string(&pins).unwrap_or_default());

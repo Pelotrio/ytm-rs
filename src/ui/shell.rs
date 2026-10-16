@@ -167,7 +167,7 @@ pub const RAIL_W: f32 = 76.0;
 
 /// How collapsed the sidebar is, 0 (full) to 1 (icon rail), eased over the toggle.
 pub fn sidebar_collapse(app: &App, ctx: &egui::Context) -> f32 {
-    let t = ctx.animate_bool_with_time(egui::Id::new("sidebar-collapse"), app.sidebar_collapsed, 0.28);
+    let t = ctx.animate_bool_with_time(egui::Id::new("sidebar-collapse"), app.sidebar_collapsed, 0.28 * theme::SPEED);
     // Ease in-out: starts and lands gently in both directions.
     t * t * (3.0 - 2.0 * t)
 }
@@ -401,7 +401,7 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
             if app.logged_in {
                 ui.painter().circle_filled(r.center(), 18.0, theme::lerp_color(app.accent_color(), Color32::BLACK, 0.35));
                 if let Some(avatar) = &app.account_avatar {
-                    egui::Image::new(avatar.clone()).corner_radius(18).paint_at(ui, r);
+                    widgets::paint_remote(ui, avatar, r, 18.0, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                 } else {
                     ui.painter().text(r.center(), Align2::CENTER_CENTER, initial, theme::bold(16.0), Color32::WHITE);
                 }

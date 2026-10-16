@@ -172,7 +172,7 @@ const GLOW_INVISIBLE: f32 = 0.5 / 255.0;
 
 impl Cfg {
     /// `width`: the lyrics panel; `viewport`: the window (the theme's media queries).
-    fn new(s: &LyricStyle, accent: Color32, width: f32, viewport: f32, centered: bool) -> Self {
+    fn new(s: &LyricStyle, accent: Color32, width: f32, viewport: f32, centered: bool, scale: f32) -> Self {
         let css = s.css.clone();
         // Font size and rem: a theme's own `--blyrics-font-size` steps in YouTube Music's
         // 10 px rem; otherwise 48 pt scaled by the preset with the extension's proportions.
@@ -192,6 +192,10 @@ impl Cfg {
             rem *= cap / size;
             size = cap;
         }
+        // The listener's text size goes on top, everything in rem along with it
+        // (romanization, translation, spacing), so the theme keeps its proportions.
+        size *= scale;
+        rem *= scale;
         let glow = s.glow.clamp(0.0, 1.0);
         let weight = match css.as_ref().and_then(|c| c.font_weight) {
             Some(w) if w >= 700 => Weight::Bold,
@@ -729,6 +733,8 @@ pub struct Frame<'a> {
     pub style: &'a LyricStyle,
     pub accent: Color32,
     pub centered: bool,
+    /// The listener's lyrics text size, a multiple of the theme's.
+    pub scale: f32,
 }
 
 pub struct Out {
@@ -771,7 +777,7 @@ impl View {
         let rect = f.rect;
         let ctx = ui.ctx().clone();
         self.shown_pass = ctx.cumulative_pass_nr();
-        let cfg = Cfg::new(f.style, f.accent, rect.width(), ctx.content_rect().width(), f.centered);
+        let cfg = Cfg::new(f.style, f.accent, rect.width(), ctx.content_rect().width(), f.centered, f.scale);
         let layout_key = hash((f.key, rect.width().round() as i32, cfg.size.to_bits(), cfg.padding.to_bits(), cfg.centered, &cfg.font, cfg.weight as u8));
         if self.layout.as_ref().is_none_or(|l| l.key != layout_key) {
             self.relayout(ui, &cfg, &f, layout_key, rect);

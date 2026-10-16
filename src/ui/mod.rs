@@ -1508,7 +1508,11 @@ impl App {
 
     fn set_fullscreen(&mut self, ctx: &egui::Context, on: bool) {
         self.fullscreen = on;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+        // Windows: in one step, without winit's unthemed-frame flash.
+        if !crate::fullscreen::set(on) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+        }
+        ctx.request_repaint();
     }
 
     /// Open the system file picker for songs to upload; it runs on its own thread.
