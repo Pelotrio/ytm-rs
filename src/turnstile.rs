@@ -37,7 +37,9 @@ window.addEventListener('message', function (e) {
 /// Run the challenge in a child process; returns the Turnstile token.
 pub fn obtain(profile_dir: PathBuf) -> anyhow::Result<String> {
     let exe = std::env::current_exe()?;
-    let out = std::process::Command::new(exe)
+    let mut cmd = std::process::Command::new(exe);
+    crate::proxy::pass_to(&mut cmd);
+    let out = cmd
         .arg(FLAG)
         .arg(&profile_dir)
         .stdin(std::process::Stdio::null())
@@ -72,7 +74,7 @@ fn run(profile_dir: PathBuf) -> anyhow::Result<String> {
 
     let proxy = event_loop.create_proxy();
     let mut context = WebContext::new(Some(profile_dir));
-    let webview = WebViewBuilder::new_with_web_context(&mut context)
+    let webview = crate::proxy::webview(WebViewBuilder::new_with_web_context(&mut context))
         .with_initialization_script(BRIDGE)
         .with_ipc_handler(move |req| {
             let _ = proxy.send_event(req.body().clone());

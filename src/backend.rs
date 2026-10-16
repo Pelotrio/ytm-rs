@@ -227,7 +227,7 @@ impl Backend {
             .build()?;
         std::fs::create_dir_all(&storage)?;
         let data_dir = storage;
-        let http = reqwest::Client::builder()
+        let http = crate::proxy::apply(reqwest::Client::builder())
             .connect_timeout(std::time::Duration::from_secs(5))
             .pool_idle_timeout(std::time::Duration::from_secs(30))
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36")
@@ -236,6 +236,11 @@ impl Backend {
         let translate = Arc::new(crate::translate::Client::new(http.clone(), &data_dir));
         let jsc = Arc::new(jsc::Solver::new(&data_dir));
         let api = Arc::new(ytmapi::Api::new(http.clone(), &data_dir));
+        if crate::proxy::needs_relay()
+            && let Err(e) = rt.block_on(crate::proxy::start_relay())
+        {
+            log::warn!("proxy relay: {e:#}");
+        }
         Ok(Self { rt: Arc::new(rt), api, http, tx, audio, wake, prefetched: Default::default(), current: Default::default(), data_dir, lyrics, translate, jsc, premium: Arc::new(tokio::sync::Mutex::new(Err(None))), hq: Default::default() })
     }
 

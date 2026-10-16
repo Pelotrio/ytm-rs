@@ -316,7 +316,15 @@ impl Conn {
         let base = std::env::var("YTM_JAM_SERVER").unwrap_or_else(|_| SERVER.to_owned());
         let name: String = url_encode(&self.name);
         let url = format!("{}/jam/{}?create={}&name={name}&v=1", base.trim_end_matches('/'), self.code, self.create as u8);
-        let ws = match tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(url)).await {
+        // Through the proxy setting, like everything else.
+        let connect = async {
+            let u = url::Url::parse(&url)?;
+            let host = u.host_str().unwrap_or_default().to_owned();
+            let port = u.port_or_known_default().unwrap_or(443);
+            let tcp = crate::proxy::connect(&host, port).await?;
+            anyhow::Ok(tokio_tungstenite::client_async_tls(url, tcp).await?)
+        };
+        let ws = match tokio::time::timeout(Duration::from_secs(10), connect).await {
             Ok(Ok((ws, _))) => ws,
             Ok(Err(e)) => return End::Dropped(e.to_string()),
             Err(_) => return End::Dropped("timed out".into()),

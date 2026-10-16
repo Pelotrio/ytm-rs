@@ -252,6 +252,19 @@ pub struct App {
     whats_new: Option<String>,
     /// The user picked "Restart to update": install on exit, then relaunch.
     restart_for_update: bool,
+    /// Settings › Network: the saved proxy setting (`proxy::active()` is this run's),
+    /// the mode picked on the page, the custom address being typed, its error, and
+    /// the last connection test (`Some(None)` while one runs).
+    proxy_saved: crate::proxy::Setting,
+    proxy_mode: crate::proxy::Setting,
+    proxy_url: String,
+    proxy_error: Option<String>,
+    proxy_test: Arc<std::sync::Mutex<Option<Option<(bool, String)>>>>,
+    /// Close and start again (the proxy changed).
+    restart_app: bool,
+    /// The media controls' cover as a local file (video id, `file://` path), fetched
+    /// through the proxy: Windows would otherwise download the URL itself, directly.
+    media_cover: Arc<std::sync::Mutex<Option<(String, String)>>>,
 
     // window
     /// Clicking × hides the window to the tray instead of quitting.
@@ -390,6 +403,16 @@ impl App {
                 (std::env::var_os("YTM_WHATS_NEW").is_some() || last.is_some_and(|v| crate::update::newer(&current, &v))).then_some(current)
             },
             restart_for_update: false,
+            proxy_saved: crate::proxy::active().clone(),
+            proxy_mode: crate::proxy::active().clone(),
+            proxy_url: match crate::proxy::active() {
+                crate::proxy::Setting::Custom(u) => u.clone(),
+                _ => String::new(),
+            },
+            proxy_error: None,
+            proxy_test: Default::default(),
+            restart_app: false,
+            media_cover: Default::default(),
             radio_pending: false,
             seek_drag: None,
             art_key: None,
@@ -472,6 +495,11 @@ impl App {
         // YTM_UPLOAD=<file> uploads that file as if it had been picked.
         if let Some(f) = std::env::var_os("YTM_UPLOAD") {
             *app.picked_uploads.lock().unwrap() = Some(vec![f.into()]);
+        }
+        // Dev hook: YTM_PROXY_INPUT=<address> opens Settings › Network on Custom with it typed in.
+        if let Some(v) = dev_var("YTM_PROXY_INPUT") {
+            app.proxy_mode = crate::proxy::Setting::Custom(String::new());
+            app.proxy_url = v.to_owned();
         }
         if std::env::var("YTM_NOWPLAYING").is_ok() {
             app.np_open = true;
@@ -835,14 +863,14 @@ impl App {
         self.seek_drag = None;
         self.backend.request(Req::Play { video_id: track.id.clone(), generation: self.generation, at, report });
         if let Some(m) = &mut self.media {
-            m.set_track(
-                &track.title,
-                &track.artist_line(),
-                track.album.as_ref().map(|a| a.name.as_str()),
-                backend::art_url(&track).as_deref(),
-                track.duration,
-            );
+            // Windows fetches a cover URL on its own, through its own proxy setting only.
+            let by_url = matches!(crate::proxy::active(), crate::proxy::Setting::System);
+            let art = backend::art_url(&track);
+            m.set_track(&track.title, &track.artist_line(), track.album.as_ref().map(|a| a.name.as_str()), art.as_deref().filter(|_| by_url), track.duration);
             m.set_playing(true);
+            if !by_url && let Some(url) = art {
+                self.fetch_media_cover(track.id.clone(), url);
+            }
         }
         // Background art and lyrics follow the track.
         self.request_art();
@@ -961,6 +989,12 @@ impl App {
     /// Close the app so the downloaded update installs, then relaunch it.
     fn restart_to_update(&mut self, ctx: &egui::Context) {
         self.restart_for_update = true;
+        self.quit(ctx);
+    }
+
+    /// Close and start again, e.g. so a new proxy setting takes effect.
+    fn restart(&mut self, ctx: &egui::Context) {
+        self.restart_app = true;
         self.quit(ctx);
     }
 
@@ -1172,7 +1206,39 @@ impl App {
 
     // ---------------------------------------------------------------- events
 
+    /// Download the media controls' cover through our own client, into a file.
+    fn fetch_media_cover(&self, video_id: String, url: String) {
+        let (slot, b) = (self.media_cover.clone(), self.backend.clone());
+        let dir = self.backend.data_dir().join("media-cover");
+        self.backend.spawn(async move {
+            let res = async {
+                let bytes = b.http().get(&url).send().await?.error_for_status()?.bytes().await?;
+                // A new name per song, so Windows doesn't show a cached older cover.
+                let _ = std::fs::remove_dir_all(&dir);
+                std::fs::create_dir_all(&dir)?;
+                let path = dir.join(format!("{video_id}.jpg"));
+                std::fs::write(&path, &bytes)?;
+                anyhow::Ok(path)
+            }
+            .await;
+            match res {
+                Ok(path) => {
+                    *slot.lock().unwrap() = Some((video_id, format!("file://{}", path.display())));
+                    b.wake();
+                }
+                Err(e) => log::debug!("media cover: {e:#}"),
+            }
+        });
+    }
+
     fn pump(&mut self, now: f64) {
+        let cover = self.media_cover.lock().unwrap().take();
+        if let Some((id, file)) = cover
+            && let Some(track) = self.current().filter(|t| t.id == id).cloned()
+            && let Some(m) = &mut self.media
+        {
+            m.set_track(&track.title, &track.artist_line(), track.album.as_ref().map(|a| a.name.as_str()), Some(&file), track.duration);
+        }
         while let Ok(r) = self.ch.resp_rx.try_recv() {
             self.on_resp(r, now);
         }
@@ -2089,15 +2155,37 @@ impl eframe::App for App {
         }
         // A downloaded update installs as the app closes (and relaunches it when the
         // user asked to restart).
+        let update_ready = self.updater.as_ref().is_some_and(|u| matches!(u.state(), crate::update::State::Ready { .. }));
         if let Some(u) = &self.updater
-            && (self.restart_for_update || self.auto_update)
+            && (self.restart_for_update || self.auto_update || (self.restart_app && update_ready))
         {
-            u.install(self.restart_for_update);
+            u.install(self.restart_for_update || self.restart_app);
+        }
+        if self.restart_app && !update_ready {
+            relaunch();
         }
     }
 }
 
 const SESSION_KEY: &str = "session";
+
+/// Start this exe again once this process has saved and exited.
+fn relaunch() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    log::info!("restarting");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        let script = format!("ping -n 3 127.0.0.1 >NUL & start \"\" \"{}\"", exe.display());
+        let _ = std::process::Command::new("cmd").arg("/C").raw_arg(&script).creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS).spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new(exe).spawn();
+    }
+}
 
 /// What the sidebar and the account button show, kept for the next launch.
 #[derive(serde::Serialize, serde::Deserialize)]

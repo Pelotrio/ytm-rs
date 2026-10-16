@@ -270,7 +270,7 @@ impl Updater {
 }
 
 fn client() -> anyhow::Result<reqwest::Client> {
-    Ok(reqwest::Client::builder().user_agent(concat!("ytm-rs/", env!("CARGO_PKG_VERSION"))).connect_timeout(std::time::Duration::from_secs(10)).build()?)
+    Ok(crate::proxy::apply(reqwest::Client::builder()).user_agent(concat!("ytm-rs/", env!("CARGO_PKG_VERSION"))).connect_timeout(std::time::Duration::from_secs(10)).build()?)
 }
 
 #[cfg(test)]

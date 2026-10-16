@@ -81,8 +81,9 @@ pub fn spawn(site: Site, profile_dir: PathBuf, done: impl FnOnce(Outcome) + Send
         .name("login".into())
         .spawn(move || {
             let res = std::env::current_exe().and_then(|exe| {
-                std::process::Command::new(exe)
-                    .arg(site.flag())
+                let mut cmd = std::process::Command::new(exe);
+                crate::proxy::pass_to(&mut cmd);
+                cmd.arg(site.flag())
                     .arg(&profile_dir)
                     .stdin(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
@@ -133,7 +134,7 @@ fn run(site: Site, profile_dir: PathBuf) -> anyhow::Result<Outcome> {
 
     let proxy = event_loop.create_proxy();
     let mut context = WebContext::new(Some(profile_dir));
-    let webview = WebViewBuilder::new_with_web_context(&mut context)
+    let webview = crate::proxy::webview(WebViewBuilder::new_with_web_context(&mut context))
         .with_url(site.start())
         .with_on_page_load_handler(move |ev, url| {
             if matches!(ev, PageLoadEvent::Finished) && url.starts_with(site.home()) {

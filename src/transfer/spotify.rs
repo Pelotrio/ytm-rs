@@ -136,7 +136,7 @@ struct Hashes {
 impl Client {
     /// `sp_dc` signs in as the user it belongs to; `None` is anonymous.
     pub async fn connect(sp_dc: Option<&str>, data_dir: &Path) -> Result<Self> {
-        let http = reqwest::Client::builder()
+        let http = crate::proxy::apply(reqwest::Client::builder())
             .user_agent(UA)
             .connect_timeout(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(20))

@@ -92,6 +92,7 @@ fn run(bin: &Path, data_dir: &Path, video_id: &str, cookie: &str) -> anyhow::Res
     let mut cmd = Command::new(bin);
     cmd.args(["--js-runtimes", "node", "--no-warnings", "--no-playlist", "--no-cache-dir", "-f", "140/bestaudio[ext=m4a]", "-j", "--cookies"])
         .arg(&jar)
+        .args(crate::proxy::ytdlp_args())
         .arg(format!("https://music.youtube.com/watch?v={video_id}"));
     #[cfg(windows)]
     {

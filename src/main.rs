@@ -2,6 +2,7 @@
 
 mod appicon;
 mod fullscreen;
+mod proxy;
 mod art;
 mod audio;
 mod backend;
@@ -43,6 +44,8 @@ fn main() -> eframe::Result {
     // Child-process modes for the webview windows (see login.rs / turnstile.rs).
     let mut args = std::env::args_os().skip(1);
     if let (Some(flag), Some(dir)) = (args.next(), args.next()) {
+        // The parent hands its proxy setting down through the environment.
+        proxy::init(std::path::Path::new(""));
         if flag == login::FLAG {
             login::child_main(login::Site::Google, dir.into());
             return Ok(());
@@ -67,6 +70,7 @@ fn main() -> eframe::Result {
     }
     init_logging();
     stream::init_dev_hooks();
+    proxy::init(&data_dir());
 
     // Dev hook: YTM_BACKGROUND opens the window off-screen, unfocused and off the
     // taskbar, so automated test runs don't pop up over whatever the user is doing.

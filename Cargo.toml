@@ -22,7 +22,7 @@ localzone = "0.3.1"
 log = "0.4.34"
 memmap2 = "0.9.11"
 raw-window-handle = "0.6"
-reqwest = { version = "0.12", default-features = false, features = ["default-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["default-tls", "json", "socks"] }
 rodio = { version = "0.22.2", default-features = false, features = ["playback", "symphonia-aac", "symphonia-isomp4"] }
 rquickjs = "0.14.0"
 roxmltree = "0.21.1"
@@ -37,6 +37,7 @@ tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "
 wry = "0.57.0"
 rfd = "0.17.2"
 tray-icon = "0.26.1"
+url = "2.5.8"
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "native-tls"] }
 
 [target.'cfg(windows)'.dependencies]
