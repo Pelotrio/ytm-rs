@@ -1960,9 +1960,8 @@ impl eframe::App for App {
         } else if self.np_open && playing {
             ctx.request_repaint_after(Duration::from_millis(33));
         } else if playing && widgets::equalizer_shown(ctx) {
-            // The playing row's bars need a steady rate to read as smooth; they move
-            // slowly, so 25 fps is plenty.
-            ctx.request_repaint_after(Duration::from_millis(40));
+            // The playing row's bars need a steady, full rate to read as smooth.
+            ctx.request_repaint_after(Duration::from_millis(16));
         } else if playing && self.anim_bg && !self.default_theme && shell::pages_bg_moves(self.look()) {
             ctx.request_repaint_after(Duration::from_millis(66));
         } else if playing || self.buffering {

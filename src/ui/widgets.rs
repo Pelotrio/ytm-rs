@@ -543,10 +543,12 @@ pub fn equalizer(ui: &Ui, rect: Rect, time: f64, playing: bool, color: Color32) 
         let wave = 0.5 + 0.3 * (t * a + off).sin() + 0.2 * (t * b + off * 1.7).sin();
         let rest = [0.35, 0.6, 0.45][i];
         let amp = rest + (0.3 + 0.7 * wave.clamp(0.0, 1.0) - rest) * on;
-        let h = snap(rect.height() * amp).max(bar_w);
+        // The height stays fractional (and the rect unrounded): whole-pixel steps
+        // read as stutter on bars this small.
+        let h = (rect.height() * amp).max(bar_w);
         let x = left + i as f32 * (bar_w + gap);
         let bar = Rect::from_min_max(pos2(x, snap(rect.bottom()) - h), pos2(x + bar_w, snap(rect.bottom())));
-        ui.painter().rect_filled(bar, bar_w / 2.0, color);
+        ui.painter().add(egui::epaint::RectShape::filled(bar, bar_w / 2.0, color).with_round_to_pixels(false));
     }
 }
 
