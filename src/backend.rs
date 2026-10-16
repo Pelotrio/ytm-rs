@@ -543,7 +543,12 @@ impl Backend {
                 log::debug!("play {video_id} (gen {generation}): using buffered stream");
                 s
             }
-            None => self.open_stream(video_id, false).await?,
+            None => {
+                if self.audio.status.wanted_gen.load(Ordering::Relaxed) != generation {
+                    return Ok(());
+                }
+                self.open_stream(video_id, false).await?
+            }
         };
         *self.current.lock().unwrap() = Some((video_id.to_owned(), shared.clone()));
         log::debug!("play {video_id} (gen {generation}): stream open in {:?}", t0.elapsed());

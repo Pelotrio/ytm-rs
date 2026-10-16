@@ -281,7 +281,13 @@ impl Conn {
     async fn run(mut self, mut out: mpsc::UnboundedReceiver<Out>) {
         let mut retries = 0;
         loop {
-            match self.session(&mut out).await {
+            let started = Instant::now();
+            let end = self.session(&mut out).await;
+            // Drops spread over a long jam shouldn't add up to giving up.
+            if started.elapsed() > Duration::from_secs(120) {
+                retries = 0;
+            }
+            match end {
                 End::Done(msg) => {
                     if let Some(m) = msg {
                         self.emit(Event::Closed(m));
@@ -336,6 +342,7 @@ impl Conn {
         let mut sync = tokio::time::interval(Duration::from_millis(200));
         let mut pings_left = 0u32;
         let mut best_rtt = i64::MAX;
+        let mut last_rx = Instant::now();
         loop {
             tokio::select! {
                 msg = out.recv() => match msg {
@@ -351,6 +358,10 @@ impl Conn {
                     }
                 },
                 _ = keepalive.tick() => {
+                    // The server answers every ping; silence means the connection is dead.
+                    if last_rx.elapsed() > Duration::from_secs(60) {
+                        return End::Dropped("no reply from the server".into());
+                    }
                     if let Err(e) = tx.send(Message::text("ping")).await {
                         return End::Dropped(e.to_string());
                     }
@@ -360,6 +371,7 @@ impl Conn {
                     let _ = tx.send(Message::text(format!(r#"{{"t":"ping","c":{}}}"#, now_ms()))).await;
                 }
                 msg = rx.next() => {
+                    last_rx = Instant::now();
                     let text = match msg {
                         Some(Ok(Message::Text(t))) => t,
                         Some(Ok(Message::Close(_))) | None => return End::Dropped("closed by server".into()),

@@ -40,11 +40,14 @@ pub struct Solver {
     dir: PathBuf,
     worker: Mutex<Option<Sender<Job>>>,
     player: tokio::sync::Mutex<Option<(Player, Instant)>>,
+    /// When preparing a player last failed: each song would otherwise download
+    /// base.js (~2.5 MB) and preprocess it again.
+    failed: Mutex<Option<Instant>>,
 }
 
 impl Solver {
     pub fn new(data_dir: &Path) -> Self {
-        Self { dir: data_dir.join("ejs"), worker: Mutex::new(None), player: tokio::sync::Mutex::new(None) }
+        Self { dir: data_dir.join("ejs"), worker: Mutex::new(None), player: tokio::sync::Mutex::new(None), failed: Mutex::new(None) }
     }
 
     /// The current player version, preprocessed and ready to solve with.
@@ -53,6 +56,18 @@ impl Solver {
         if let Some((p, _)) = cached.as_ref().filter(|(_, at)| at.elapsed() < PLAYER_TTL) {
             return Ok(p.clone());
         }
+        if self.failed.lock().unwrap().is_some_and(|at| at.elapsed() < Duration::from_secs(600)) {
+            anyhow::bail!("the player couldn't be prepared a moment ago");
+        }
+        let res = self.prepare(http).await;
+        match &res {
+            Ok(p) => *cached = Some((p.clone(), Instant::now())),
+            Err(_) => *self.failed.lock().unwrap() = Some(Instant::now()),
+        }
+        res
+    }
+
+    async fn prepare(&self, http: &reqwest::Client) -> anyhow::Result<Player> {
         let iframe = http.get("https://www.youtube.com/iframe_api").send().await?.error_for_status()?.text().await?;
         let id = player_id(&iframe).ok_or_else(|| anyhow::anyhow!("no player version in iframe_api"))?;
         let script = self.dir.join(format!("{id}.js"));
@@ -79,9 +94,7 @@ impl Solver {
                 sts
             }
         };
-        let p = Player { id, sts };
-        *cached = Some((p.clone(), Instant::now()));
-        Ok(p)
+        Ok(Player { id, sts })
     }
 
     /// A player has been prepared, so solving won't wait for a download and preprocess

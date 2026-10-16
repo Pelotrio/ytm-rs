@@ -1279,6 +1279,14 @@ impl App {
                 if let Some(s) = std::env::var("YTM_SEEK").ok().and_then(|v| v.parse::<f32>().ok()) {
                     self.audio.send(AudioCmd::Seek(Duration::from_secs_f32(s)));
                 }
+                // YTM_SEEK_LATER=<secs>@<delay> seeks again that many seconds later.
+                if let Some((s, d)) = dev_var("YTM_SEEK_LATER").and_then(|v| v.split_once('@')).and_then(|(s, d)| Some((s.parse::<f32>().ok()?, d.parse::<f32>().ok()?))) {
+                    let audio = self.audio.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_secs_f32(d));
+                        audio.send(AudioCmd::Seek(Duration::from_secs_f32(s)));
+                    });
+                }
             }
         }
         if self.suggest_due.is_some_and(|d| now >= d) {

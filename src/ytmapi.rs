@@ -38,6 +38,9 @@ pub struct Api {
     /// ID may be from another address), and whether YouTube Music is offered there.
     checked: std::sync::atomic::AtomicBool,
     unavailable: std::sync::atomic::AtomicBool,
+    /// When reading the page last failed (unix seconds): offline, every call would
+    /// otherwise fetch it again first.
+    failed_at: std::sync::atomic::AtomicU64,
 }
 
 /// music.youtube.com's "not available in your area" page, served to addresses in a
@@ -64,6 +67,7 @@ impl Api {
             tz: local_tz(),
             checked: Default::default(),
             unavailable: Default::default(),
+            failed_at: Default::default(),
         }
     }
 
@@ -84,7 +88,8 @@ impl Api {
         let refresh = if crate::proxy::can_switch_exit() { 9 * 60 } else { REFRESH.as_secs() };
         let unchecked = crate::proxy::active().resolve().is_some() && !self.checked.load(Relaxed);
         let stale = unchecked || slot.as_ref().is_none_or(|w| fresh || now.saturating_sub(w.at) > refresh || w.visitor_data.is_empty());
-        if stale {
+        let backing_off = now.saturating_sub(self.failed_at.load(Relaxed)) < 30;
+        if stale && !(backing_off && !unchecked) {
             let mut switched = false;
             loop {
                 match self.read_web().await {
@@ -101,7 +106,10 @@ impl Api {
                         log::warn!("{e}");
                         self.unavailable.store(true, Relaxed);
                     }
-                    Err(e) => log::warn!("couldn't read music.youtube.com: {e:#}"),
+                    Err(e) => {
+                        log::warn!("couldn't read music.youtube.com: {e:#}");
+                        self.failed_at.store(now, Relaxed);
+                    }
                 }
                 break;
             }

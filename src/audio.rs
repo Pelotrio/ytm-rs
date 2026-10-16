@@ -180,6 +180,43 @@ impl AudioHandle {
 /// Volume normalization the way YouTube Music does it: tracks mastered louder than
 /// the -14 LUFS target are turned down by the difference; quieter ones are left alone
 /// (boosting would clip).
+/// A seek that needs a new decoder built over the stream buffer (off the audio thread).
+struct SeekJob {
+    shared: Arc<Shared>,
+    pos: Duration,
+    /// For a live seek (a jam): the host position and when it was, to catch up after the build.
+    live: Option<(Duration, std::time::Instant)>,
+    generation: u64,
+    seek: u64,
+}
+
+/// Build a decoder for `j` (it may wait for the download) and hand it to the audio thread.
+fn build_seek(j: SeekJob, tx: &Sender<AudioCmd>, events: &Sender<AudioEvent>) {
+    let SeekJob { shared, pos, live, generation, seek } = j;
+    let seekable = !pos.is_zero();
+    let res = stream::decoder(shared.clone(), seekable).map_err(|e| e.to_string()).and_then(|mut d| {
+        // Building it may have waited for the download: catch up.
+        let pos = live.map_or(pos, |(p, at)| p + at.elapsed());
+        if seekable {
+            rodio::Source::try_seek(&mut d, pos).map_err(|e| e.to_string())?;
+        }
+        Ok((d, pos))
+    });
+    match res {
+        Ok((decoder, pos)) => {
+            let _ = tx.send(AudioCmd::Replace { generation, seek, decoder, at: pos, seekable });
+        }
+        Err(e) => match shared.error() {
+            Some(reason) => {
+                let _ = events.send(AudioEvent::Interrupted { generation, at: pos, reason });
+            }
+            None => {
+                let _ = events.send(AudioEvent::Error(format!("Seek failed: {e}")));
+            }
+        },
+    }
+}
+
 fn norm_gain(status: &AudioStatus, shared: Option<&Shared>) -> f32 {
     match shared.and_then(|s| s.loudness_db) {
         Some(db) if db > 0.0 && status.normalize.load(Ordering::Relaxed) => 10f32.powf(-db / 20.0),
@@ -240,6 +277,8 @@ fn run(
     let mut seekable = false;
     // Latest seek; a slower, older seek's decoder must not land after a newer one.
     let mut seek_seq: u64 = 0;
+    let seek_job: Arc<std::sync::Mutex<Option<SeekJob>>> = Default::default();
+    let seek_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
     loop {
         // Poll while playing so the position stays fresh and the end is noticed; idle otherwise.
         let timeout = if current != 0 && !player.is_paused() { Duration::from_millis(100) } else { Duration::from_secs(3600) };
@@ -329,31 +368,27 @@ fn run(
                 // header, so it may wait for the download) and swap it in. Back to the
                 // start, a fresh non-seekable decoder is enough and opens at once.
                 if let Some(s) = shared.clone() {
-                    let (tx, events, generation, seek, s_err) = (tx.clone(), events.clone(), current, seek_seq, s.clone());
-                    std::thread::spawn(move || {
-                        let seekable = !pos.is_zero();
-                        let res = stream::decoder(s, seekable).map_err(|e| e.to_string()).and_then(|mut d| {
-                            // Building it may have waited for the download: catch up.
-                            let pos = live.map_or(pos, |(p, at)| p + at.elapsed());
-                            if seekable {
-                                rodio::Source::try_seek(&mut d, pos).map_err(|e| e.to_string())?;
+                    // One builder at a time, always for the latest seek: a burst of seeks
+                    // (a jam catching up) mustn't pile up threads waiting on the download.
+                    *seek_job.lock().unwrap() = Some(SeekJob { shared: s, pos, live, generation: current, seek: seek_seq });
+                    if !seek_busy.swap(true, Ordering::AcqRel) {
+                        let (job, busy, tx, events) = (seek_job.clone(), seek_busy.clone(), tx.clone(), events.clone());
+                        std::thread::spawn(move || {
+                            loop {
+                                let next = job.lock().unwrap().take();
+                                match next {
+                                    Some(j) => build_seek(j, &tx, &events),
+                                    None => {
+                                        busy.store(false, Ordering::Release);
+                                        // A seek that came in just now finds `busy` already false, or is taken here.
+                                        if job.lock().unwrap().is_none() || busy.swap(true, Ordering::AcqRel) {
+                                            break;
+                                        }
+                                    }
+                                }
                             }
-                            Ok((d, pos))
                         });
-                        match res {
-                            Ok((decoder, pos)) => {
-                                let _ = tx.send(AudioCmd::Replace { generation, seek, decoder, at: pos, seekable });
-                            }
-                            Err(e) => match s_err.error() {
-                                Some(reason) => {
-                                    let _ = events.send(AudioEvent::Interrupted { generation, at: pos, reason });
-                                }
-                                None => {
-                                    let _ = events.send(AudioEvent::Error(format!("Seek failed: {e}")));
-                                }
-                            },
-                        }
-                    });
+                    }
                 }
             }
             Ok(AudioCmd::Volume(v)) => player.set_volume(v * norm_gain(&status, shared.as_deref())),

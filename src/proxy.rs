@@ -151,6 +151,8 @@ fn build_for(n: u32) -> reqwest::Client {
     };
     b.connect_timeout(Duration::from_secs(if active().resolve().is_some() { 15 } else { 5 }))
         .pool_idle_timeout(Duration::from_secs(30))
+        // A server that stops sending mid-response; streams have their own, tighter check.
+        .read_timeout(Duration::from_secs(30))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36")
         .build()
         .unwrap_or_default()

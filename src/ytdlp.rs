@@ -100,7 +100,31 @@ fn run(bin: &Path, data_dir: &Path, video_id: &str, cookie: &str) -> anyhow::Res
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let out = cmd.output()?;
+    // A stuck run (yt-dlp or its Node child hung on the network) would leave the song
+    // buffering for good: give it a minute and a half, then end its process tree.
+    let child = cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn()?;
+    let (pid, done) = (child.id(), std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let watch = done.clone();
+    std::thread::spawn(move || {
+        for _ in 0..90 {
+            std::thread::sleep(Duration::from_secs(1));
+            if watch.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+        }
+        log::warn!("yt-dlp took too long; stopping it");
+        let mut kill = Command::new("taskkill");
+        kill.args(["/PID", &pid.to_string(), "/T", "/F"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            kill.creation_flags(0x0800_0000);
+        }
+        let _ = kill.status();
+    });
+    let out = child.wait_with_output();
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let out = out?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let line = err.lines().rfind(|l| l.contains("ERROR")).unwrap_or("yt-dlp failed");

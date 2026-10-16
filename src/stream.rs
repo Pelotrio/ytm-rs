@@ -30,6 +30,13 @@ const MAX_REFRESHES: u32 = 2;
 /// A prefetch only fetches this much (~16 s of audio) until playback actually opens it:
 /// enough to start at once, without holding a whole extra song in memory.
 const HEAD_BLOCKS: usize = 2;
+/// Files larger than this (about 20 minutes at 256 kbps: long mixes, whole albums in
+/// one video) aren't kept whole. Each reader keeps a window around where it reads,
+/// `AHEAD` blocks forward (about 5 minutes at 256 kbps) and `BEHIND` back; the rest is dropped and
+/// fetched again if a seek goes back to it.
+const WINDOWED_FROM: u64 = 40 * 1024 * 1024;
+const AHEAD: usize = 40;
+const BEHIND: usize = 8;
 
 /// Resolves a fresh stream URL for the same video.
 pub type Refresh = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>> + Send + Sync>;
@@ -45,6 +52,21 @@ struct Inner {
     cancelled: bool,
     /// Blocks the workers may fetch; lifted to all of them when a reader opens.
     limit: usize,
+    /// Each open reader's id and the block it last read (windowed files keep only
+    /// what's near these).
+    wants: Vec<(u64, usize)>,
+    windowed: bool,
+    /// Blocks fetched at least once, and how many: the download counts as finished
+    /// once each was, even if a windowed file has dropped some since.
+    ever: Vec<bool>,
+    fetched: usize,
+}
+
+impl Inner {
+    /// Whether block `i` belongs in memory now.
+    fn in_window(&self, i: usize) -> bool {
+        !self.windowed || self.wants.is_empty() || self.wants.iter().any(|&(_, w)| i + BEHIND >= w && i < w + AHEAD)
+    }
 }
 
 enum Claim {
@@ -64,8 +86,8 @@ pub struct Shared {
     pub loudness_db: Option<f32>,
     /// Flips to true once the download task has stopped (complete, failed or cancelled).
     done: tokio::sync::watch::Sender<bool>,
-    /// Flips to true when `limit` is lifted (or the download is cancelled).
-    lifted: tokio::sync::watch::Sender<bool>,
+    /// Wakes waiting workers: `limit` lifted, a reader moved or left, or cancelled.
+    changed: tokio::sync::Notify,
 }
 
 impl Shared {
@@ -83,13 +105,17 @@ impl Shared {
                 readers: 0,
                 cancelled: false,
                 limit,
+                wants: Vec::new(),
+                windowed: total > WINDOWED_FROM,
+                ever: vec![false; n],
+                fetched: 0,
             }),
             ready: Condvar::new(),
             total,
             duration_ms,
             loudness_db,
             done: tokio::sync::watch::Sender::new(false),
-            lifted: tokio::sync::watch::Sender::new(limit == n),
+            changed: tokio::sync::Notify::new(),
         })
     }
 
@@ -112,7 +138,7 @@ impl Shared {
     pub fn cancel(&self) {
         self.inner.lock().unwrap().cancelled = true;
         self.ready.notify_all();
-        self.lifted.send_replace(true);
+        self.changed.notify_waiters();
     }
 
     fn claim(&self) -> Claim {
@@ -122,20 +148,38 @@ impl Shared {
         }
         let n = inner.blocks.len();
         let start = inner.want.min(n.saturating_sub(1));
-        let Some(idx) = (start..n).chain(0..start).find(|&i| inner.blocks[i].is_none() && !inner.in_flight[i]) else {
-            return Claim::Done;
-        };
-        if idx >= inner.limit {
-            return Claim::Wait;
+        let mut missing = false;
+        for i in (start..n).chain(0..start) {
+            if inner.blocks[i].is_some() || inner.in_flight[i] {
+                continue;
+            }
+            missing = true;
+            if i < inner.limit && inner.in_window(i) {
+                inner.in_flight[i] = true;
+                return Claim::Block(i);
+            }
         }
-        inner.in_flight[idx] = true;
-        Claim::Block(idx)
+        // A windowed file may need dropped blocks again while it's being read.
+        if missing || (inner.windowed && inner.readers > 0) { Claim::Wait } else { Claim::Done }
     }
 
     fn put(&self, idx: usize, data: Bytes) {
         let mut inner = self.inner.lock().unwrap();
         inner.blocks[idx] = Some(data);
         inner.in_flight[idx] = false;
+        if !std::mem::replace(&mut inner.ever[idx], true) {
+            inner.fetched += 1;
+            if inner.fetched == inner.blocks.len() {
+                self.done.send_replace(true);
+            }
+        }
+        if inner.windowed && !inner.wants.is_empty() {
+            for i in 0..inner.blocks.len() {
+                if inner.blocks[i].is_some() && !inner.in_window(i) {
+                    inner.blocks[i] = None;
+                }
+            }
+        }
         self.ready.notify_all();
     }
 
@@ -189,10 +233,14 @@ pub async fn download(http: reqwest::Client, url: String, ua: String, shared: Ar
         let (http, ua, shared, slot) = (http.clone(), ua.clone(), shared.clone(), slot.clone());
         set.spawn(async move {
             loop {
+                // Registered before claiming, so a change in between isn't missed.
+                let changed = shared.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
                 let idx = match shared.claim() {
                     Claim::Block(idx) => idx,
                     Claim::Wait => {
-                        let _ = shared.lifted.subscribe().wait_for(|l| *l).await;
+                        changed.await;
                         continue;
                     }
                     Claim::Done => break,
@@ -201,10 +249,13 @@ pub async fn download(http: reqwest::Client, url: String, ua: String, shared: Ar
                 let mut attempt = 0;
                 loop {
                     let (url, version) = slot.url.lock().await.clone();
+                    // A refreshed URL is tied to the address that resolved it, which is the
+                    // current shared client's (a proxy may have switched exits since).
+                    let client = if version > 0 { crate::proxy::http() } else { http.clone() };
                     let res = if idx >= FAIL_FROM.load(std::sync::atomic::Ordering::Relaxed) {
                         Err(anyhow::anyhow!("simulated network failure"))
                     } else {
-                        fetch(&http, &format!("{url}&range={a}-{b}"), &ua, b - a + 1).await
+                        fetch(&client, &format!("{url}&range={a}-{b}"), &ua, b - a + 1).await
                     };
                     match res {
                         Ok(data) => {
@@ -248,12 +299,14 @@ pub fn init_dev_hooks() {
 
 async fn fetch(http: &reqwest::Client, url: &str, ua: &str, expect: u64) -> anyhow::Result<Bytes> {
     let stalled = || anyhow::anyhow!("no data for {} s", STALL.as_secs());
+    // Errors leave the URL out: it carries the client's IP address and signatures (logs).
     let mut resp = tokio::time::timeout(STALL, http.get(url).header("User-Agent", ua).send())
         .await
-        .map_err(|_| stalled())??
-        .error_for_status()?;
+        .map_err(|_| stalled())?
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(reqwest::Error::without_url)?;
     let mut buf = bytes::BytesMut::with_capacity(expect as usize);
-    while let Some(chunk) = tokio::time::timeout(STALL, resp.chunk()).await.map_err(|_| stalled())?? {
+    while let Some(chunk) = tokio::time::timeout(STALL, resp.chunk()).await.map_err(|_| stalled())?.map_err(reqwest::Error::without_url)? {
         buf.extend_from_slice(&chunk);
     }
     anyhow::ensure!(buf.len() as u64 == expect, "short read: {} of {expect} bytes", buf.len());
@@ -263,17 +316,23 @@ async fn fetch(http: &reqwest::Client, url: &str, ua: &str, expect: u64) -> anyh
 pub struct StreamReader {
     shared: Arc<Shared>,
     pos: u64,
+    id: u64,
+    /// The block this reader last read.
+    block: usize,
 }
 
 impl StreamReader {
     pub fn new(shared: Arc<Shared>) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         {
             let mut inner = shared.inner.lock().unwrap();
             inner.readers += 1;
             inner.limit = inner.blocks.len();
+            inner.wants.push((id, 0));
         }
-        shared.lifted.send_replace(true);
-        Self { shared, pos: 0 }
+        shared.changed.notify_waiters();
+        Self { shared, pos: 0, id, block: 0 }
     }
 }
 
@@ -281,10 +340,12 @@ impl Drop for StreamReader {
     fn drop(&mut self) {
         let mut inner = self.shared.inner.lock().unwrap();
         inner.readers -= 1;
+        inner.wants.retain(|&(id, _)| id != self.id);
         if inner.readers == 0 {
             // Stops the workers once their current request finishes.
             inner.cancelled = true;
         }
+        self.shared.changed.notify_waiters();
     }
 }
 
@@ -296,6 +357,15 @@ impl Read for StreamReader {
         let idx = (self.pos / BLOCK) as usize;
         let mut inner = self.shared.inner.lock().unwrap();
         inner.want = idx;
+        if idx != self.block {
+            self.block = idx;
+            if let Some(w) = inner.wants.iter_mut().find(|(id, _)| *id == self.id) {
+                w.1 = idx;
+            }
+            if inner.windowed {
+                self.shared.changed.notify_waiters();
+            }
+        }
         while inner.blocks[idx].is_none() {
             if let Some(e) = &inner.error {
                 return Err(io::Error::other(e.clone()));
