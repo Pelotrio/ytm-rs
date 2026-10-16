@@ -99,14 +99,20 @@ pub fn anim_bool(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug
 pub fn regular(size: f32) -> FontId {
     FontId::proportional(size)
 }
+// Named families, made once: these are called hundreds of times a frame, and a
+// clone is a reference count instead of a new string.
+static SEMIBOLD: std::sync::LazyLock<FontFamily> = std::sync::LazyLock::new(|| FontFamily::Name("semibold".into()));
+static BOLD: std::sync::LazyLock<FontFamily> = std::sync::LazyLock::new(|| FontFamily::Name("bold".into()));
+static ICONS: std::sync::LazyLock<FontFamily> = std::sync::LazyLock::new(|| FontFamily::Name("icons".into()));
+
 pub fn semibold(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("semibold".into()))
+    FontId::new(size, SEMIBOLD.clone())
 }
 pub fn bold(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("bold".into()))
+    FontId::new(size, BOLD.clone())
 }
 pub fn icon_font(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("icons".into()))
+    FontId::new(size, ICONS.clone())
 }
 
 /// Lucide icons (ISC), subset to the glyphs used here.

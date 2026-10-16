@@ -182,7 +182,7 @@ struct TextureState {
     cache: HashMap<String, Texture>,
 }
 
-/// Texture loader for `https://` images. Unlike egui's default one it drops the
+/// Texture loader for `https://` images (and bundled previews). Unlike egui's default one it drops the
 /// downloaded and decoded copies once the texture exists (only the GPU copy is
 /// needed), and it keeps the textures under [`TEXTURE_BUDGET`] by evicting the ones
 /// not drawn for longest, so browsing for hours doesn't grow without bound and nothing
@@ -198,7 +198,9 @@ impl TextureLoader for Textures {
     }
 
     fn load(&self, ctx: &egui::Context, uri: &str, options: TextureOptions, size_hint: SizeHint) -> TextureLoadResult {
-        if !is_http(uri) {
+        // Also the bundled theme covers and icon previews: egui's own loader would keep
+        // each one decoded, as well as its texture, until the app closes.
+        if !is_http(uri) && !uri.starts_with("bytes://theme-cover/") && !uri.starts_with("bytes://app-icon/") {
             return Err(LoadError::NotSupported);
         }
         {

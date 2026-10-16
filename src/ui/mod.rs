@@ -1952,8 +1952,8 @@ impl eframe::App for App {
         // lyrics ask for every frame while they animate (the karaoke sweep must be
         // smooth). Each egui frame re-lays-out the UI, so frame rate is the main CPU cost.
         let playing = self.playing();
-        if self.tray.is_some() {
-            // Hidden: nothing to draw, only the player bookkeeping.
+        if self.window_hidden {
+            // In the tray or minimized: nothing to draw, only the player bookkeeping.
             if playing || self.buffering {
                 ctx.request_repaint_after(Duration::from_millis(250));
             }

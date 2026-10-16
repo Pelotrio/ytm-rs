@@ -194,8 +194,11 @@ impl Cfg {
         }
         // The listener's text size goes on top, everything in rem along with it
         // (romanization, translation, spacing), so the theme keeps its proportions.
-        size *= scale;
-        rem *= scale;
+        // Whole points: every new size fills the font atlas again (it never shrinks),
+        // and resizing the window would otherwise make one per pixel of width.
+        let rounded = (size * scale).round().max(1.0);
+        rem *= rounded / size;
+        size = rounded;
         let glow = s.glow.clamp(0.0, 1.0);
         let weight = match css.as_ref().and_then(|c| c.font_weight) {
             Some(w) if w >= 700 => Weight::Bold,

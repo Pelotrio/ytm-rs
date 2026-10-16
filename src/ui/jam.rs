@@ -286,28 +286,36 @@ fn on_event(app: &mut App, e: Event) {
 
 // ------------------------------------------------------------------------ host
 
-fn host_state(app: &App) -> (RoomState, u64) {
+/// The part of the queue the room sees, the playing song's position, and a signature
+/// of what would be sent: it runs every frame, so the state itself is only built
+/// (`host_state`) when the signature changed.
+fn host_tick(app: &App) -> (std::ops::Range<usize>, Tick, u64) {
     let index = app.index.unwrap_or(0);
     let from = index.saturating_sub(BEFORE);
-    let to = (index + AFTER).min(app.queue.len());
-    let queue = app.queue.get(from..to).map(<[_]>::to_vec).unwrap_or_default();
+    let to = (index + AFTER).min(app.queue.len()).max(from);
     let vid = app.current().map(|t| t.id.clone()).unwrap_or_default();
     let (pos, playing) = match app.resume_at {
         Some(at) => (at, false),
         None => (app.audio.status.position(), app.playing()),
     };
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    for t in &queue {
+    for t in app.queue.get(from..to).unwrap_or_default() {
         t.id.hash(&mut h);
     }
     (index - from).hash(&mut h);
     vid.hash(&mut h);
     playing.hash(&mut h);
     app.generation.hash(&mut h);
-    let by = app.jam.by.iter().filter(|(id, _)| queue.iter().any(|t| &t.id == *id)).map(|(k, v)| (k.clone(), v.clone())).collect();
-    let owner = app.jam.owner.iter().filter(|(id, _)| queue.iter().any(|t| &t.id == *id)).map(|(k, v)| (k.clone(), v.clone())).collect();
-    let state = RoomState { queue, index: index - from, by, owner, vid, pos: pos.as_millis() as u64, playing };
-    (state, h.finish() | 1)
+    (from..to, Tick { vid, pos: pos.as_millis() as u64, playing }, h.finish() | 1)
+}
+
+fn host_state(app: &App, range: std::ops::Range<usize>, tick: &Tick) -> RoomState {
+    let index = app.index.unwrap_or(0) - range.start;
+    let queue = app.queue.get(range).map(<[_]>::to_vec).unwrap_or_default();
+    let ids: std::collections::HashSet<&str> = queue.iter().map(|t| t.id.as_str()).collect();
+    let pick = |m: &HashMap<String, String>| m.iter().filter(|(id, _)| ids.contains(id.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+    let (by, owner) = (pick(&app.jam.by), pick(&app.jam.owner));
+    RoomState { queue, index, by, owner, vid: tick.vid.clone(), pos: tick.pos, playing: tick.playing }
 }
 
 fn host_send(app: &mut App) {
@@ -315,12 +323,15 @@ fn host_send(app: &mut App) {
     if app.buffering {
         return;
     }
-    let (state, sig) = host_state(app);
+    let (range, tick, sig) = host_tick(app);
     let now = Instant::now();
-    let tick = Tick { vid: state.vid.clone(), pos: state.pos, playing: state.playing };
+    if app.jam.conn.is_none() {
+        return;
+    }
+    let state = (sig != app.jam.sent_sig).then(|| host_state(app, range, &tick));
     let s = &mut app.jam;
     let Some(conn) = &s.conn else { return };
-    if sig != s.sent_sig {
+    if let Some(state) = state {
         log::info!(
             "jam: sending state ({} songs, {} KB, {} at {} ms, playing {})",
             state.queue.len(),

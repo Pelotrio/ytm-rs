@@ -364,7 +364,7 @@ fn decorations<'a>(
 }
 
 fn synced(app: &mut App, ui: &mut Ui, rect: Rect, id: &str, lyrics: &Lyrics, now: f64, narrow: bool) {
-    let style = app.look().lyrics.clone();
+    let style = &app.look().lyrics;
     let accent = app.accent_color();
     let centered = narrow || style.align == crate::preset::Align::Center;
     let playing = app.playing();
