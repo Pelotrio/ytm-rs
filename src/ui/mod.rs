@@ -985,12 +985,22 @@ impl App {
             return jam::request(self, crate::jam::Cmd::Prev);
         }
         if self.audio.status.position() > Duration::from_secs(3) {
-            self.audio.send(AudioCmd::Seek(Duration::ZERO));
+            self.seek_to(Duration::ZERO);
             return;
         }
         if let Some(i) = self.index.filter(|&i| i > 0) {
             self.index = Some(i - 1);
             self.play_current();
+        }
+    }
+
+    fn seek_to(&mut self, at: Duration) {
+        if self.resume_at.is_some() {
+            // Restored but not loaded yet (nothing for the player to seek): move the start point instead.
+            self.resume_at = Some(at);
+            self.audio.status.position_ms.store(at.as_millis() as u64, Ordering::Relaxed);
+        } else {
+            self.audio.send(AudioCmd::Seek(at));
         }
     }
 
@@ -1186,14 +1196,7 @@ impl App {
                 }
             }
             Action::Seek(secs) => {
-                let at = Duration::from_secs_f32(secs.max(0.0));
-                if self.resume_at.is_some() {
-                    // Restored but not loaded yet: move the start point instead.
-                    self.resume_at = Some(at);
-                    self.audio.status.position_ms.store(at.as_millis() as u64, Ordering::Relaxed);
-                } else {
-                    self.audio.send(AudioCmd::Seek(at));
-                }
+                self.seek_to(Duration::from_secs_f32(secs.max(0.0)));
                 self.lyric_view.resume();
             }
             Action::Like(id, like) => {
