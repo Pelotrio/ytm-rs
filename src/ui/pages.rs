@@ -700,7 +700,7 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
             }
         });
         divider(ui);
-        setting_row(ui, "Crossfade songs", Some("Blend the end of each song into the start of the next, also when you skip."), |ui| {
+        setting_row(ui, "Crossfade songs", Some("Blend the end of each song into the start of the next. Skipping still switches right away."), |ui| {
             if toggle(ui, &mut app.crossfade, "Crossfade songs").changed() {
                 app.set_crossfade();
             }

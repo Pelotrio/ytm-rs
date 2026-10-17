@@ -206,6 +206,8 @@ pub struct App {
     /// Crossfade between songs, and over how many seconds.
     crossfade: bool,
     crossfade_secs: u32,
+    /// The next song starts because this one is ending: crossfade into it.
+    handoff: bool,
     /// SponsorBlock segments for a video, and when one was last skipped.
     segments: Option<(String, Vec<crate::sponsorblock::Segment>)>,
     segment_skipped: f64,
@@ -438,6 +440,7 @@ impl App {
             reactive_bg: get("reactive_bg").is_none_or(|v| v == "1"),
             sponsorblock: get("sponsorblock").is_some_and(|v| v == "1"),
             crossfade: get("crossfade").is_some_and(|v| v == "1"),
+            handoff: false,
             crossfade_secs: get("crossfade_secs").and_then(|v| v.parse().ok()).unwrap_or(5).clamp(1, CROSSFADE_MAX),
             segments: None,
             segment_skipped: f64::NEG_INFINITY,
@@ -876,9 +879,8 @@ impl App {
         self.generation += 1;
         self.audio.status.wanted_gen.store(self.generation, Ordering::Relaxed);
         self.audio.status.duration_ms.store(track.duration.map_or(0, |d| d as u64 * 1000), Ordering::Relaxed);
-        // A new song from the top crossfades with the one playing (when that's on);
-        // reopening one mid-song doesn't.
-        self.audio.send(if at.is_zero() { AudioCmd::Handoff } else { AudioCmd::Stop });
+        // Only a song running into the next crossfades; skipping or picking one cuts over.
+        self.audio.send(if self.handoff && at.is_zero() { AudioCmd::Handoff } else { AudioCmd::Stop });
         self.buffering = true;
         self.seek_drag = None;
         self.backend.request(Req::Play { video_id: track.id.clone(), generation: self.generation, at, report });
@@ -1323,7 +1325,11 @@ impl App {
                 }
                 AudioEvent::Finished { .. } => {}
                 // Crossfade into the next song; repeat-one and the end of the queue wait for the end.
-                AudioEvent::Ending { generation } if generation == self.generation && !self.jam.guest() && self.repeat != Repeat::One => self.next(),
+                AudioEvent::Ending { generation } if generation == self.generation && !self.jam.guest() && self.repeat != Repeat::One => {
+                    self.handoff = true;
+                    self.next();
+                    self.handoff = false;
+                }
                 AudioEvent::Ending { .. } => {}
                 AudioEvent::Interrupted { generation, at, reason } if generation == self.generation => self.recover(at, &reason),
                 AudioEvent::Interrupted { .. } => {}
