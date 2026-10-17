@@ -882,10 +882,9 @@ impl App {
         self.generation += 1;
         self.audio.status.wanted_gen.store(self.generation, Ordering::Relaxed);
         self.audio.status.duration_ms.store(track.duration.map_or(0, |d| d as u64 * 1000), Ordering::Relaxed);
-        // A song running into the next crossfades; skipping or picking one cuts over
-        // unless that's switched on too.
-        let fade = self.handoff || self.crossfade_skips;
-        self.audio.send(if fade && at.is_zero() { AudioCmd::Handoff } else { AudioCmd::Stop });
+        // A song running into the next crossfades (so does Next, when that's switched
+        // on); going back or picking a song cuts over.
+        self.audio.send(if self.handoff && at.is_zero() { AudioCmd::Handoff } else { AudioCmd::Stop });
         self.buffering = true;
         self.seek_drag = None;
         self.backend.request(Req::Play { video_id: track.id.clone(), generation: self.generation, at, report });
@@ -984,7 +983,10 @@ impl App {
         } else {
             return;
         }
+        let ending = self.handoff;
+        self.handoff = ending || self.crossfade_skips;
         self.play_current();
+        self.handoff = ending;
     }
 
     fn prev(&mut self) {

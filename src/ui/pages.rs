@@ -713,7 +713,7 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
                 }
             });
             divider(ui);
-            setting_row(ui, "Crossfade when skipping", Some("Also fade when you press next or previous or pick another song, instead of switching right away."), |ui| {
+            setting_row(ui, "Crossfade when skipping", Some("Also fade into the next song when you skip ahead. Going back or picking a song still switches right away."), |ui| {
                 toggle(ui, &mut app.crossfade_skips, "Crossfade when skipping");
             });
         }

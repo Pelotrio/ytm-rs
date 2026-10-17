@@ -465,16 +465,18 @@ fn run(
                     wake();
                 }
             }
+            // One crossfade at a time: skipping again mid-fade cuts over (below) instead
+            // of piling a third song on.
             Ok(AudioCmd::Handoff)
-                if status.crossfade_ms.load(Ordering::Relaxed) > 0 && current != 0 && !player.is_paused() && !player.empty() =>
+                if status.crossfade_ms.load(Ordering::Relaxed) > 0
+                    && current != 0
+                    && !player.is_paused()
+                    && !player.empty()
+                    && fading.iter().all(|f| f.player.empty()) =>
             {
                 // Keeps playing at full volume until the next song starts (see `Start`).
                 let left = length.map(|d| d.saturating_sub(offset + player.get_pos()));
                 log::debug!("audio: handing off from generation {current}, {left:?} left");
-                // One already fading goes quickly, so only two ever overlap.
-                for f in &fading {
-                    f.out.store(QUICK_FADE_MS, Ordering::Relaxed);
-                }
                 let old = std::mem::replace(&mut player, Player::connect_new(sink.mixer()));
                 fading.push(Fading { player: old, shared: shared.take(), out: fade_out.clone(), waiting: Some((Instant::now(), left)) });
                 current = 0;
@@ -482,13 +484,24 @@ fn run(
                 status.set_position(0);
             }
             Ok(cmd @ (AudioCmd::Stop | AudioCmd::Handoff)) => {
-                player.clear();
                 if matches!(cmd, AudioCmd::Handoff) {
-                    // Skipping again before the next song started: let the fade finish quickly.
-                    for f in &fading {
+                    // Skipping again mid-crossfade: everything playing goes, quickly enough
+                    // to sound like a cut but without a click, and the next song comes in
+                    // at full volume.
+                    for f in fading.iter_mut() {
+                        f.waiting = None;
                         f.out.store(QUICK_FADE_MS, Ordering::Relaxed);
                     }
+                    log::debug!("audio: skipped mid-crossfade, cutting over");
+                    if current != 0 && !player.is_paused() && !player.empty() {
+                        fade_out.store(QUICK_FADE_MS, Ordering::Relaxed);
+                        let old = std::mem::replace(&mut player, Player::connect_new(sink.mixer()));
+                        fading.push(Fading { player: old, shared: shared.take(), out: fade_out.clone(), waiting: None });
+                    } else {
+                        player.clear();
+                    }
                 } else {
+                    player.clear();
                     fading.clear();
                 }
                 current = 0;
