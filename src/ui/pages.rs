@@ -700,6 +700,20 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
             }
         });
         divider(ui);
+        setting_row(ui, "Crossfade", Some("Fade each song into the next, when one ends or when you skip."), |ui| {
+            let v = app.crossfade;
+            if ui.add_enabled(v < super::CROSSFADE_MAX, egui::Button::new("+").min_size(vec2(28.0, 26.0))).on_hover_text("Longer").clicked() {
+                app.crossfade = v + 1;
+            }
+            ui.label(egui::RichText::new(if v == 0 { "Off".into() } else { format!("{v} s") }).font(theme::semibold(13.0)));
+            if ui.add_enabled(v > 0, egui::Button::new("−").min_size(vec2(28.0, 26.0))).on_hover_text("Shorter").clicked() {
+                app.crossfade = v - 1;
+            }
+            if app.crossfade != v {
+                app.audio.set_crossfade(app.crossfade);
+            }
+        });
+        divider(ui);
         setting_row(ui, "Skip non-music parts", Some("Jump over talking, skits and sponsor breaks in music videos, as marked by the SponsorBlock community. Album songs don't have any."), |ui| {
             if toggle(ui, &mut app.sponsorblock, "Skip non-music parts").changed() {
                 app.request_segments();

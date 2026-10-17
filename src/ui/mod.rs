@@ -203,6 +203,8 @@ pub struct App {
     reactive_bg: bool,
     /// Skip the parts of music videos SponsorBlock marks as not music.
     sponsorblock: bool,
+    /// Crossfade between songs, in seconds; 0 = off.
+    crossfade: u32,
     /// SponsorBlock segments for a video, and when one was last skipped.
     segments: Option<(String, Vec<crate::sponsorblock::Segment>)>,
     segment_skipped: f64,
@@ -294,6 +296,8 @@ pub struct App {
 
 /// Unplayable songs skipped in a row before playback stops.
 const MAX_SKIPS: u32 = 3;
+/// Longest crossfade offered, in seconds.
+pub(super) const CROSSFADE_MAX: u32 = 12;
 
 /// When a song failed because of the account (Premium-only, or needs signing in),
 /// the message to show instead of skipping: the rest of an album like that fails the
@@ -432,6 +436,7 @@ impl App {
             anim_bg: get("anim_bg").is_none_or(|v| v == "1"),
             reactive_bg: get("reactive_bg").is_none_or(|v| v == "1"),
             sponsorblock: get("sponsorblock").is_some_and(|v| v == "1"),
+            crossfade: get("crossfade").and_then(|v| v.parse().ok()).unwrap_or(0).min(CROSSFADE_MAX),
             segments: None,
             segment_skipped: f64::NEG_INFINITY,
             bg_time: 0.0,
@@ -530,6 +535,7 @@ impl App {
         }
         jam::dev_hooks(&mut app);
         app.audio.set_normalize(app.normalize);
+        app.audio.set_crossfade(app.crossfade);
         app
     }
 
@@ -868,7 +874,9 @@ impl App {
         self.generation += 1;
         self.audio.status.wanted_gen.store(self.generation, Ordering::Relaxed);
         self.audio.status.duration_ms.store(track.duration.map_or(0, |d| d as u64 * 1000), Ordering::Relaxed);
-        self.audio.send(AudioCmd::Stop);
+        // A new song from the top crossfades with the one playing (when that's on);
+        // reopening one mid-song doesn't.
+        self.audio.send(if at.is_zero() { AudioCmd::Handoff } else { AudioCmd::Stop });
         self.buffering = true;
         self.seek_drag = None;
         self.backend.request(Req::Play { video_id: track.id.clone(), generation: self.generation, at, report });
@@ -1305,6 +1313,9 @@ impl App {
                     }
                 }
                 AudioEvent::Finished { .. } => {}
+                // Crossfade into the next song; repeat-one and the end of the queue wait for the end.
+                AudioEvent::Ending { generation } if generation == self.generation && !self.jam.guest() && self.repeat != Repeat::One => self.next(),
+                AudioEvent::Ending { .. } => {}
                 AudioEvent::Interrupted { generation, at, reason } if generation == self.generation => self.recover(at, &reason),
                 AudioEvent::Interrupted { .. } => {}
                 AudioEvent::Error(e) => self.toast(e),
@@ -2210,6 +2221,7 @@ impl eframe::App for App {
         storage.set_string("anim_bg", b(self.anim_bg));
         storage.set_string("reactive_bg", b(self.reactive_bg));
         storage.set_string("sponsorblock", b(self.sponsorblock));
+        storage.set_string("crossfade", self.crossfade.to_string());
         storage.set_string("show_roman", b(self.show_roman));
         storage.set_string("show_trans", b(self.show_trans));
         // Background test runs mustn't change the listener's sources or per-song picks.

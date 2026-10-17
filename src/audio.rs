@@ -23,6 +23,9 @@ pub enum AudioCmd {
     Pause,
     Resume,
     Stop,
+    /// Another song is on its way: with crossfade on, fade this one out instead of
+    /// stopping it, and fade the next one in when it starts.
+    Handoff,
     Seek(Duration),
     /// Seek to where `pos` will have moved on to by the time the seek lands (`pos` was
     /// current at `at`): following someone else's playback (listen together).
@@ -32,6 +35,8 @@ pub enum AudioCmd {
 
 pub enum AudioEvent {
     Finished { generation: u64 },
+    /// Close enough to the end that the next song should start, to crossfade into it.
+    Ending { generation: u64 },
     /// The song's download failed, so playback stopped at `at` (or a seek to `at`
     /// couldn't be served). Reopening the song there resolves a fresh stream.
     Interrupted { generation: u64, at: Duration, reason: String },
@@ -61,6 +66,8 @@ pub struct AudioStatus {
     level: AtomicU32,
     /// How far the output device runs behind the position (its buffer), in ms.
     latency_ms: AtomicU32,
+    /// Crossfade length in ms; 0 = off.
+    crossfade_ms: AtomicU32,
 }
 
 impl AudioStatus {
@@ -99,25 +106,81 @@ impl AudioStatus {
     }
 }
 
-/// Pass-through source that tracks loudness (RMS over ~23 ms windows, smoothed).
+/// A crossfade ramp in progress, in samples. Equal-power curves, so the overlap
+/// doesn't dip in loudness.
+#[derive(Clone, Copy)]
+enum Ramp {
+    In { at: u32, len: u32 },
+    /// Down from `from` (a fade-in may have been cut short) to silence, then the source ends.
+    Out { from: f32, at: u32, len: u32 },
+}
+
+impl Ramp {
+    fn gain(self) -> f32 {
+        use std::f32::consts::FRAC_PI_2;
+        match self {
+            Ramp::In { at, len } => (at as f32 / len as f32 * FRAC_PI_2).sin(),
+            Ramp::Out { from, at, len } => from * (at as f32 / len as f32 * FRAC_PI_2).cos(),
+        }
+    }
+}
+
+/// Pass-through source that tracks loudness (RMS over ~23 ms windows, smoothed) and
+/// applies crossfade ramps. `fade_out` is set by the audio thread to the fade-out
+/// length in ms (0 = keep playing); a new value restarts it from the current gain.
 struct Meter<S> {
     inner: S,
     status: Arc<AudioStatus>,
+    fade_out: Arc<AtomicU32>,
+    seen_out: u32,
+    ramp: Option<Ramp>,
     acc: f32,
     n: u32,
     smooth: f32,
 }
 
 impl<S: rodio::Source> Meter<S> {
-    fn new(inner: S, status: Arc<AudioStatus>) -> Self {
-        Self { inner, status, acc: 0.0, n: 0, smooth: 0.0 }
+    fn new(inner: S, status: Arc<AudioStatus>, fade_in_ms: u32, fade_out: Arc<AtomicU32>) -> Self {
+        let mut m = Self { inner, status, fade_out, seen_out: 0, ramp: None, acc: 0.0, n: 0, smooth: 0.0 };
+        if fade_in_ms > 0 {
+            m.ramp = Some(Ramp::In { at: 0, len: m.samples(fade_in_ms) });
+        }
+        m
+    }
+
+    fn samples(&self, ms: u32) -> u32 {
+        let per_sec = self.inner.sample_rate().get() as u64 * self.inner.channels().get() as u64;
+        (per_sec * ms as u64 / 1000).max(1) as u32
     }
 }
 
 impl<S: rodio::Source> Iterator for Meter<S> {
     type Item = rodio::Sample;
     fn next(&mut self) -> Option<Self::Item> {
-        let s = self.inner.next()?;
+        let out = self.fade_out.load(Ordering::Relaxed);
+        if out != self.seen_out {
+            self.seen_out = out;
+            let from = self.ramp.map_or(1.0, Ramp::gain);
+            self.ramp = Some(Ramp::Out { from, at: 0, len: self.samples(out) });
+        }
+        if let Some(Ramp::Out { at, len, .. }) = self.ramp
+            && at >= len
+        {
+            return None;
+        }
+        let mut s = self.inner.next()?;
+        if let Some(ramp) = &mut self.ramp {
+            s *= ramp.gain();
+            match ramp {
+                Ramp::In { at, len } => {
+                    *at += 1;
+                    if *at >= *len {
+                        self.ramp = None;
+                    }
+                }
+                Ramp::Out { at, .. } => *at += 1,
+            }
+        }
         self.acc += s * s;
         self.n += 1;
         if self.n == 2048 {
@@ -125,7 +188,10 @@ impl<S: rodio::Source> Iterator for Meter<S> {
             // Fast attack, slow release, like a VU meter.
             let k = if rms > self.smooth { 0.6 } else { 0.08 };
             self.smooth += (rms - self.smooth) * k;
-            self.status.level.store(self.smooth.min(1.0).to_bits(), Ordering::Relaxed);
+            // A song fading out is no longer the one the visuals follow.
+            if self.seen_out == 0 {
+                self.status.level.store(self.smooth.min(1.0).to_bits(), Ordering::Relaxed);
+            }
             self.acc = 0.0;
             self.n = 0;
         }
@@ -169,6 +235,10 @@ impl AudioHandle {
     pub fn set_normalize(&self, on: bool) {
         self.status.normalize.store(on, Ordering::Relaxed);
         self.send(AudioCmd::Volume(self.volume()));
+    }
+
+    pub fn set_crossfade(&self, secs: u32) {
+        self.status.crossfade_ms.store(secs * 1000, Ordering::Relaxed);
     }
 
     pub fn set_volume(&self, v: f32) {
@@ -217,6 +287,25 @@ fn build_seek(j: SeekJob, tx: &Sender<AudioCmd>, events: &Sender<AudioEvent>) {
     }
 }
 
+/// A song fading out under the next one, kept until it's silent.
+struct Fading {
+    player: Player,
+    shared: Option<Arc<Shared>>,
+    out: Arc<AtomicU32>,
+}
+
+impl Drop for Fading {
+    fn drop(&mut self) {
+        if let Some(s) = &self.shared {
+            s.cancel();
+        }
+    }
+}
+
+/// Fade-outs shorter than this would click: a crossfade cut short by another skip, or
+/// one too close to the end of the song.
+const QUICK_FADE_MS: u32 = 40;
+
 fn norm_gain(status: &AudioStatus, shared: Option<&Shared>) -> f32 {
     match shared.and_then(|s| s.loudness_db) {
         Some(db) if db > 0.0 && status.normalize.load(Ordering::Relaxed) => 10f32.powf(-db / 20.0),
@@ -264,8 +353,16 @@ fn run(
         rodio::cpal::BufferSize::Default => 0,
     };
     status.latency_ms.store((buffer_ms + 10) as u32, Ordering::Relaxed);
-    let player = Player::connect_new(sink.mixer());
+    let mut player = Player::connect_new(sink.mixer());
     player.set_volume(volume);
+    // The playing source's fade-out control (see `Meter`).
+    let mut fade_out = Arc::new(AtomicU32::new(0));
+    // Songs fading out under the current one (more than one only for a moment).
+    let mut fading: Vec<Fading> = Vec::new();
+    // Crossfade length for the source starting next (set by a handoff).
+    let mut fade_in_ms: u32 = 0;
+    // Whether `Ending` went out for this generation.
+    let mut ending_sent = false;
 
     // Generation of the source currently in the player (0 = nothing loaded).
     let mut current: u64 = 0;
@@ -281,7 +378,7 @@ fn run(
     let seek_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
     loop {
         // Poll while playing so the position stays fresh and the end is noticed; idle otherwise.
-        let timeout = if current != 0 && !player.is_paused() { Duration::from_millis(100) } else { Duration::from_secs(3600) };
+        let timeout = if (current != 0 || !fading.is_empty()) && !player.is_paused() { Duration::from_millis(100) } else { Duration::from_secs(3600) };
         match rx.recv_timeout(timeout) {
             Ok(AudioCmd::Start { generation, decoder, shared: s, at }) => {
                 if generation != status.wanted_gen.load(Ordering::Relaxed) {
@@ -293,7 +390,11 @@ fn run(
                 let gain = norm_gain(&status, Some(&s));
                 log::info!("audio: loudness {:?} dB, normalization gain {gain:.3}", s.loudness_db);
                 player.set_volume(f32::from_bits(status.volume.load(Ordering::Relaxed)) * gain);
-                player.append(Meter::new(decoder, status.clone()));
+                // Fade in only under a song that's still fading out.
+                fading.retain(|f| !f.player.empty());
+                let fade_in = if fading.is_empty() { 0 } else { std::mem::take(&mut fade_in_ms) };
+                fade_out = Arc::new(AtomicU32::new(0));
+                player.append(Meter::new(decoder, status.clone(), fade_in, fade_out.clone()));
                 player.play();
                 // 0 means the stream didn't say; keep the length the UI already knows.
                 if s.duration_ms > 0 {
@@ -307,6 +408,7 @@ fn run(
                 current = generation;
                 offset = at;
                 seekable = !at.is_zero();
+                ending_sent = false;
                 status.playing.store(true, Ordering::Relaxed);
             }
             Ok(AudioCmd::Replace { generation, seek, decoder, at, seekable: s }) => {
@@ -317,7 +419,8 @@ fn run(
                 seekable = s;
                 let paused = player.is_paused();
                 player.clear();
-                player.append(Meter::new(decoder, status.clone()));
+                fade_out = Arc::new(AtomicU32::new(0));
+                player.append(Meter::new(decoder, status.clone(), 0, fade_out.clone()));
                 if !paused {
                     player.play();
                 }
@@ -325,6 +428,7 @@ fn run(
             }
             Ok(AudioCmd::Pause) => {
                 player.pause();
+                fading.iter().for_each(|f| f.player.pause());
                 status.playing.store(false, Ordering::Relaxed);
                 // So the UI (and the system media controls it syncs) see it even when idle.
                 wake();
@@ -332,12 +436,42 @@ fn run(
             Ok(AudioCmd::Resume) => {
                 if current != 0 {
                     player.play();
+                    fading.iter().for_each(|f| f.player.play());
                     status.playing.store(true, Ordering::Relaxed);
                     wake();
                 }
             }
-            Ok(AudioCmd::Stop) => {
+            Ok(AudioCmd::Handoff)
+                if status.crossfade_ms.load(Ordering::Relaxed) > 0 && current != 0 && !player.is_paused() && !player.empty() =>
+            {
+                let crossfade = status.crossfade_ms.load(Ordering::Relaxed);
+                // Fade out over what's left of the song, if that's shorter.
+                let pos = offset + player.get_pos();
+                let left = status.duration().map_or(u32::MAX, |d| d.saturating_sub(pos).as_millis() as u32);
+                let len = crossfade.min(left).max(QUICK_FADE_MS);
+                log::debug!("audio: crossfade from generation {current} over {len} ms");
+                // One already fading goes quickly, so only two ever overlap.
+                for f in &fading {
+                    f.out.store(QUICK_FADE_MS, Ordering::Relaxed);
+                }
+                fade_out.store(len, Ordering::Relaxed);
+                let old = std::mem::replace(&mut player, Player::connect_new(sink.mixer()));
+                fading.push(Fading { player: old, shared: shared.take(), out: fade_out.clone() });
+                fade_in_ms = crossfade;
+                current = 0;
+                status.playing.store(false, Ordering::Relaxed);
+                status.set_position(0);
+            }
+            Ok(cmd @ (AudioCmd::Stop | AudioCmd::Handoff)) => {
                 player.clear();
+                if matches!(cmd, AudioCmd::Handoff) {
+                    // Skipping again before the next song started: let the fade finish quickly.
+                    for f in &fading {
+                        f.out.store(QUICK_FADE_MS, Ordering::Relaxed);
+                    }
+                } else {
+                    fading.clear();
+                }
                 current = 0;
                 // Also stops a seek still waiting on this download.
                 if let Some(old) = shared.take() {
@@ -355,6 +489,10 @@ fn run(
                 seek_seq += 1;
                 if current == 0 {
                     continue;
+                }
+                // Seeking ends a crossfade: the new song alone from here.
+                for f in &fading {
+                    f.out.store(QUICK_FADE_MS, Ordering::Relaxed);
                 }
                 // A seekable decoder already indexed the (fully downloaded) file.
                 if seekable && player.try_seek(pos).is_ok() {
@@ -391,13 +529,39 @@ fn run(
                     }
                 }
             }
-            Ok(AudioCmd::Volume(v)) => player.set_volume(v * norm_gain(&status, shared.as_deref())),
+            Ok(AudioCmd::Volume(v)) => {
+                player.set_volume(v * norm_gain(&status, shared.as_deref()));
+                for f in &fading {
+                    f.player.set_volume(v * norm_gain(&status, f.shared.as_deref()));
+                }
+            }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
         }
 
+        if !fading.is_empty() {
+            fading.retain(|f| !f.player.empty());
+            if fading.is_empty() {
+                log::debug!("audio: crossfade done");
+            }
+        }
         if current != 0 {
-            status.set_position((offset + player.get_pos()).as_millis() as u64);
+            let pos = offset + player.get_pos();
+            status.set_position(pos.as_millis() as u64);
+            // Start the next song early, to crossfade into it. Not for songs barely
+            // longer than the fade.
+            let crossfade = Duration::from_millis(status.crossfade_ms.load(Ordering::Relaxed) as u64);
+            if !ending_sent
+                && !crossfade.is_zero()
+                && let Some(d) = status.duration()
+                && d > crossfade * 2
+                && pos + crossfade >= d
+                && shared.as_ref().is_some_and(|s| s.error().is_none())
+            {
+                ending_sent = true;
+                let _ = events.send(AudioEvent::Ending { generation: current });
+                wake();
+            }
             if player.empty() {
                 // A failed download ends the decoder early: that's not the song ending.
                 let event = match shared.as_ref().and_then(|s| s.error()) {
@@ -417,6 +581,28 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crossfade_ramps_are_equal_power_and_end_the_fading_song() {
+        use std::num::NonZero;
+        // 1 kHz mono of full-scale samples: 1 ms = 1 sample.
+        let ones = || rodio::buffer::SamplesBuffer::new(NonZero::new(1).unwrap(), NonZero::new(1000).unwrap(), vec![1.0; 1000]);
+        let status = Arc::new(AudioStatus::default());
+        let out = Arc::new(AtomicU32::new(0));
+        let mut incoming = Meter::new(ones(), status.clone(), 100, Arc::new(AtomicU32::new(0)));
+        let mut outgoing = Meter::new(ones(), status, 0, out.clone());
+        assert_eq!(outgoing.next(), Some(1.0));
+        out.store(100, Ordering::Relaxed);
+        let (a, b): (Vec<f32>, Vec<f32>) = (0..100).map(|_| (incoming.next().unwrap(), outgoing.next().unwrap())).unzip();
+        assert_eq!(a[0], 0.0);
+        assert_eq!(b[0], 1.0);
+        // sin² + cos² = 1 all the way through.
+        for (x, y) in a.iter().zip(&b) {
+            assert!((x * x + y * y - 1.0).abs() < 1e-4);
+        }
+        assert_eq!(incoming.next(), Some(1.0));
+        assert_eq!(outgoing.next(), None);
+    }
 
     #[test]
     fn normalization_only_turns_loud_tracks_down() {
