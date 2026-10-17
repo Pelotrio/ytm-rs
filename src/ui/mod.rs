@@ -206,6 +206,8 @@ pub struct App {
     /// Crossfade between songs, and over how many seconds.
     crossfade: bool,
     crossfade_secs: u32,
+    /// Also crossfade when skipping or picking a song.
+    crossfade_skips: bool,
     /// The next song starts because this one is ending: crossfade into it.
     handoff: bool,
     /// SponsorBlock segments for a video, and when one was last skipped.
@@ -441,6 +443,7 @@ impl App {
             sponsorblock: get("sponsorblock").is_some_and(|v| v == "1"),
             crossfade: get("crossfade").is_some_and(|v| v == "1"),
             handoff: false,
+            crossfade_skips: get("crossfade_skips").is_some_and(|v| v == "1"),
             crossfade_secs: get("crossfade_secs").and_then(|v| v.parse().ok()).unwrap_or(5).clamp(1, CROSSFADE_MAX),
             segments: None,
             segment_skipped: f64::NEG_INFINITY,
@@ -879,8 +882,10 @@ impl App {
         self.generation += 1;
         self.audio.status.wanted_gen.store(self.generation, Ordering::Relaxed);
         self.audio.status.duration_ms.store(track.duration.map_or(0, |d| d as u64 * 1000), Ordering::Relaxed);
-        // Only a song running into the next crossfades; skipping or picking one cuts over.
-        self.audio.send(if self.handoff && at.is_zero() { AudioCmd::Handoff } else { AudioCmd::Stop });
+        // A song running into the next crossfades; skipping or picking one cuts over
+        // unless that's switched on too.
+        let fade = self.handoff || self.crossfade_skips;
+        self.audio.send(if fade && at.is_zero() { AudioCmd::Handoff } else { AudioCmd::Stop });
         self.buffering = true;
         self.seek_drag = None;
         self.backend.request(Req::Play { video_id: track.id.clone(), generation: self.generation, at, report });
@@ -2238,6 +2243,7 @@ impl eframe::App for App {
         storage.set_string("sponsorblock", b(self.sponsorblock));
         storage.set_string("crossfade", b(self.crossfade));
         storage.set_string("crossfade_secs", self.crossfade_secs.to_string());
+        storage.set_string("crossfade_skips", b(self.crossfade_skips));
         storage.set_string("show_roman", b(self.show_roman));
         storage.set_string("show_trans", b(self.show_trans));
         // Background test runs mustn't change the listener's sources or per-song picks.

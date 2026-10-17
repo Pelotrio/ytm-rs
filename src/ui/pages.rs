@@ -700,7 +700,7 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
             }
         });
         divider(ui);
-        setting_row(ui, "Crossfade songs", Some("Blend the end of each song into the start of the next. Skipping still switches right away."), |ui| {
+        setting_row(ui, "Crossfade songs", Some("Blend the end of each song into the start of the next."), |ui| {
             if toggle(ui, &mut app.crossfade, "Crossfade songs").changed() {
                 app.set_crossfade();
             }
@@ -711,6 +711,10 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
                 if seconds_slider(ui, &mut app.crossfade_secs, 1..=super::CROSSFADE_MAX, "Crossfade length").changed() {
                     app.set_crossfade();
                 }
+            });
+            divider(ui);
+            setting_row(ui, "Crossfade when skipping", Some("Also fade when you press next or previous or pick another song, instead of switching right away."), |ui| {
+                toggle(ui, &mut app.crossfade_skips, "Crossfade when skipping");
             });
         }
         divider(ui);
