@@ -500,7 +500,10 @@ impl Backend {
             song: &t.title,
             artist: &artist,
             album: t.album.as_ref().map(|a| a.name.as_str()),
-            duration: t.duration.or_else(|| self.audio.status.duration().map(|d| d.as_secs() as u32)),
+            duration: match t.duration {
+                Some(d) => Some(d),
+                None => self.stream_duration(&t.id).await,
+            },
         };
         let mut set = self.lyrics.fetch(&query).await.unwrap_or_else(|e| {
             log::warn!("lyrics failed: {e:#}");
@@ -511,6 +514,23 @@ impl Backend {
             set.sources.retain(|l| !fail.split(',').any(|k| k.trim() == l.provider.key()));
         }
         set
+    }
+
+    /// The song's length from its stream, for a track listed without one (some home,
+    /// radio and queue rows). Without a duration Better Lyrics only finds plain lyrics,
+    /// so wait for playback to resolve the stream, up to 15 s. The player's own duration
+    /// counts too: starting a song clears it, and a restored session sets it.
+    async fn stream_duration(&self, video_id: &str) -> Option<u32> {
+        for _ in 0..150 {
+            let ms = self.current.lock().unwrap().as_ref().filter(|(id, _)| id == video_id).map(|(_, s)| s.duration_ms);
+            let ms = ms.filter(|ms| *ms > 0).or_else(|| self.audio.status.duration().map(|d| d.as_millis() as u64));
+            if let Some(ms) = ms.filter(|ms| *ms > 0) {
+                return Some((ms / 1000) as u32);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        log::info!("lyrics: no duration for {video_id}");
+        None
     }
 
     /// Sign in with the youtube.com cookies the Google sign-in window hands over.
