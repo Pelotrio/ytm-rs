@@ -161,13 +161,19 @@ pub mod icon {
     pub const HEADPHONES: char = '\u{e0f1}';
 }
 
-const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
-const INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.ttf");
-const INTER_BOLD: &[u8] = include_bytes!("../assets/fonts/Inter-ExtraBold.ttf");
+/// Inter (SIL OFL 1.1), the default face: regular / semibold / extra bold, subset to
+/// Latin (with Vietnamese), Greek and Cyrillic, so those scripts never fall back to
+/// another font letter by letter.
+const INTER: [&[u8]; 3] = [
+    include_bytes!("../assets/fonts/Inter-Regular.ttf"),
+    include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/Inter-ExtraBold.ttf"),
+];
 const LUCIDE: &[u8] = include_bytes!("../assets/fonts/lucide.ttf");
 
 /// Lyric typefaces used by theme presets (all SIL OFL 1.1), as static
-/// regular / semibold / bold instances subset to Latin, Greek and Cyrillic.
+/// regular / semibold / bold instances. They cover Latin only (their upstream has no
+/// Vietnamese, Greek or Cyrillic); `lyric_font_for` sets such lines in Inter instead.
 /// Instrument Sans is only ever used at semibold (one preset), so its bold slot reuses
 /// that instead of shipping a weight nothing draws.
 const LYRIC_FONTS: &[(&str, [&[u8]; 3])] = &[
@@ -193,6 +199,9 @@ const LYRIC_FONTS: &[(&str, [&[u8]; 3])] = &[
     ]),
 ];
 
+/// The bundled faces, by the names the font setting shows and stores.
+pub const BUNDLED_FONTS: &[&str] = &["Inter", "DM Sans", "Figtree", "Google Sans Flex", "Instrument Sans"];
+
 /// The bundled font a preset font name refers to. Fonts that can't be bundled (SF Pro,
 /// Spotify's) map to the closest open one; unknown names to Inter.
 fn lyric_key(name: &str) -> Option<&'static str> {
@@ -205,16 +214,246 @@ fn lyric_key(name: &str) -> Option<&'static str> {
     })
 }
 
-/// Lyric font for a preset's font name and weight.
-pub fn lyric_font(name: &str, weight: crate::preset::Weight, size: f32) -> FontId {
+// ------------------------------------------------------------------ font setting
+
+/// The listener's font (Settings › Appearance), used instead of the theme's for the
+/// interface and the lyrics. Empty: the theme's own.
+static FONT_CHOICE: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+
+/// An installed font the listener picked, once its faces are loaded. Drawn through the
+/// "choice-<weight>" families, which always exist (Inter until something is loaded), so
+/// a frame laid out before egui swaps fonts in never names a missing family.
+static CHOICE: std::sync::RwLock<Option<Chosen>> = std::sync::RwLock::new(None);
+
+struct Chosen {
+    name: String,
+    faces: [Face; 3],
+}
+
+/// One face of a primary font: the bytes, the face in the file, and the weight to set
+/// on a variable font.
+#[derive(Clone, Copy)]
+struct Face {
+    bytes: &'static [u8],
+    index: u32,
+    wght: Option<f32>,
+}
+
+impl Face {
+    const fn of(bytes: &'static [u8]) -> Self {
+        Self { bytes, index: 0, wght: None }
+    }
+}
+
+pub fn set_font_choice(name: &str) {
+    *FONT_CHOICE.write().unwrap() = name.to_owned();
+}
+
+pub fn font_choice() -> String {
+    FONT_CHOICE.read().unwrap().clone()
+}
+
+/// The font name to draw with where a theme asks for `theme_font`.
+pub fn effective_font(theme_font: &str) -> String {
+    let choice = FONT_CHOICE.read().unwrap();
+    if choice.is_empty() { theme_font.to_owned() } else { choice.clone() }
+}
+
+/// The family key for a font name: a bundled face, "choice" for the installed font the
+/// listener picked (once loaded), else Inter.
+fn font_key(name: &str) -> &'static str {
+    let name = effective_font(name);
+    if let Some(k) = lyric_key(&name) {
+        return k;
+    }
+    if CHOICE.read().unwrap().as_ref().is_some_and(|c| c.name.eq_ignore_ascii_case(&name)) { "choice" } else { "inter" }
+}
+
+fn family(key: &str, weight: crate::preset::Weight, size: f32) -> FontId {
     use crate::preset::Weight;
-    let key = lyric_key(name).unwrap_or("inter");
     let w = match weight {
         Weight::Regular => 0,
         Weight::Semibold => 1,
         Weight::Bold => 2,
     };
     FontId::new(size, FontFamily::Name(format!("{key}-{w}").into()))
+}
+
+/// Lyric font for a preset's font name and weight.
+pub fn lyric_font(name: &str, weight: crate::preset::Weight, size: f32) -> FontId {
+    family(font_key(name), weight, size)
+}
+
+/// Lyric font for one piece of text. When the font lacks letters the text uses and
+/// Inter has them (Vietnamese, Greek or Cyrillic in DM Sans, Figtree, …), the whole
+/// text is set in Inter rather than mixing two typefaces letter by letter.
+pub fn lyric_font_for(name: &str, weight: crate::preset::Weight, size: f32, text: &str) -> FontId {
+    let key = font_key(name);
+    let key = if key != "inter" && lacks_letters(key, text) { "inter" } else { key };
+    family(key, weight, size)
+}
+
+fn lacks_letters(key: &str, text: &str) -> bool {
+    use skrifa::MetadataProvider;
+    let face = match key {
+        "choice" => match CHOICE.read().unwrap().as_ref() {
+            Some(c) => c.faces[0],
+            None => return false,
+        },
+        k => match LYRIC_FONTS.iter().find(|(n, _)| *n == k) {
+            Some((_, w)) => Face::of(w[0]),
+            None => return false,
+        },
+    };
+    let (Ok(font), Ok(inter)) = (skrifa::FontRef::from_index(face.bytes, face.index), skrifa::FontRef::new(INTER[0])) else { return false };
+    let (has, inter) = (font.charmap(), inter.charmap());
+    text.chars().any(|c| c.is_alphabetic() && has.map(c).is_none() && inter.map(c).is_some())
+}
+
+// ------------------------------------------------------------------ installed fonts
+
+/// A font family installed on this PC, for the font setting.
+pub struct SysFamily {
+    pub name: String,
+    faces: Vec<SysFace>,
+}
+
+struct SysFace {
+    path: std::path::PathBuf,
+    index: u32,
+    weight: f32,
+    /// The weight axis range, for a variable font.
+    wght: Option<(f32, f32)>,
+}
+
+static INSTALLED_FONTS: std::sync::OnceLock<Vec<SysFamily>> = std::sync::OnceLock::new();
+static SCANNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Text fonts installed on this PC, sorted by name, without the bundled ones. `None`
+/// while a background scan (started by the first call) runs; `done` runs after it.
+pub fn installed_fonts(done: impl FnOnce() + Send + 'static) -> Option<&'static [SysFamily]> {
+    if let Some(v) = INSTALLED_FONTS.get() {
+        return Some(v);
+    }
+    if !SCANNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        std::thread::spawn(move || {
+            let _ = INSTALLED_FONTS.set(scan_fonts());
+            done();
+        });
+    }
+    None
+}
+
+fn font_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    #[cfg(windows)]
+    {
+        let windir = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
+        dirs.push(std::path::PathBuf::from(windir).join("Fonts"));
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            dirs.push(std::path::PathBuf::from(local).join("Microsoft\\Windows\\Fonts"));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    dirs.extend(["/System/Library/Fonts", "/Library/Fonts"].map(Into::into));
+    #[cfg(all(unix, not(target_os = "macos")))]
+    dirs.extend(["/usr/share/fonts", "/usr/local/share/fonts"].map(Into::into));
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(std::path::PathBuf::from(home).join(".local/share/fonts"));
+    }
+    dirs
+}
+
+/// Every upright, normal-width face of a text font (one that maps Latin letters), by
+/// family. Only names and attributes are read; nothing stays mapped.
+fn scan_fonts() -> Vec<SysFamily> {
+    use skrifa::{MetadataProvider, attribute::Style, string::StringId};
+    let mut files = Vec::new();
+    let mut dirs = font_dirs();
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().and_then(|x| x.to_str()).is_some_and(|x| matches!(x.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "otc")) {
+                files.push(path);
+            }
+        }
+    }
+    let mut families: std::collections::BTreeMap<String, SysFamily> = std::collections::BTreeMap::new();
+    for path in files {
+        let Ok(file) = std::fs::File::open(&path) else { continue };
+        // SAFETY: read-only and dropped before the next file; font files don't change
+        // under a running app.
+        let Ok(data) = (unsafe { memmap2::Mmap::map(&file) }) else { continue };
+        let Ok(fonts) = skrifa::raw::FileRef::new(&data) else { continue };
+        for (index, font) in fonts.fonts().enumerate() {
+            let Ok(font) = font else { continue };
+            let cmap = font.charmap();
+            if cmap.is_symbol() || cmap.map('a').is_none() || cmap.map('Z').is_none() {
+                continue;
+            }
+            let attrs = font.attributes();
+            if attrs.style != Style::Normal || (attrs.stretch.ratio() - 1.0).abs() > 0.01 {
+                continue;
+            }
+            let name = [StringId::TYPOGRAPHIC_FAMILY_NAME, StringId::FAMILY_NAME]
+                .into_iter()
+                .find_map(|id| font.localized_strings(id).english_or_first())
+                .map(|s| s.to_string().trim().to_owned());
+            // "@" names are vertical CJK variants.
+            let Some(name) = name.filter(|n| !n.is_empty() && !n.starts_with('@') && lyric_key(n).is_none() && !n.eq_ignore_ascii_case("inter")) else { continue };
+            let wght = font.axes().iter().find(|a| a.tag() == skrifa::Tag::new(b"wght")).map(|a| (a.min_value(), a.max_value()));
+            let face = SysFace { path: path.clone(), index: index as u32, weight: attrs.weight.value(), wght };
+            families.entry(name.to_lowercase()).or_insert_with(|| SysFamily { name, faces: Vec::new() }).faces.push(face);
+        }
+    }
+    families.into_values().collect()
+}
+
+/// The closest face to each of the three weights the app draws: regular, semibold, and
+/// bold, leaning to 700 over 900 where a family has both.
+fn choose_faces(family: &SysFamily) -> Option<[Face; 3]> {
+    static MAPPED: std::sync::Mutex<Vec<(std::path::PathBuf, &'static [u8])>> = std::sync::Mutex::new(Vec::new());
+    let mut faces = Vec::new();
+    for target in [400.0, 600.0, 750.0] {
+        let best = family.faces.iter().min_by_key(|f| match f.wght {
+            Some((lo, hi)) if (lo..=hi).contains(&target) => 0,
+            Some((lo, hi)) => (target - target.clamp(lo, hi)).abs() as i32,
+            None => (f.weight - target).abs() as i32,
+        })?;
+        let mut mapped = MAPPED.lock().unwrap();
+        let bytes = match mapped.iter().find(|(p, _)| *p == best.path) {
+            Some((_, b)) => *b,
+            None => {
+                let b = map(best.path.to_str()?)?;
+                mapped.push((best.path.clone(), b));
+                b
+            }
+        };
+        faces.push(Face { bytes, index: best.index, wght: best.wght.map(|(lo, hi)| target.clamp(lo, hi)) });
+    }
+    faces.try_into().ok()
+}
+
+/// Load the faces of the installed font the listener picked, if that's what it is.
+fn load_choice() {
+    let name = font_choice();
+    if name.is_empty() || lyric_key(&name).is_some() || name.eq_ignore_ascii_case("inter") {
+        *CHOICE.write().unwrap() = None;
+        return;
+    }
+    if CHOICE.read().unwrap().as_ref().is_some_and(|c| c.name == name) {
+        return;
+    }
+    // Only when an installed font is set: a one-off scan, the first time.
+    let all = INSTALLED_FONTS.get_or_init(scan_fonts);
+    let faces = all.iter().find(|f| f.name.eq_ignore_ascii_case(&name)).and_then(choose_faces);
+    if faces.is_none() {
+        log::warn!("font {name:?} isn't installed; using Inter");
+    }
+    *CHOICE.write().unwrap() = faces.map(|faces| Chosen { name, faces });
 }
 
 // System fallbacks: egui's fonts cover Latin only, so CJK, Arabic, Indic, Thai,
@@ -235,17 +474,22 @@ const CANDIDATES: &[(&str, u32)] = &[
     ("C:\\Windows\\Fonts\\seguiemj.ttf", 0),  // emoji (drawn monochrome)
 ];
 
-/// Heavier faces for the semibold and bold families, so CJK lyrics come out at the
-/// weight the theme asks for (Better Lyrics uses Noto Sans CJK at the lyric weight).
+/// Semibold and bold faces of the fallbacks, so text in a script the primary font
+/// lacks comes out at the weight the line asks for, not regular inside a bold title
+/// (Better Lyrics uses Noto Sans CJK at the lyric weight).
 #[cfg(windows)]
-const BOLD_VARIANTS: &[(&str, &str)] = &[
-    ("C:\\Windows\\Fonts\\YuGothM.ttc", "C:\\Windows\\Fonts\\YuGothB.ttc"),
-    ("C:\\Windows\\Fonts\\msyh.ttc", "C:\\Windows\\Fonts\\msyhbd.ttc"),
-    ("C:\\Windows\\Fonts\\msjh.ttc", "C:\\Windows\\Fonts\\msjhbd.ttc"),
-    ("C:\\Windows\\Fonts\\malgun.ttf", "C:\\Windows\\Fonts\\malgunbd.ttf"),
+const HEAVIER: &[(&str, [(&str, u32); 2])] = &[
+    ("C:\\Windows\\Fonts\\segoeui.ttf", [("C:\\Windows\\Fonts\\seguisb.ttf", 0), ("C:\\Windows\\Fonts\\segoeuib.ttf", 0)]),
+    ("C:\\Windows\\Fonts\\YuGothM.ttc", [("C:\\Windows\\Fonts\\YuGothB.ttc", 0), ("C:\\Windows\\Fonts\\YuGothB.ttc", 0)]),
+    ("C:\\Windows\\Fonts\\msyh.ttc", [("C:\\Windows\\Fonts\\msyhbd.ttc", 0), ("C:\\Windows\\Fonts\\msyhbd.ttc", 0)]),
+    ("C:\\Windows\\Fonts\\msjh.ttc", [("C:\\Windows\\Fonts\\msjhbd.ttc", 0), ("C:\\Windows\\Fonts\\msjhbd.ttc", 0)]),
+    ("C:\\Windows\\Fonts\\malgun.ttf", [("C:\\Windows\\Fonts\\malgunbd.ttf", 0), ("C:\\Windows\\Fonts\\malgunbd.ttf", 0)]),
+    ("C:\\Windows\\Fonts\\Nirmala.ttc", [("C:\\Windows\\Fonts\\Nirmala.ttc", 1), ("C:\\Windows\\Fonts\\Nirmala.ttc", 1)]),
+    ("C:\\Windows\\Fonts\\LeelawUI.ttf", [("C:\\Windows\\Fonts\\LeelaUIb.ttf", 0), ("C:\\Windows\\Fonts\\LeelaUIb.ttf", 0)]),
+    ("C:\\Windows\\Fonts\\ebrima.ttf", [("C:\\Windows\\Fonts\\ebrimabd.ttf", 0), ("C:\\Windows\\Fonts\\ebrimabd.ttf", 0)]),
 ];
 #[cfg(not(windows))]
-const BOLD_VARIANTS: &[(&str, &str)] = &[];
+const HEAVIER: &[(&str, [(&str, u32); 2])] = &[];
 
 #[cfg(target_os = "macos")]
 const CANDIDATES: &[(&str, u32)] = &[
@@ -276,64 +520,86 @@ fn em_metrics(bytes: &[u8], index: u32) -> Option<(f32, f32)> {
     Some((m.ascent / upem, (m.ascent - m.descent + m.leading) / upem))
 }
 
-/// Install fonts. `ui_font` is a preset font name for all interface text ("inter" or
-/// one of the bundled lyric fonts).
+fn font_data(face: Face, y_offset_factor: f32) -> FontData {
+    let mut tweak = egui::FontTweak { y_offset_factor, ..Default::default() };
+    if let Some(w) = face.wght {
+        tweak.coords.push(b"wght", w);
+    }
+    FontData { index: face.index, ..FontData::from_static(face.bytes) }.tweak(tweak)
+}
+
+/// Install fonts. `ui_font` is the theme's font name for all interface text ("inter"
+/// or one of the bundled lyric fonts); the listener's font setting wins over it.
+///
+/// Each primary font is followed by Inter at the same weight (for the scripts the
+/// theme fonts lack), then the system fallbacks at the closest weight.
 ///
 /// egui places a fallback font's glyphs by centring its line height on the primary
 /// font's, not by sharing a baseline, so CJK glyphs (Yu Gothic, Microsoft YaHei, …)
 /// sit visibly higher than Latin ones in the same line. Each fallback therefore gets a
 /// y offset computed from both fonts' metrics, once per primary font it backs.
 pub fn install_fonts(ctx: &egui::Context, ui_font: &str) {
+    load_choice();
+    let ui_key = font_key(ui_font);
     // Installing rebuilds the font atlas; most themes share a UI font, so skip repeats.
-    static INSTALLED: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
-    let ui_key = lyric_key(ui_font).unwrap_or("inter");
-    if INSTALLED.lock().unwrap().replace(ui_key) == Some(ui_key) {
-        return;
+    static INSTALLED: std::sync::Mutex<Option<(&'static str, String)>> = std::sync::Mutex::new(None);
+    let loaded = CHOICE.read().unwrap().as_ref().map(|c| c.name.clone()).unwrap_or_default();
+    let state = Some((ui_key, loaded));
+    {
+        let mut installed = INSTALLED.lock().unwrap();
+        if *installed == state {
+            return;
+        }
+        *installed = state;
     }
     let mut defs = FontDefinitions::default();
     let egui_default = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     defs.font_data.insert("lucide".into(), Arc::new(FontData::from_static(LUCIDE).tweak(egui::FontTweak { y_offset_factor: 0.0, ..Default::default() })));
     defs.families.insert(FontFamily::Name("icons".into()), vec!["lucide".to_owned()]);
 
-    // Mapped once for the life of the process, however often fonts are installed.
-    static SYSTEM: std::sync::OnceLock<Vec<(&str, &'static [u8], u32)>> = std::sync::OnceLock::new();
-    let system = SYSTEM.get_or_init(|| CANDIDATES.iter().filter_map(|&(path, index)| map(path).map(|b| (path, b, index))).collect());
-    static SYSTEM_BOLD: std::sync::OnceLock<Vec<(&str, &'static [u8], u32)>> = std::sync::OnceLock::new();
-    // The same list with the heavier CJK faces swapped in.
-    let system_bold = SYSTEM_BOLD.get_or_init(|| {
-        CANDIDATES
-            .iter()
-            .filter_map(|&(path, index)| {
-                let heavy = BOLD_VARIANTS.iter().find(|(base, _)| *base == path).map(|(_, b)| *b);
-                heavy.and_then(|h| map(h).map(|b| (h, b, index))).or_else(|| map(path).map(|b| (path, b, index)))
-            })
-            .collect()
+    // Mapped once for the life of the process, however often fonts are installed:
+    // the fallback list at each weight.
+    type Fallbacks = [Vec<(String, Face)>; 3];
+    static SYSTEM: std::sync::OnceLock<Fallbacks> = std::sync::OnceLock::new();
+    let system = SYSTEM.get_or_init(|| {
+        std::array::from_fn(|w| {
+            CANDIDATES
+                .iter()
+                .filter_map(|&(path, index)| {
+                    let heavy = (w > 0).then(|| HEAVIER.iter().find(|(base, _)| *base == path)).flatten().map(|(_, v)| v[w - 1]);
+                    let mapped = |(p, i): (&str, u32)| map(p).map(|bytes| (format!("sys:{p}#{i}"), Face { bytes, index: i, wght: None }));
+                    heavy.and_then(mapped).or_else(|| mapped((path, index)))
+                })
+                .collect()
+        })
     });
-    // Primary font groups that share metrics: Inter's weights, then each lyric font.
-    let mut groups: Vec<(&str, [&'static [u8]; 3])> = vec![("inter", [INTER_REGULAR, INTER_SEMIBOLD, INTER_BOLD])];
-    groups.extend(LYRIC_FONTS.iter().map(|(k, w)| (*k, *w)));
-    for (key, weights) in &groups {
-        let (asc_p, h_p) = em_metrics(weights[0], 0).unwrap_or((0.97, 1.21));
-        let mut chains: [Vec<String>; 2] = [Vec::new(), Vec::new()];
-        for (heavy, list) in [system, system_bold].into_iter().enumerate() {
-            for &(path, bytes, index) in list {
-                let Some((asc_f, h_f)) = em_metrics(bytes, index) else { continue };
-                let shift = asc_p - (asc_f + 0.5 * (h_p - h_f));
-                let name = format!("sys:{path}@{key}");
-                if !defs.font_data.contains_key(&name) {
-                    let tweak = egui::FontTweak { y_offset_factor: shift, ..Default::default() };
-                    defs.font_data.insert(name.clone(), Arc::new(FontData { index, ..FontData::from_static(bytes) }.tweak(tweak)));
-                }
-                chains[heavy].push(name);
-            }
-        }
-        let fallbacks = chains[0].clone();
-        for (w, bytes) in weights.iter().enumerate() {
-            let fallbacks = if w == 0 { &chains[0] } else { &chains[1] };
+    // Primary fonts: Inter, each lyric font, and the installed font picked in Settings
+    // (Inter again when there's none, so the "choice" families always exist).
+    let choice = CHOICE.read().unwrap().as_ref().map(|c| c.faces);
+    let mut groups: Vec<(&str, [Face; 3])> = vec![("inter", INTER.map(Face::of))];
+    groups.extend(LYRIC_FONTS.iter().map(|(k, w)| (*k, w.map(Face::of))));
+    groups.push(("choice", choice.unwrap_or(INTER.map(Face::of))));
+    for (key, faces) in &groups {
+        let (asc_p, h_p) = em_metrics(faces[0].bytes, faces[0].index).unwrap_or((0.97, 1.21));
+        for (w, face) in faces.iter().enumerate() {
             let name = format!("{key}-{w}");
-            defs.font_data.insert(name.clone(), Arc::new(FontData::from_static(bytes)));
+            defs.font_data.insert(name.clone(), Arc::new(font_data(*face, 0.0)));
             let mut chain = vec![name.clone()];
-            chain.extend(fallbacks.iter().cloned());
+            let inter = (*key != "inter").then(|| ("inter".to_owned(), Face::of(INTER[w])));
+            for (fallback, f) in inter.iter().chain(&system[w]) {
+                let Some((asc_f, h_f)) = em_metrics(f.bytes, f.index) else { continue };
+                let shift = asc_p - (asc_f + 0.5 * (h_p - h_f));
+                let id = format!("{fallback}-{w}@{key}");
+                if !defs.font_data.contains_key(&id) {
+                    defs.font_data.insert(id.clone(), Arc::new(font_data(*f, shift)));
+                }
+                chain.push(id);
+            }
+            if *key == "inter" && w == 0 {
+                if let Some(mono) = defs.families.get_mut(&FontFamily::Monospace) {
+                    mono.extend(chain[1..].iter().cloned());
+                }
+            }
             // egui's bundled emoji/icon font stays as a last resort.
             chain.extend(egui_default.iter().filter(|n| n.as_str() != "Ubuntu-Light").cloned());
             defs.families.insert(FontFamily::Name(name.clone().into()), chain.clone());
@@ -344,11 +610,6 @@ pub fn install_fonts(ctx: &egui::Context, ui_font: &str) {
                     _ => FontFamily::Name("bold".into()),
                 };
                 defs.families.insert(family, chain);
-            }
-        }
-        if *key == "inter" {
-            if let Some(mono) = defs.families.get_mut(&FontFamily::Monospace) {
-                mono.extend(fallbacks.iter().cloned());
             }
         }
     }
@@ -420,3 +681,4 @@ pub fn install_style(ctx: &egui::Context) {
         s.animation_time = 0.18 * SPEED;
     });
 }
+

@@ -446,7 +446,7 @@ fn plain_lyrics(app: &mut App, ui: &mut Ui, rect: Rect, lyrics: &Lyrics) {
         let style = &app.look().lyrics;
         let size = (32.0 * style.size.clamp(0.6, 1.6)).min(rect.width() / 14.0).max(18.0);
         for l in &lyrics.lines {
-            ui.label(egui::RichText::new(&l.text).font(theme::lyric_font(&style.font, style.weight, size)).color(theme::with_alpha(Color32::WHITE, 0.85)));
+            ui.label(egui::RichText::new(&l.text).font(theme::lyric_font_for(&style.font, style.weight, size, &l.text)).color(theme::with_alpha(Color32::WHITE, 0.85)));
             ui.add_space(size * 0.25);
         }
         ui.add_space(80.0);

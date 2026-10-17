@@ -827,6 +827,13 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
                 toggle(ui, &mut app.reactive_bg, "Pulse with the music");
             });
         });
+        divider(ui);
+        setting_row(ui, "Font", Some("For the whole app and the lyrics. Any font installed on this PC works, e.g. one made for your language."), |ui| {
+            if let Some(name) = font_picker(ui) {
+                theme::set_font_choice(&name);
+                app.chrome_applied = None;
+            }
+        });
     });
 
     // ---- themes
@@ -1203,6 +1210,59 @@ fn icon_at(ui: &Ui, v: &crate::appicon::Variant, rect: Rect) {
     let px = (rect.width() * ui.ctx().pixels_per_point()).ceil() as u32;
     let png = v.png(px);
     egui::Image::from_bytes(format!("bytes://app-icon/{}-{}.png", v.id, png.len()), png).paint_at(ui, rect);
+}
+
+/// The font setting: the theme's own, a bundled face, or one installed on this PC.
+/// Returns the new choice ("" for the theme's).
+fn font_picker(ui: &mut Ui) -> Option<String> {
+    let current = theme::font_choice();
+    let btn = dropdown_button(ui, if current.is_empty() { "Theme's font" } else { &current }, 220.0, "Font");
+    let just_opened = btn.clicked();
+    let mut picked = None;
+    egui::Popup::menu(&btn).show(|ui| {
+        ui.set_width(220.0);
+        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+            ui.add_space(4.0);
+            let mut row = |ui: &mut Ui, label: &str, value: &str| {
+                let on = current.eq_ignore_ascii_case(value);
+                let r = option_row(ui, label, on);
+                if on && just_opened {
+                    r.scroll_to_me(Some(egui::Align::Center));
+                }
+                if r.clicked() {
+                    picked = Some(value.to_owned());
+                    ui.close();
+                }
+            };
+            row(ui, "Theme's font", "");
+            for name in theme::BUNDLED_FONTS {
+                row(ui, name, name);
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                ui.label(RichText::new("Installed on this PC").font(theme::semibold(12.0)).color(theme::TEXT_FAINT));
+            });
+            ui.add_space(4.0);
+            let ctx = ui.ctx().clone();
+            match theme::installed_fonts(move || ctx.request_repaint()) {
+                Some(fonts) => {
+                    for f in fonts {
+                        row(ui, &f.name, &f.name);
+                    }
+                }
+                None => {
+                    ui.horizontal(|ui| {
+                        ui.add_space(12.0);
+                        ui.label(RichText::new("Looking for fonts…").font(theme::regular(13.0)).color(theme::text_dim()));
+                    });
+                }
+            }
+            ui.add_space(4.0);
+        });
+    });
+    picked.filter(|p| *p != current)
 }
 
 /// A dropdown's closed state: the chosen value and a chevron on a glass pill.

@@ -314,6 +314,8 @@ impl App {
         storage: Option<&dyn eframe::Storage>,
     ) -> Self {
         let get = |k: &str| storage.and_then(|s| s.get_string(k));
+        // Dev hook: YTM_FONT=<font name> tries a font without saving it.
+        theme::set_font_choice(&dev_var("YTM_FONT").map(str::to_owned).or_else(|| get("font")).unwrap_or_default());
         let discord_enabled = get("discord_enabled").is_none_or(|v| v == "1");
         let app_icon = crate::appicon::load(backend.data_dir());
         // Updates reinstall the shortcuts with the classic icon.
@@ -2144,6 +2146,9 @@ impl eframe::App for App {
         storage.set_string("default_theme", b(self.default_theme));
         if std::env::var_os("YTM_THEME").is_none() {
             storage.set_string("theme", self.theme_id.clone());
+        }
+        if dev_var("YTM_FONT").is_none() {
+            storage.set_string("font", theme::font_choice());
         }
         storage.set_string("anim_bg", b(self.anim_bg));
         storage.set_string("reactive_bg", b(self.reactive_bg));

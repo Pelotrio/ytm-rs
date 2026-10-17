@@ -213,7 +213,7 @@ impl Cfg {
         };
         let pad = css.as_ref().and_then(|c| c.padding_inline).map_or((0.0, 0.0), |p| (p[0] * rem / 10.0, p[1] * rem / 10.0));
         Self {
-            font: s.font.clone(),
+            font: theme::effective_font(&s.font),
             weight,
             size,
             active: crate::preset::paint(&s.sung_color, accent),
@@ -248,17 +248,18 @@ impl Cfg {
     fn rem(&self) -> f32 {
         self.rem
     }
-    fn main_font(&self) -> FontId {
-        theme::lyric_font(&self.font, self.weight, self.size)
+    // Each takes the text it sets, so a line in a script the font lacks is all Inter.
+    fn main_font(&self, text: &str) -> FontId {
+        theme::lyric_font_for(&self.font, self.weight, self.size, text)
     }
-    fn bg_font(&self) -> FontId {
-        theme::lyric_font(&self.font, Weight::Semibold, self.size * self.bg_em)
+    fn bg_font(&self, text: &str) -> FontId {
+        theme::lyric_font_for(&self.font, Weight::Semibold, self.size * self.bg_em, text)
     }
-    fn roman_font(&self) -> FontId {
-        theme::lyric_font(&self.font, Weight::Semibold, self.rem() * 2.0 / 1.25)
+    fn roman_font(&self, text: &str) -> FontId {
+        theme::lyric_font_for(&self.font, Weight::Semibold, self.rem() * 2.0 / 1.25, text)
     }
-    fn trans_font(&self) -> FontId {
-        theme::lyric_font(&self.font, Weight::Semibold, self.rem() * 2.0)
+    fn trans_font(&self, text: &str) -> FontId {
+        theme::lyric_font_for(&self.font, Weight::Semibold, self.rem() * 2.0, text)
     }
 }
 
@@ -570,7 +571,9 @@ fn build_block(fonts: &mut FontsView<'_>, cfg: &Cfg, l: &Line, index: usize, wid
     let parts = if l.parts.is_empty() { line_synced_parts(l) } else { l.parts.clone() };
     let toks: Vec<Tok> = parts.iter().flat_map(split_part).collect();
     let (main, bg): (Vec<Tok>, Vec<Tok>) = toks.into_iter().partition(|t| !t.bg);
-    let f = flow(fonts, main, &cfg.main_font(), content_w, line_h, align);
+    let joined = |toks: &[Tok]| toks.iter().map(|t| t.text.as_str()).collect::<String>();
+    let font = cfg.main_font(&joined(&main));
+    let f = flow(fonts, main, &font, content_w, line_h, align);
     for w in f.words {
         block.words.push(Word { pos: w.pos + vec2(0.0, y), ..w });
     }
@@ -580,7 +583,8 @@ fn build_block(fonts: &mut FontsView<'_>, cfg: &Cfg, l: &Line, index: usize, wid
         y += em * 0.1;
         let base = block.words.len();
         let g0 = block.groups.len();
-        let f = flow(fonts, bg, &cfg.bg_font(), content_w, line_h, align);
+        let font = cfg.bg_font(&joined(&bg));
+        let f = flow(fonts, bg, &font, content_w, line_h, align);
         for w in f.words {
             block.words.push(Word { pos: w.pos + vec2(0.0, y), group: w.group + g0, ..w });
         }
@@ -595,14 +599,15 @@ fn build_block(fonts: &mut FontsView<'_>, cfg: &Cfg, l: &Line, index: usize, wid
         let (body, inner, id) = match r {
             Roman::Timed(parts, text) => {
                 let toks: Vec<Tok> = parts.iter().flat_map(split_part).collect();
-                let font = cfg.roman_font();
+                let font = cfg.roman_font(text);
                 let lh = fonts.row_height(&font);
                 let f = flow(fonts, toks, &font, inner_w, lh, Align::Left);
                 (DecoBody::Timed { words: f.words, groups: f.groups }, vec2(f.width, f.height), hash(("rt", text)))
             }
             Roman::Text(t) => {
-                let g = fonts.layout(t.to_owned(), cfg.roman_font(), Color32::WHITE, inner_w);
-                (DecoBody::Text(t.to_owned(), cfg.roman_font()), g.size(), hash(("r", t)))
+                let font = cfg.roman_font(t);
+                let g = fonts.layout(t.to_owned(), font.clone(), Color32::WHITE, inner_w);
+                (DecoBody::Text(t.to_owned(), font), g.size(), hash(("r", t)))
             }
         };
         let size = inner + pad * 2.0 + vec2(2.0, 2.0);
@@ -622,13 +627,14 @@ fn build_block(fonts: &mut FontsView<'_>, cfg: &Cfg, l: &Line, index: usize, wid
     }
     if let Some(t) = trans {
         y += gap;
-        let g = fonts.layout(t.to_owned(), cfg.trans_font(), Color32::WHITE, content_w);
+        let font = cfg.trans_font(t);
+        let g = fonts.layout(t.to_owned(), font.clone(), Color32::WHITE, content_w);
         let x = match align {
             Align::Left => 0.0,
             Align::Right => content_w - g.size().x,
             Align::Center => (content_w - g.size().x) * 0.5,
         };
-        block.decos.push(Deco { body: DecoBody::Text(t.to_owned(), cfg.trans_font()), rect: Rect::from_min_size(pos2(x, y), g.size()), pill: false, id: hash(("t", t)) });
+        block.decos.push(Deco { body: DecoBody::Text(t.to_owned(), font), rect: Rect::from_min_size(pos2(x, y), g.size()), pill: false, id: hash(("t", t)) });
         y += g.size().y;
     }
     block.height = y + cfg.padding;
