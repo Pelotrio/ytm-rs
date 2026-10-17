@@ -700,19 +700,19 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
             }
         });
         divider(ui);
-        setting_row(ui, "Crossfade", Some("Fade each song into the next, when one ends or when you skip."), |ui| {
-            let v = app.crossfade;
-            if ui.add_enabled(v < super::CROSSFADE_MAX, egui::Button::new("+").min_size(vec2(28.0, 26.0))).on_hover_text("Longer").clicked() {
-                app.crossfade = v + 1;
-            }
-            ui.label(egui::RichText::new(if v == 0 { "Off".into() } else { format!("{v} s") }).font(theme::semibold(13.0)));
-            if ui.add_enabled(v > 0, egui::Button::new("−").min_size(vec2(28.0, 26.0))).on_hover_text("Shorter").clicked() {
-                app.crossfade = v - 1;
-            }
-            if app.crossfade != v {
-                app.audio.set_crossfade(app.crossfade);
+        setting_row(ui, "Crossfade songs", Some("Blend the end of each song into the start of the next, also when you skip."), |ui| {
+            if toggle(ui, &mut app.crossfade, "Crossfade songs").changed() {
+                app.set_crossfade();
             }
         });
+        if app.crossfade {
+            divider(ui);
+            setting_row(ui, "Crossfade length", None, |ui| {
+                if seconds_slider(ui, &mut app.crossfade_secs, 1..=super::CROSSFADE_MAX, "Crossfade length").changed() {
+                    app.set_crossfade();
+                }
+            });
+        }
         divider(ui);
         setting_row(ui, "Skip non-music parts", Some("Jump over talking, skits and sponsor breaks in music videos, as marked by the SponsorBlock community. Album songs don't have any."), |ui| {
             if toggle(ui, &mut app.sponsorblock, "Skip non-music parts").changed() {
@@ -1394,6 +1394,45 @@ pub(super) fn toggle(ui: &mut Ui, on: &mut bool, name: &str) -> egui::Response {
     let knob = pos2(egui::lerp(rect.left() + 13.0..=rect.right() - 13.0, t), rect.center().y);
     ui.painter().circle_filled(knob + vec2(0.0, 1.0), 10.0, theme::shade(0.25 * fade));
     ui.painter().circle_filled(knob, 10.0, theme::with_alpha(Color32::WHITE, fade));
+    resp
+}
+
+/// Whole seconds on a track like the volume slider's, with the ends labelled and the
+/// value beside it: click or drag to set (scrolling over it scrolls the page).
+fn seconds_slider(ui: &mut Ui, v: &mut u32, range: std::ops::RangeInclusive<u32>, name: &str) -> egui::Response {
+    let (lo, hi) = (*range.start(), *range.end());
+    let label = |ui: &mut Ui, text: String, w: f32, font: egui::FontId, color: Color32| {
+        let (rect, _) = ui.allocate_exact_size(vec2(w, 26.0), Sense::hover());
+        let g = widgets::galley(ui, &text, font, color, w);
+        ui.painter().galley(pos2(rect.right() - g.size().x, rect.center().y - g.size().y / 2.0), g, color);
+    };
+    label(ui, format!("{v} s"), 34.0, theme::semibold(13.0), theme::TEXT);
+    ui.add_space(6.0);
+    label(ui, format!("{hi} s"), 26.0, theme::regular(12.0), theme::text_dim());
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(170.0, 26.0), Sense::click_and_drag());
+    label(ui, format!("{lo} s"), 22.0, theme::regular(12.0), theme::text_dim());
+    let track = Rect::from_center_size(rect.center(), vec2(rect.width() - 16.0, 4.0));
+    let old = *v;
+    if let Some(p) = resp.interact_pointer_pos()
+        && (resp.dragged() || resp.clicked())
+    {
+        let t = ((p.x - track.left()) / track.width()).clamp(0.0, 1.0);
+        *v = (lo as f32 + t * (hi - lo) as f32).round() as u32;
+    }
+    if *v != old {
+        resp.mark_changed();
+    }
+    let value = *v;
+    resp.widget_info(|| egui::WidgetInfo::slider(ui.is_enabled(), value as f64, name));
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered() || resp.dragged(), 0.12);
+    let accent = ui.ctx().data(|d| d.get_temp::<Color32>(egui::Id::new("accent"))).unwrap_or(theme::RED);
+    let t = (value - lo) as f32 / (hi - lo) as f32;
+    let knob = pos2(egui::lerp(track.left()..=track.right(), t), track.center().y);
+    ui.painter().rect_filled(track, 2.0, theme::glass(0.15));
+    ui.painter().rect_filled(Rect::from_min_max(track.min, pos2(knob.x, track.max.y)), 2.0, accent);
+    ui.painter().circle_filled(knob + vec2(0.0, 1.0), 7.0 + h, theme::shade(0.25));
+    ui.painter().circle_filled(knob, 7.0 + h, Color32::WHITE);
     resp
 }
 

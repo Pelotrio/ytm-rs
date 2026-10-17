@@ -203,8 +203,9 @@ pub struct App {
     reactive_bg: bool,
     /// Skip the parts of music videos SponsorBlock marks as not music.
     sponsorblock: bool,
-    /// Crossfade between songs, in seconds; 0 = off.
-    crossfade: u32,
+    /// Crossfade between songs, and over how many seconds.
+    crossfade: bool,
+    crossfade_secs: u32,
     /// SponsorBlock segments for a video, and when one was last skipped.
     segments: Option<(String, Vec<crate::sponsorblock::Segment>)>,
     segment_skipped: f64,
@@ -436,7 +437,8 @@ impl App {
             anim_bg: get("anim_bg").is_none_or(|v| v == "1"),
             reactive_bg: get("reactive_bg").is_none_or(|v| v == "1"),
             sponsorblock: get("sponsorblock").is_some_and(|v| v == "1"),
-            crossfade: get("crossfade").and_then(|v| v.parse().ok()).unwrap_or(0).min(CROSSFADE_MAX),
+            crossfade: get("crossfade").is_some_and(|v| v == "1"),
+            crossfade_secs: get("crossfade_secs").and_then(|v| v.parse().ok()).unwrap_or(5).clamp(1, CROSSFADE_MAX),
             segments: None,
             segment_skipped: f64::NEG_INFINITY,
             bg_time: 0.0,
@@ -535,7 +537,7 @@ impl App {
         }
         jam::dev_hooks(&mut app);
         app.audio.set_normalize(app.normalize);
-        app.audio.set_crossfade(app.crossfade);
+        app.set_crossfade();
         app
     }
 
@@ -904,6 +906,10 @@ impl App {
             self.radio_pending = true;
             self.backend.request(Req::Radio(track.id));
         }
+    }
+
+    pub(super) fn set_crossfade(&self) {
+        self.audio.set_crossfade(if self.crossfade { self.crossfade_secs } else { 0 });
     }
 
     /// Ask SponsorBlock about the playing song, when that's switched on.
@@ -2221,7 +2227,8 @@ impl eframe::App for App {
         storage.set_string("anim_bg", b(self.anim_bg));
         storage.set_string("reactive_bg", b(self.reactive_bg));
         storage.set_string("sponsorblock", b(self.sponsorblock));
-        storage.set_string("crossfade", self.crossfade.to_string());
+        storage.set_string("crossfade", b(self.crossfade));
+        storage.set_string("crossfade_secs", self.crossfade_secs.to_string());
         storage.set_string("show_roman", b(self.show_roman));
         storage.set_string("show_trans", b(self.show_trans));
         // Background test runs mustn't change the listener's sources or per-song picks.

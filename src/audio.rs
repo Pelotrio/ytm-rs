@@ -106,8 +106,9 @@ impl AudioStatus {
     }
 }
 
-/// A crossfade ramp in progress, in samples. Equal-power curves, so the overlap
-/// doesn't dip in loudness.
+/// A crossfade ramp in progress, in samples. Linear, like Strawberry's and
+/// Liquidsoap's crossfades: the outgoing song gets steadily quieter as the next one
+/// comes up (an equal-power curve kept it near full volume for half the fade).
 #[derive(Clone, Copy)]
 enum Ramp {
     In { at: u32, len: u32 },
@@ -117,10 +118,9 @@ enum Ramp {
 
 impl Ramp {
     fn gain(self) -> f32 {
-        use std::f32::consts::FRAC_PI_2;
         match self {
-            Ramp::In { at, len } => (at as f32 / len as f32 * FRAC_PI_2).sin(),
-            Ramp::Out { from, at, len } => from * (at as f32 / len as f32 * FRAC_PI_2).cos(),
+            Ramp::In { at, len } => at as f32 / len as f32,
+            Ramp::Out { from, at, len } => from * (1.0 - at as f32 / len as f32),
         }
     }
 }
@@ -292,6 +292,19 @@ struct Fading {
     player: Player,
     shared: Option<Arc<Shared>>,
     out: Arc<AtomicU32>,
+    /// Still at full volume, waiting for the next song to start (as Morphe does): when
+    /// that was asked for, and how much of this song was left then.
+    waiting: Option<(Instant, Option<Duration>)>,
+}
+
+impl Fading {
+    /// Start the fade-out, over what's left of the song if that's shorter. Returns its length.
+    fn start(&mut self, crossfade: u32) -> u32 {
+        let left = self.waiting.take().and_then(|(at, left)| Some(left?.saturating_sub(at.elapsed())));
+        let len = crossfade.min(left.map_or(u32::MAX, |l| l.as_millis() as u32)).max(QUICK_FADE_MS);
+        self.out.store(len, Ordering::Relaxed);
+        len
+    }
 }
 
 impl Drop for Fading {
@@ -305,6 +318,10 @@ impl Drop for Fading {
 /// Fade-outs shorter than this would click: a crossfade cut short by another skip, or
 /// one too close to the end of the song.
 const QUICK_FADE_MS: u32 = 40;
+
+/// How long a song keeps playing at full volume for the next one to load before it
+/// fades out anyway.
+const HANDOFF_WAIT: Duration = Duration::from_secs(3);
 
 fn norm_gain(status: &AudioStatus, shared: Option<&Shared>) -> f32 {
     match shared.and_then(|s| s.loudness_db) {
@@ -359,10 +376,11 @@ fn run(
     let mut fade_out = Arc::new(AtomicU32::new(0));
     // Songs fading out under the current one (more than one only for a moment).
     let mut fading: Vec<Fading> = Vec::new();
-    // Crossfade length for the source starting next (set by a handoff).
-    let mut fade_in_ms: u32 = 0;
     // Whether `Ending` went out for this generation.
     let mut ending_sent = false;
+    // The playing song's length. Not `status.duration()` at a handoff: the UI has
+    // already put the next song's there.
+    let mut length: Option<Duration> = None;
 
     // Generation of the source currently in the player (0 = nothing loaded).
     let mut current: u64 = 0;
@@ -390,9 +408,14 @@ fn run(
                 let gain = norm_gain(&status, Some(&s));
                 log::info!("audio: loudness {:?} dB, normalization gain {gain:.3}", s.loudness_db);
                 player.set_volume(f32::from_bits(status.volume.load(Ordering::Relaxed)) * gain);
-                // Fade in only under a song that's still fading out.
+                // Fade in only over a song still playing, both over the same length.
                 fading.retain(|f| !f.player.empty());
-                let fade_in = if fading.is_empty() { 0 } else { std::mem::take(&mut fade_in_ms) };
+                let crossfade = status.crossfade_ms.load(Ordering::Relaxed);
+                let mut fade_in = 0;
+                for f in fading.iter_mut().filter(|f| f.waiting.is_some()) {
+                    fade_in = f.start(crossfade);
+                    log::debug!("audio: crossfade into generation {generation} over {fade_in} ms");
+                }
                 fade_out = Arc::new(AtomicU32::new(0));
                 player.append(Meter::new(decoder, status.clone(), fade_in, fade_out.clone()));
                 player.play();
@@ -400,6 +423,7 @@ fn run(
                 if s.duration_ms > 0 {
                     status.duration_ms.store(s.duration_ms, Ordering::Relaxed);
                 }
+                length = status.duration();
                 if let Some(old) = shared.replace(s.clone())
                     && !Arc::ptr_eq(&old, &s)
                 {
@@ -444,20 +468,15 @@ fn run(
             Ok(AudioCmd::Handoff)
                 if status.crossfade_ms.load(Ordering::Relaxed) > 0 && current != 0 && !player.is_paused() && !player.empty() =>
             {
-                let crossfade = status.crossfade_ms.load(Ordering::Relaxed);
-                // Fade out over what's left of the song, if that's shorter.
-                let pos = offset + player.get_pos();
-                let left = status.duration().map_or(u32::MAX, |d| d.saturating_sub(pos).as_millis() as u32);
-                let len = crossfade.min(left).max(QUICK_FADE_MS);
-                log::debug!("audio: crossfade from generation {current} over {len} ms");
+                // Keeps playing at full volume until the next song starts (see `Start`).
+                let left = length.map(|d| d.saturating_sub(offset + player.get_pos()));
+                log::debug!("audio: handing off from generation {current}, {left:?} left");
                 // One already fading goes quickly, so only two ever overlap.
                 for f in &fading {
                     f.out.store(QUICK_FADE_MS, Ordering::Relaxed);
                 }
-                fade_out.store(len, Ordering::Relaxed);
                 let old = std::mem::replace(&mut player, Player::connect_new(sink.mixer()));
-                fading.push(Fading { player: old, shared: shared.take(), out: fade_out.clone() });
-                fade_in_ms = crossfade;
+                fading.push(Fading { player: old, shared: shared.take(), out: fade_out.clone(), waiting: Some((Instant::now(), left)) });
                 current = 0;
                 status.playing.store(false, Ordering::Relaxed);
                 status.set_position(0);
@@ -540,6 +559,10 @@ fn run(
         }
 
         if !fading.is_empty() {
+            // The next song is taking too long: don't hold this one up any longer.
+            for f in fading.iter_mut().filter(|f| f.waiting.is_some_and(|(at, _)| at.elapsed() > HANDOFF_WAIT)) {
+                log::debug!("audio: next song not ready, fading out over {} ms", f.start(status.crossfade_ms.load(Ordering::Relaxed)));
+            }
             fading.retain(|f| !f.player.empty());
             if fading.is_empty() {
                 log::debug!("audio: crossfade done");
@@ -553,7 +576,7 @@ fn run(
             let crossfade = Duration::from_millis(status.crossfade_ms.load(Ordering::Relaxed) as u64);
             if !ending_sent
                 && !crossfade.is_zero()
-                && let Some(d) = status.duration()
+                && let Some(d) = length
                 && d > crossfade * 2
                 && pos + crossfade >= d
                 && shared.as_ref().is_some_and(|s| s.error().is_none())
@@ -583,7 +606,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn crossfade_ramps_are_equal_power_and_end_the_fading_song() {
+    fn crossfade_ramps_mirror_each_other_and_end_the_fading_song() {
         use std::num::NonZero;
         // 1 kHz mono of full-scale samples: 1 ms = 1 sample.
         let ones = || rodio::buffer::SamplesBuffer::new(NonZero::new(1).unwrap(), NonZero::new(1000).unwrap(), vec![1.0; 1000]);
@@ -596,10 +619,11 @@ mod tests {
         let (a, b): (Vec<f32>, Vec<f32>) = (0..100).map(|_| (incoming.next().unwrap(), outgoing.next().unwrap())).unzip();
         assert_eq!(a[0], 0.0);
         assert_eq!(b[0], 1.0);
-        // sin² + cos² = 1 all the way through.
+        // One comes up exactly as the other goes down.
         for (x, y) in a.iter().zip(&b) {
-            assert!((x * x + y * y - 1.0).abs() < 1e-4);
+            assert!((x + y - 1.0).abs() < 1e-4);
         }
+        assert!((b[50] - 0.5).abs() < 1e-4);
         assert_eq!(incoming.next(), Some(1.0));
         assert_eq!(outgoing.next(), None);
     }
