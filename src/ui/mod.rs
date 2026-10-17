@@ -201,6 +201,11 @@ pub struct App {
     chrome_applied: Option<String>,
     anim_bg: bool,
     reactive_bg: bool,
+    /// Skip the parts of music videos SponsorBlock marks as not music.
+    sponsorblock: bool,
+    /// SponsorBlock segments for a video, and when one was last skipped.
+    segments: Option<(String, Vec<crate::sponsorblock::Segment>)>,
+    segment_skipped: f64,
     /// Background animation clock: advances only while music plays, so pausing
     /// freezes the motion instead of jumping when resumed.
     bg_time: f64,
@@ -426,6 +431,9 @@ impl App {
             chrome_applied: None,
             anim_bg: get("anim_bg").is_none_or(|v| v == "1"),
             reactive_bg: get("reactive_bg").is_none_or(|v| v == "1"),
+            sponsorblock: get("sponsorblock").is_some_and(|v| v == "1"),
+            segments: None,
+            segment_skipped: f64::NEG_INFINITY,
             bg_time: 0.0,
             last_frame: 0.0,
             search_rect: None,
@@ -881,10 +889,52 @@ impl App {
         self.extras_asked = None;
         self.lyric_view.reset();
         self.backend.request(Req::Lyrics(track.clone()));
+        self.segments = None;
+        self.request_segments();
         // Keep the queue topped up so autoplay never stalls at the end.
         if self.autoplay && !self.radio_pending && !self.jam.guest() && self.index.is_some_and(|i| i + 1 >= self.queue.len()) {
             self.radio_pending = true;
             self.backend.request(Req::Radio(track.id));
+        }
+    }
+
+    /// Ask SponsorBlock about the playing song, when that's switched on.
+    fn request_segments(&mut self) {
+        let Some(t) = self.current().filter(|_| self.sponsorblock && self.segments.is_none()) else { return };
+        let (video_id, duration) = (t.id.clone(), t.duration.map(f64::from));
+        self.backend.request(Req::Segments { video_id, duration });
+    }
+
+    /// Jump over a SponsorBlock segment once playback is inside it; one that runs to the
+    /// end finishes the song. A guest in a jam follows the host, who does the skipping.
+    fn skip_segments(&mut self, ctx: &egui::Context, now: f64) {
+        if !self.sponsorblock || self.jam.guest() || self.resume_at.is_some() || self.buffering || !self.playing() {
+            return;
+        }
+        let Some((id, segs)) = &self.segments else { return };
+        // A seek takes a moment to show in the position: don't send it twice.
+        if self.current_id() != Some(id.as_str()) || now - self.segment_skipped < 1.5 {
+            return;
+        }
+        let pos = self.audio.status.position().as_secs_f64();
+        let Some(seg) = segs.iter().find(|s| pos >= s.start && pos < s.end - 0.3).copied() else {
+            // Wake up for the next one even when nothing else repaints.
+            if let Some(next) = segs.iter().find(|s| s.start > pos) {
+                ctx.request_repaint_after(Duration::from_secs_f64(next.start - pos + 0.05));
+            }
+            return;
+        };
+        self.segment_skipped = now;
+        let duration = self.audio.status.duration_ms.load(Ordering::Relaxed) as f64 / 1000.0;
+        log::info!("sponsorblock: skipping {:.1}–{:.1} s", seg.start, seg.end);
+        if duration > 0.0 && seg.end >= duration - 1.0 {
+            if self.repeat == Repeat::One {
+                self.play_current();
+            } else {
+                self.next();
+            }
+        } else {
+            self.audio.send(AudioCmd::Seek(Duration::from_secs_f64(seg.end)));
         }
     }
 
@@ -1399,6 +1449,12 @@ impl App {
                     self.lyrics = Some((video_id, lyrics));
                 }
             }
+            Resp::Segments { video_id, segments } => {
+                if self.current_id() == Some(video_id.as_str()) {
+                    log::info!("sponsorblock: {} segment(s) for {video_id}", segments.len());
+                    self.segments = Some((video_id, segments));
+                }
+            }
             Resp::LyricsExtras { video_id, source, target, extras } => {
                 if self.current_id() == Some(video_id.as_str()) {
                     self.lyrics_extras = Some((video_id, source, target, extras));
@@ -1891,6 +1947,7 @@ impl eframe::App for App {
         let now = ctx.input(|i| i.time);
         self.sync_look();
         self.pump(now);
+        self.skip_segments(ctx, now);
         // System media controls and taskbar buttons follow the player however it changed.
         let playing = self.playing() || self.buffering;
         if let Some(m) = &mut self.media {
@@ -2152,6 +2209,7 @@ impl eframe::App for App {
         }
         storage.set_string("anim_bg", b(self.anim_bg));
         storage.set_string("reactive_bg", b(self.reactive_bg));
+        storage.set_string("sponsorblock", b(self.sponsorblock));
         storage.set_string("show_roman", b(self.show_roman));
         storage.set_string("show_trans", b(self.show_trans));
         // Background test runs mustn't change the listener's sources or per-song picks.

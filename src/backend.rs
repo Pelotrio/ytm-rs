@@ -38,6 +38,8 @@ pub enum Req {
     /// Upload audio files to the account's library.
     Upload(Vec<PathBuf>),
     Lyrics(Track),
+    /// SponsorBlock's parts of a video to skip; `duration` in seconds, if known.
+    Segments { video_id: String, duration: Option<f64> },
     /// Romanization and translation for the lyric lines of one source.
     LyricsExtras { video_id: String, source: String, lines: Vec<String>, lang: Option<String>, target: String },
     /// Process cover art for the background; `key` is echoed back.
@@ -79,6 +81,7 @@ impl Req {
             Req::Account => "Account",
             Req::Upload(_) => "Upload",
             Req::Lyrics(_) => "Lyrics",
+            Req::Segments { .. } => "SponsorBlock",
             Req::LyricsExtras { .. } => "Translation",
             Req::Art { .. } => "Art",
             Req::Radio(_) => "Loading radio",
@@ -99,7 +102,7 @@ impl Req {
 
     /// Background requests fail quietly (logged, no toast).
     fn quiet(&self) -> bool {
-        matches!(self, Req::Suggest(_) | Req::Account | Req::Art { .. } | Req::Prefetch(_) | Req::HomeMore(_) | Req::Lyrics(_) | Req::LyricsExtras { .. })
+        matches!(self, Req::Suggest(_) | Req::Account | Req::Art { .. } | Req::Prefetch(_) | Req::HomeMore(_) | Req::Lyrics(_) | Req::Segments { .. } | Req::LyricsExtras { .. })
     }
 }
 
@@ -171,6 +174,7 @@ pub enum Resp {
     Uploaded { done: usize, failed: Vec<String> },
     /// Every source's lyrics for a song (empty when nobody has them).
     Lyrics { video_id: String, lyrics: LyricsSet },
+    Segments { video_id: String, segments: Vec<crate::sponsorblock::Segment> },
     /// Romanization/translation for one source's lines, arriving after them.
     LyricsExtras { video_id: String, source: String, target: String, extras: crate::translate::Extras },
     Art { key: String, art: Art },
@@ -381,6 +385,10 @@ impl Backend {
                 Req::Lyrics(track) => {
                     let video_id = track.id.clone();
                     Resp::Lyrics { lyrics: self.lyrics_for(&track).await, video_id }
+                }
+                Req::Segments { video_id, duration } => {
+                    let segments = crate::sponsorblock::segments(&self.http(), &video_id, duration).await?;
+                    Resp::Segments { video_id, segments }
                 }
                 Req::LyricsExtras { video_id, source, lines, lang, target } => {
                     let key = format!("{video_id}_{source}");

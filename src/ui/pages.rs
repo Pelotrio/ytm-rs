@@ -699,6 +699,12 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
                 app.backend.set_high_quality(app.high_quality);
             }
         });
+        divider(ui);
+        setting_row(ui, "Skip non-music parts", Some("Jump over talking, skits and sponsor breaks in music videos, as marked by the SponsorBlock community. Album songs don't have any."), |ui| {
+            if toggle(ui, &mut app.sponsorblock, "Skip non-music parts").changed() {
+                app.request_segments();
+            }
+        });
     });
 
     // ---- lyrics (the better-lyrics extension's options)

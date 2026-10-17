@@ -18,6 +18,7 @@ mod media;
 mod model;
 mod preset;
 mod shader;
+mod sponsorblock;
 mod stream;
 mod theme;
 mod transfer;
