@@ -8,7 +8,9 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use rodio::{Decoder, DeviceSinkBuilder, Player};
+use rodio::cpal::traits::{DeviceTrait, HostTrait};
+use rodio::mixer::{Mixer, MixerSource};
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player};
 
 use crate::stream::{self, Shared, StreamReader};
 
@@ -31,6 +33,9 @@ pub enum AudioCmd {
     /// current at `at`): following someone else's playback (listen together).
     SeekLive { pos: Duration, at: std::time::Instant },
     Volume(f32),
+    /// The output device failed (unplugged, headphones disconnected): sent by the
+    /// device's error callback so the audio thread reopens one.
+    DeviceLost,
 }
 
 pub enum AudioEvent {
@@ -330,6 +335,148 @@ fn norm_gain(status: &AudioStatus, shared: Option<&Shared>) -> f32 {
     }
 }
 
+/// The output device. Players play into a mixer of our own that the device pulls
+/// from, so when the device goes away (Bluetooth headphones disconnecting) or the
+/// default changes (them reconnecting), a new one carries on from the same samples
+/// without touching the players or the songs in them.
+struct Output {
+    mixer: Mixer,
+    /// Our mixer's output while no device has it; the device's `Bridge` holds it.
+    slot: Arc<std::sync::Mutex<Option<MixerSource>>>,
+    sink: Option<MixerDeviceSink>,
+    /// The device in use (cpal's id), to notice the default changing.
+    device: Option<String>,
+    /// Set by the device's error callback.
+    lost: Arc<AtomicBool>,
+    checked: Instant,
+}
+
+impl Output {
+    fn new(tx: Sender<AudioCmd>, status: &AudioStatus) -> Self {
+        // Mix at the device's own format, so the usual case needs no conversion.
+        let config = rodio::cpal::default_host().default_output_device().and_then(|d| d.default_output_config().ok());
+        let channels = config.as_ref().and_then(|c| std::num::NonZero::new(c.channels())).unwrap_or(std::num::NonZero::new(2).unwrap());
+        let rate = config.as_ref().and_then(|c| std::num::NonZero::new(c.sample_rate())).unwrap_or(std::num::NonZero::new(48_000).unwrap());
+        let (mixer, source) = rodio::mixer::mixer(channels, rate);
+        let lost = Arc::new(AtomicBool::new(false));
+        let mut out = Self { mixer, slot: Arc::new(std::sync::Mutex::new(Some(source))), sink: None, device: None, lost, checked: Instant::now() };
+        out.open(tx, status);
+        out
+    }
+
+    /// Opens the default device. False if there's none to open.
+    fn open(&mut self, tx: Sender<AudioCmd>, status: &AudioStatus) -> bool {
+        // The old device's stream gives our mixer back when it's dropped.
+        self.sink = None;
+        self.device = None;
+        self.checked = Instant::now();
+        let Some(device) = rodio::cpal::default_host().default_output_device() else {
+            return false;
+        };
+        let id = device.id().map(|i| i.to_string()).ok();
+        let lost = self.lost.clone();
+        lost.store(false, Ordering::Relaxed);
+        let on_error = move |e: rodio::cpal::StreamError| {
+            log::warn!("audio: output device error: {e}");
+            if !lost.swap(true, Ordering::Relaxed) {
+                let _ = tx.send(AudioCmd::DeviceLost);
+            }
+        };
+        let sink = match DeviceSinkBuilder::from_device(device).and_then(|b| b.with_error_callback(on_error).open_sink_or_fallback()) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("audio: couldn't open the output device: {e}");
+                return false;
+            }
+        };
+        // A stream that failed on its own hands the mixer back as its thread exits,
+        // which can be just after it reported the error.
+        let waited = Instant::now();
+        let source = loop {
+            if let Some(source) = self.slot.lock().unwrap().take() {
+                break source;
+            }
+            if waited.elapsed() > Duration::from_secs(1) {
+                log::warn!("audio: mixer still held by the old device");
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let mut sink = sink;
+        sink.log_on_drop(false);
+        let channels = rodio::Source::channels(&source).get();
+        sink.mixer().add(Bridge { inner: Some(source), slot: self.slot.clone(), channels, n: 0 });
+        // The position counts samples handed to the device; it plays them a buffer later
+        // (rodio asks for ~50 ms), plus the shared-mode device period (~10 ms).
+        let rate = sink.config().sample_rate().get().max(1);
+        let buffer_ms = match sink.config().buffer_size() {
+            rodio::cpal::BufferSize::Fixed(n) => *n as u64 * 1000 / rate as u64,
+            rodio::cpal::BufferSize::Default => 0,
+        };
+        status.latency_ms.store((buffer_ms + 10) as u32, Ordering::Relaxed);
+        log::info!("audio: output device {:?} at {} Hz", id, rate);
+        self.sink = Some(sink);
+        self.device = id;
+        true
+    }
+
+    /// The default device's id, if it differs from the one in use.
+    fn default_changed(&mut self) -> bool {
+        self.checked = Instant::now();
+        let default = rodio::cpal::default_host().default_output_device().and_then(|d| d.id().ok()).map(|i| i.to_string());
+        default.is_some() && default != self.device
+    }
+}
+
+/// Our mixer's output, as a source in the device's mixer. Never ends, so the device
+/// keeps it; gives the mixer back when the device's stream drops it.
+struct Bridge {
+    inner: Option<MixerSource>,
+    slot: Arc<std::sync::Mutex<Option<MixerSource>>>,
+    channels: u16,
+    /// Samples handed out, to give the mixer back on a frame boundary (else the next
+    /// device would get the channels swapped).
+    n: u64,
+}
+
+impl Iterator for Bridge {
+    type Item = rodio::Sample;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.n += 1;
+        Some(self.inner.as_mut().and_then(Iterator::next).unwrap_or(0.0))
+    }
+}
+
+impl rodio::Source for Bridge {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+    fn channels(&self) -> rodio::ChannelCount {
+        self.inner.as_ref().map_or(std::num::NonZero::new(self.channels.max(1)).unwrap(), |s| s.channels())
+    }
+    fn sample_rate(&self) -> rodio::SampleRate {
+        self.inner.as_ref().map_or(std::num::NonZero::new(48_000).unwrap(), |s| s.sample_rate())
+    }
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+}
+
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        if let Some(mut source) = self.inner.take() {
+            while self.n % self.channels.max(1) as u64 != 0 {
+                source.next();
+                self.n += 1;
+            }
+            *self.slot.lock().unwrap() = Some(source);
+        }
+    }
+}
+
+/// How often to look for a new default device while playing.
+const DEVICE_CHECK: Duration = Duration::from_secs(1);
+
 pub fn spawn(volume: f32, events: Sender<AudioEvent>, wake: impl Fn() + Send + 'static) -> AudioHandle {
     let (tx, rx) = unbounded();
     let status = Arc::new(AudioStatus::default());
@@ -353,24 +500,12 @@ fn run(
     events: Sender<AudioEvent>,
     wake: impl Fn(),
 ) {
-    let mut sink = match DeviceSinkBuilder::open_default_sink() {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = events.send(AudioEvent::Error(format!("No audio output device: {e}")));
-            wake();
-            return;
-        }
-    };
-    sink.log_on_drop(false);
-    // The position counts samples handed to the device; it plays them a buffer later
-    // (rodio asks for ~50 ms), plus the shared-mode device period (~10 ms).
-    let rate = sink.config().sample_rate().get().max(1);
-    let buffer_ms = match sink.config().buffer_size() {
-        rodio::cpal::BufferSize::Fixed(n) => *n as u64 * 1000 / rate as u64,
-        rodio::cpal::BufferSize::Default => 0,
-    };
-    status.latency_ms.store((buffer_ms + 10) as u32, Ordering::Relaxed);
-    let mut player = Player::connect_new(sink.mixer());
+    let mut output = Output::new(tx.clone(), &status);
+    if output.sink.is_none() {
+        let _ = events.send(AudioEvent::Error("No audio output device".into()));
+        wake();
+    }
+    let mut player = Player::connect_new(&output.mixer);
     player.set_volume(volume);
     // The playing source's fade-out control (see `Meter`).
     let mut fade_out = Arc::new(AtomicU32::new(0));
@@ -394,6 +529,9 @@ fn run(
     let mut seek_seq: u64 = 0;
     let seek_job: Arc<std::sync::Mutex<Option<SeekJob>>> = Default::default();
     let seek_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Dev hook: YTM_DEVICE_LOST=<secs> acts as if the output device disconnected that
+    // long into the first song (the error callback firing for a device that's gone).
+    let mut dev_lost = std::env::var("YTM_DEVICE_LOST").ok().and_then(|v| v.parse::<f32>().ok()).map(Duration::from_secs_f32);
     loop {
         // Poll while playing so the position stays fresh and the end is noticed; idle otherwise.
         let timeout = if (current != 0 || !fading.is_empty()) && !player.is_paused() { Duration::from_millis(100) } else { Duration::from_secs(3600) };
@@ -404,6 +542,9 @@ fn run(
                     continue;
                 }
                 log::debug!("audio: start generation {generation}");
+                if output.sink.is_none() || output.default_changed() {
+                    output.open(tx.clone(), &status);
+                }
                 player.clear();
                 let gain = norm_gain(&status, Some(&s));
                 log::info!("audio: loudness {:?} dB, normalization gain {gain:.3}", s.loudness_db);
@@ -451,6 +592,7 @@ fn run(
                 offset = at;
             }
             Ok(AudioCmd::Pause) => {
+                log::debug!("audio: pause at {:?}", offset + player.get_pos());
                 player.pause();
                 fading.iter().for_each(|f| f.player.pause());
                 status.playing.store(false, Ordering::Relaxed);
@@ -458,7 +600,12 @@ fn run(
                 wake();
             }
             Ok(AudioCmd::Resume) => {
+                log::debug!("audio: resume (generation {current})");
                 if current != 0 {
+                    // Headphones may have come back (or gone) while paused.
+                    if output.sink.is_none() || output.default_changed() {
+                        output.open(tx.clone(), &status);
+                    }
                     player.play();
                     fading.iter().for_each(|f| f.player.play());
                     status.playing.store(true, Ordering::Relaxed);
@@ -477,7 +624,7 @@ fn run(
                 // Keeps playing at full volume until the next song starts (see `Start`).
                 let left = length.map(|d| d.saturating_sub(offset + player.get_pos()));
                 log::debug!("audio: handing off from generation {current}, {left:?} left");
-                let old = std::mem::replace(&mut player, Player::connect_new(sink.mixer()));
+                let old = std::mem::replace(&mut player, Player::connect_new(&output.mixer));
                 fading.push(Fading { player: old, shared: shared.take(), out: fade_out.clone(), waiting: Some((Instant::now(), left)) });
                 current = 0;
                 status.playing.store(false, Ordering::Relaxed);
@@ -495,7 +642,7 @@ fn run(
                     log::debug!("audio: skipped mid-crossfade, cutting over");
                     if current != 0 && !player.is_paused() && !player.empty() {
                         fade_out.store(QUICK_FADE_MS, Ordering::Relaxed);
-                        let old = std::mem::replace(&mut player, Player::connect_new(sink.mixer()));
+                        let old = std::mem::replace(&mut player, Player::connect_new(&output.mixer));
                         fading.push(Fading { player: old, shared: shared.take(), out: fade_out.clone(), waiting: None });
                     } else {
                         player.clear();
@@ -561,6 +708,19 @@ fn run(
                     }
                 }
             }
+            Ok(AudioCmd::DeviceLost) => {
+                let was = output.device.clone();
+                output.open(tx.clone(), &status);
+                // The device itself went away, not a hiccup on the same one: pause, as
+                // unplugging headphones does, rather than carry on out of the speakers.
+                if output.device != was && !player.is_paused() && (current != 0 || !fading.is_empty()) {
+                    log::info!("audio: output device gone, pausing");
+                    player.pause();
+                    fading.iter().for_each(|f| f.player.pause());
+                    status.playing.store(false, Ordering::Relaxed);
+                    wake();
+                }
+            }
             Ok(AudioCmd::Volume(v)) => {
                 player.set_volume(v * norm_gain(&status, shared.as_deref()));
                 for f in &fading {
@@ -571,6 +731,25 @@ fn run(
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
         }
 
+        if current != 0 && dev_lost.is_some_and(|at| offset + player.get_pos() >= at) {
+            dev_lost = None;
+            log::info!("audio: dev hook: output device lost");
+            output.sink = None;
+            output.device = Some("dev-hook-gone".into());
+            output.lost.store(true, Ordering::Relaxed);
+            let _ = tx.send(AudioCmd::DeviceLost);
+        }
+        // Follow the default device while playing (headphones connecting take over).
+        // A failed device is `DeviceLost`'s to handle (it decides whether to pause).
+        if (current != 0 || !fading.is_empty())
+            && !player.is_paused()
+            && output.checked.elapsed() >= DEVICE_CHECK
+            && !output.lost.load(Ordering::Relaxed)
+        {
+            if output.sink.is_none() || output.default_changed() {
+                output.open(tx.clone(), &status);
+            }
+        }
         if !fading.is_empty() {
             // The next song is taking too long: don't hold this one up any longer.
             for f in fading.iter_mut().filter(|f| f.waiting.is_some_and(|(at, _)| at.elapsed() > HANDOFF_WAIT)) {
