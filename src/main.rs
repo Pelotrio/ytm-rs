@@ -13,6 +13,7 @@ mod images;
 mod jam;
 mod innertube;
 mod jsc;
+mod lastfm;
 mod login;
 mod lyrics;
 mod media;

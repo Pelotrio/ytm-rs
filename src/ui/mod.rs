@@ -133,6 +133,12 @@ pub struct App {
     discord_enabled: bool,
     /// Last state sent to Discord, to send only real changes.
     discord_sent: Option<crate::discord::Presence>,
+    /// The Last.fm account scrobbles go to; a sign-in in progress and its outcome.
+    lastfm_user: Option<String>,
+    lastfm_busy: Arc<AtomicBool>,
+    lastfm_result: Arc<std::sync::Mutex<Option<Result<String, String>>>>,
+    /// The play generation Last.fm last heard about, and whether it was scrobbled.
+    scrobble: Option<(u64, bool)>,
     /// Last session's song, restored paused: Play starts it from here.
     resume_at: Option<Duration>,
     /// Album / playlist / artist the queue was started from, so its card shows pause.
@@ -342,6 +348,7 @@ impl App {
             crate::appicon::sync_shortcuts(app_icon, backend.data_dir());
         }
         crate::downloads::init(backend.data_dir(), &get("download_dir").unwrap_or_default());
+        crate::lastfm::init(backend.data_dir());
         let logged_in = backend.is_logged_in();
         // Before any request: a song started at launch (dev hooks) must see this setting.
         backend.set_high_quality(get("high_quality").is_none_or(|v| v == "1"));
@@ -363,6 +370,10 @@ impl App {
             discord: discord_enabled.then(crate::discord::Discord::spawn).flatten(),
             discord_enabled,
             discord_sent: None,
+            lastfm_user: crate::lastfm::user(),
+            lastfm_busy: Default::default(),
+            lastfm_result: Default::default(),
+            scrobble: None,
             resume_at: None,
             queue_source: None,
             pending_source: None,
@@ -801,6 +812,69 @@ impl App {
         });
         d.set(want.clone());
         self.discord_sent = want;
+    }
+
+    /// Tell Last.fm what's playing, and scrobble it once it has played half its length
+    /// or 4 minutes (songs under 30 s don't count). Runs every frame, like Discord's.
+    fn sync_lastfm(&mut self) {
+        let result = self.lastfm_result.lock().unwrap().take();
+        if let Some(r) = result {
+            match r {
+                Ok(name) => {
+                    self.toast(format!("Scrobbling to Last.fm as {name}"));
+                    self.lastfm_user = Some(name);
+                    self.scrobble = None;
+                }
+                Err(e) => self.toast(format!("Last.fm sign-in failed: {e}")),
+            }
+        }
+        if self.lastfm_user.is_none() {
+            return;
+        }
+        let Some(t) = self.current().filter(|_| self.playing() && !self.buffering) else { return };
+        let pos = self.audio.status.position();
+        let dur = Duration::from_millis(self.audio.status.duration_ms.load(Ordering::Relaxed));
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        let play = crate::lastfm::Scrobble {
+            artist: t.artists.first().map(|a| a.name.clone()).unwrap_or_default(),
+            track: t.title.clone(),
+            album: t.album.as_ref().map(|a| a.name.clone()),
+            duration: (!dur.is_zero()).then_some(dur.as_secs() as u32),
+            timestamp: now - pos.as_secs() as i64,
+        };
+        if play.artist.is_empty() {
+            return;
+        }
+        let http = self.backend.http();
+        if self.scrobble.is_none_or(|(g, _)| g != self.generation) {
+            self.scrobble = Some((self.generation, false));
+            let p = play.clone();
+            self.backend.spawn(async move { crate::lastfm::now_playing(&http, &p).await });
+            return;
+        }
+        if dur >= Duration::from_secs(30) && pos >= (dur / 2).min(Duration::from_secs(240)) && self.scrobble.is_some_and(|(_, done)| !done) {
+            self.scrobble = Some((self.generation, true));
+            self.backend.spawn(async move { crate::lastfm::scrobble(&http, play).await });
+        }
+    }
+
+    fn lastfm_sign_in(&mut self) {
+        if self.lastfm_busy.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let (busy, result, http, backend) = (self.lastfm_busy.clone(), self.lastfm_result.clone(), self.backend.http(), self.backend.clone());
+        self.backend.spawn(async move {
+            let r = crate::lastfm::sign_in(&http).await.map_err(|e| format!("{e:#}"));
+            *result.lock().unwrap() = Some(r);
+            busy.store(false, Ordering::Relaxed);
+            backend.wake();
+        });
+    }
+
+    fn lastfm_sign_out(&mut self) {
+        crate::lastfm::sign_out();
+        self.lastfm_user = None;
+        self.scrobble = None;
     }
 
     fn play_list(&mut self, tracks: Vec<Track>, start: usize) {
@@ -2040,6 +2114,7 @@ impl eframe::App for App {
         self.tray_window(ctx);
         self.window_hidden = self.tray.is_some() || ctx.input(|i| i.viewport().minimized == Some(true));
         self.sync_discord();
+        self.sync_lastfm();
         self.tick_updates(ctx, now);
         let np = widgets::NowPlaying {
             song: self.current_id().map(str::to_owned),

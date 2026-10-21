@@ -936,6 +936,29 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
         setting_row(ui, "Discord", Some("Show what you're playing on your Discord profile."), |ui| {
             toggle(ui, &mut discord_enabled, "Discord");
         });
+        divider(ui);
+        let busy = app.lastfm_busy.load(Ordering::Relaxed);
+        let desc = match &app.lastfm_user {
+            Some(name) => format!("Scrobbling what you play to {name}'s profile."),
+            None if busy => "Allow ytm-rs on the Last.fm page that opened in your browser.".to_owned(),
+            None => "Scrobble what you play to your Last.fm profile.".to_owned(),
+        };
+        let (mut connect, mut disconnect) = (false, false);
+        setting_row(ui, "Last.fm", Some(&desc), |ui| {
+            if app.lastfm_user.is_some() {
+                disconnect = pill(ui, "Disconnect", None, false).clicked();
+            } else if busy {
+                ui.spinner();
+            } else {
+                connect = pill(ui, "Connect", None, false).clicked();
+            }
+        });
+        if connect {
+            app.lastfm_sign_in();
+        }
+        if disconnect {
+            app.lastfm_sign_out();
+        }
     });
     if discord_enabled != app.discord_enabled {
         app.set_discord_enabled(discord_enabled);

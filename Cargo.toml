@@ -41,6 +41,7 @@ tray-icon = "0.26.1"
 url = "2.5.8"
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "native-tls"] }
 mp4ameta = "0.13.0"
+md-5 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 # Windows Credential Manager, for the Google and Spotify sign-ins.
