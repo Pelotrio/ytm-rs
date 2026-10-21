@@ -134,8 +134,10 @@ fn main() -> eframe::Result {
             // Dev hook: YTM_MUTE starts silent and never persists the volume.
             let volume = if std::env::var_os("YTM_MUTE").is_some() { 0.0 } else { volume };
 
+            let device = cc.storage.and_then(|s| s.get_string("output_device")).filter(|d| !d.is_empty());
+
             let (audio_tx, audio_rx) = unbounded();
-            let audio = audio::spawn(volume, audio_tx, wake);
+            let audio = audio::spawn(volume, device, audio_tx, wake);
 
             let data_dir = data_dir();
             let (resp_tx, resp_rx) = unbounded();

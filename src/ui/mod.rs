@@ -187,6 +187,10 @@ pub struct App {
     /// Turn loud tracks down to YouTube's loudness target.
     normalize: bool,
     high_quality: bool,
+    /// The output device picked in settings (cpal's id and its name, for when it's not
+    /// connected), and the devices last listed there.
+    output_device: Option<(String, String)>,
+    output_devices: Vec<crate::audio::OutputDevice>,
     radio_pending: bool,
     seek_drag: Option<f32>,
 
@@ -399,6 +403,8 @@ impl App {
             autoplay: get("autoplay").is_none_or(|v| v == "1"),
             normalize: get("normalize").is_none_or(|v| v == "1"),
             high_quality: get("high_quality").is_none_or(|v| v == "1"),
+            output_device: get("output_device").filter(|d| !d.is_empty()).map(|id| (id, get("output_device_name").unwrap_or_default())),
+            output_devices: Vec::new(),
             updater: None,
             auto_update: get("auto_update").is_none_or(|v| v == "1"),
             close_to_tray: get("close_to_tray").is_some_and(|v| v == "1"),
@@ -2216,6 +2222,9 @@ impl eframe::App for App {
         storage.set_string("account_cache", cache.and_then(|c| serde_json::to_string(&c).ok()).unwrap_or_default());
         storage.set_string("normalize", b(self.normalize));
         storage.set_string("high_quality", b(self.high_quality));
+        let (device, device_name) = self.output_device.clone().unzip();
+        storage.set_string("output_device", device.unwrap_or_default());
+        storage.set_string("output_device_name", device_name.unwrap_or_default());
         storage.set_string("auto_update", b(self.auto_update));
         // eframe has just saved the window's geometry. Minimized or in the tray that's
         // 0×0 at -32000, which would reopen as a speck: keep the last real one instead.

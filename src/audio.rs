@@ -36,6 +36,9 @@ pub enum AudioCmd {
     /// The output device failed (unplugged, headphones disconnected): sent by the
     /// device's error callback so the audio thread reopens one.
     DeviceLost,
+    /// Play through this device (cpal's id) whenever it's connected; None follows the
+    /// system default.
+    SetDevice(Option<String>),
 }
 
 pub enum AudioEvent {
@@ -346,31 +349,33 @@ struct Output {
     sink: Option<MixerDeviceSink>,
     /// The device in use (cpal's id), to notice the default changing.
     device: Option<String>,
+    /// The device the user picked; the default stands in while it's not connected.
+    preferred: Option<String>,
     /// Set by the device's error callback.
     lost: Arc<AtomicBool>,
     checked: Instant,
 }
 
 impl Output {
-    fn new(tx: Sender<AudioCmd>, status: &AudioStatus) -> Self {
+    fn new(tx: Sender<AudioCmd>, status: &AudioStatus, preferred: Option<String>) -> Self {
         // Mix at the device's own format, so the usual case needs no conversion.
-        let config = rodio::cpal::default_host().default_output_device().and_then(|d| d.default_output_config().ok());
+        let config = target(preferred.as_deref()).and_then(|d| d.default_output_config().ok());
         let channels = config.as_ref().and_then(|c| std::num::NonZero::new(c.channels())).unwrap_or(std::num::NonZero::new(2).unwrap());
         let rate = config.as_ref().and_then(|c| std::num::NonZero::new(c.sample_rate())).unwrap_or(std::num::NonZero::new(48_000).unwrap());
         let (mixer, source) = rodio::mixer::mixer(channels, rate);
         let lost = Arc::new(AtomicBool::new(false));
-        let mut out = Self { mixer, slot: Arc::new(std::sync::Mutex::new(Some(source))), sink: None, device: None, lost, checked: Instant::now() };
+        let mut out = Self { mixer, slot: Arc::new(std::sync::Mutex::new(Some(source))), sink: None, device: None, preferred, lost, checked: Instant::now() };
         out.open(tx, status);
         out
     }
 
-    /// Opens the default device. False if there's none to open.
+    /// Opens the picked device, or the default one. False if there's none to open.
     fn open(&mut self, tx: Sender<AudioCmd>, status: &AudioStatus) -> bool {
         // The old device's stream gives our mixer back when it's dropped.
         self.sink = None;
         self.device = None;
         self.checked = Instant::now();
-        let Some(device) = rodio::cpal::default_host().default_output_device() else {
+        let Some(device) = target(self.preferred.as_deref()) else {
             return false;
         };
         let id = device.id().map(|i| i.to_string()).ok();
@@ -420,12 +425,48 @@ impl Output {
         true
     }
 
-    /// The default device's id, if it differs from the one in use.
+    /// Whether the device to play through (the picked one if it's connected, else the
+    /// default) differs from the one in use.
     fn default_changed(&mut self) -> bool {
         self.checked = Instant::now();
-        let default = rodio::cpal::default_host().default_output_device().and_then(|d| d.id().ok()).map(|i| i.to_string());
-        default.is_some() && default != self.device
+        let want = target(self.preferred.as_deref()).and_then(|d| d.id().ok()).map(|i| i.to_string());
+        want.is_some() && want != self.device
     }
+}
+
+/// The picked device if it's connected, else the system default.
+fn target(preferred: Option<&str>) -> Option<rodio::cpal::Device> {
+    let host = rodio::cpal::default_host();
+    if let Some(want) = preferred
+        && let Some(d) = host.output_devices().ok().and_then(|mut all| all.find(|d| d.id().is_ok_and(|i| i.to_string() == want)))
+    {
+        return Some(d);
+    }
+    host.default_output_device()
+}
+
+/// An output device to offer in settings.
+#[derive(Clone, PartialEq)]
+pub struct OutputDevice {
+    /// cpal's id: stable across reconnects.
+    pub id: String,
+    pub name: String,
+}
+
+/// The connected output devices, by the names Windows' sound settings show.
+pub fn output_devices() -> Vec<OutputDevice> {
+    let Ok(all) = rodio::cpal::default_host().output_devices() else { return Vec::new() };
+    let mut out: Vec<OutputDevice> = all
+        .filter_map(|d| {
+            let id = d.id().ok()?.to_string();
+            let desc = d.description().ok()?;
+            // "Speakers (Realtek(R) Audio)" rather than just "Speakers".
+            let name = desc.extended().first().cloned().unwrap_or_else(|| desc.name().to_owned());
+            Some(OutputDevice { id, name })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out
 }
 
 /// Our mixer's output, as a source in the device's mixer. Never ends, so the device
@@ -477,7 +518,7 @@ impl Drop for Bridge {
 /// How often to look for a new default device while playing.
 const DEVICE_CHECK: Duration = Duration::from_secs(1);
 
-pub fn spawn(volume: f32, events: Sender<AudioEvent>, wake: impl Fn() + Send + 'static) -> AudioHandle {
+pub fn spawn(volume: f32, device: Option<String>, events: Sender<AudioEvent>, wake: impl Fn() + Send + 'static) -> AudioHandle {
     let (tx, rx) = unbounded();
     let status = Arc::new(AudioStatus::default());
     status.volume.store(volume.to_bits(), Ordering::Relaxed);
@@ -486,7 +527,7 @@ pub fn spawn(volume: f32, events: Sender<AudioEvent>, wake: impl Fn() + Send + '
         .name("audio".into())
         .spawn({
             let tx = tx.clone();
-            move || run(rx, tx, st, volume, events, wake)
+            move || run(rx, tx, st, volume, device, events, wake)
         })
         .expect("spawn audio thread");
     AudioHandle { tx, status }
@@ -497,10 +538,11 @@ fn run(
     tx: Sender<AudioCmd>,
     status: Arc<AudioStatus>,
     volume: f32,
+    device: Option<String>,
     events: Sender<AudioEvent>,
     wake: impl Fn(),
 ) {
-    let mut output = Output::new(tx.clone(), &status);
+    let mut output = Output::new(tx.clone(), &status, device);
     if output.sink.is_none() {
         let _ = events.send(AudioEvent::Error("No audio output device".into()));
         wake();
@@ -719,6 +761,13 @@ fn run(
                     fading.iter().for_each(|f| f.player.pause());
                     status.playing.store(false, Ordering::Relaxed);
                     wake();
+                }
+            }
+            Ok(AudioCmd::SetDevice(id)) => {
+                log::info!("audio: output device set to {id:?}");
+                output.preferred = id;
+                if output.default_changed() || output.sink.is_none() {
+                    output.open(tx.clone(), &status);
                 }
             }
             Ok(AudioCmd::Volume(v)) => {

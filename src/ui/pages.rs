@@ -700,6 +700,10 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
             }
         });
         divider(ui);
+        setting_row(ui, "Output device", Some("Where the music plays. A picked device that isn't connected leaves it to Windows' default until it's back."), |ui| {
+            output_device_picker(app, ui);
+        });
+        divider(ui);
         setting_row(ui, "Crossfade songs", Some("Blend the end of each song into the start of the next."), |ui| {
             if toggle(ui, &mut app.crossfade, "Crossfade songs").changed() {
                 app.set_crossfade();
@@ -1287,6 +1291,47 @@ fn font_picker(ui: &mut Ui) -> Option<String> {
         });
     });
     picked.filter(|p| *p != current)
+}
+
+const SYSTEM_DEFAULT: &str = "Windows default";
+
+fn output_device_picker(app: &mut App, ui: &mut Ui) {
+    let current = match &app.output_device {
+        None => SYSTEM_DEFAULT.to_owned(),
+        Some((id, name)) => match app.output_devices.iter().find(|d| d.id == *id) {
+            Some(d) => d.name.clone(),
+            None if app.output_devices.is_empty() => name.clone(),
+            None => format!("{name} (not connected)"),
+        },
+    };
+    let btn = dropdown_button(ui, &current, 210.0, "Output device");
+    // Listed when opened, so a device that just connected shows up.
+    if btn.clicked() || app.output_devices.is_empty() {
+        app.output_devices = crate::audio::output_devices();
+    }
+    let mut pick: Option<Option<(String, String)>> = None;
+    egui::Popup::menu(&btn).show(|ui| {
+        ui.set_width(340.0);
+        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            ui.add_space(4.0);
+            if option_row(ui, SYSTEM_DEFAULT, app.output_device.is_none()).clicked() {
+                pick = Some(None);
+                ui.close();
+            }
+            for d in &app.output_devices {
+                if option_row(ui, &d.name, app.output_device.as_ref().is_some_and(|(id, _)| *id == d.id)).clicked() {
+                    pick = Some(Some((d.id.clone(), d.name.clone())));
+                    ui.close();
+                }
+            }
+            ui.add_space(4.0);
+        });
+    });
+    if let Some(pick) = pick {
+        app.audio.send(crate::audio::AudioCmd::SetDevice(pick.as_ref().map(|(id, _)| id.clone())));
+        app.output_device = pick;
+    }
 }
 
 /// A dropdown's closed state: the chosen value and a chevron on a glass pill.
