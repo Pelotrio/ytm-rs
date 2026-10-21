@@ -37,6 +37,8 @@ pub enum Req {
     Account,
     /// Upload audio files to the account's library.
     Upload(Vec<PathBuf>),
+    /// Save a song's audio to the downloads folder.
+    Download(Track),
     Lyrics(Track),
     /// SponsorBlock's parts of a video to skip; `duration` in seconds, if known.
     Segments { video_id: String, duration: Option<f64> },
@@ -80,6 +82,7 @@ impl Req {
             Req::Uploads => "Loading uploads",
             Req::Account => "Account",
             Req::Upload(_) => "Upload",
+            Req::Download(_) => "Download",
             Req::Lyrics(_) => "Lyrics",
             Req::Segments { .. } => "SponsorBlock",
             Req::LyricsExtras { .. } => "Translation",
@@ -172,6 +175,7 @@ pub enum Resp {
     Account { name: Option<String>, photo: Option<String> },
     /// Upload finished: how many files went up, and which failed.
     Uploaded { done: usize, failed: Vec<String> },
+    Downloaded { title: String, path: PathBuf },
     /// Every source's lyrics for a song (empty when nobody has them).
     Lyrics { video_id: String, lyrics: LyricsSet },
     Segments { video_id: String, segments: Vec<crate::sponsorblock::Segment> },
@@ -418,6 +422,10 @@ impl Backend {
                     }
                     Resp::PlayQueue { tracks }
                 }
+                Req::Download(t) => {
+                    let path = self.download(&t).await?;
+                    Resp::Downloaded { title: t.title, path }
+                }
                 Req::Play { video_id, generation, at, report } => match self.start_playback(&video_id, generation, at, report).await {
                     Ok(()) => return Ok(None),
                     Err(e) => Resp::PlayError { generation, msg: format!("{e:#}") },
@@ -625,30 +633,66 @@ impl Backend {
 
     /// Resolve a stream URL and start downloading it into a new buffer (just its start,
     /// for a prefetch, until playback opens it).
+    /// A downloaded song opens from its file.
     async fn open_stream(&self, video_id: &str, prefetch: bool) -> anyhow::Result<Arc<Shared>> {
-        let (source, s) = self.resolve(video_id).await?;
+        let id = video_id.to_owned();
+        if let Some(shared) = tokio::task::spawn_blocking(move || crate::downloads::open(&id)).await? {
+            return Ok(shared);
+        }
+        let (source, s) = self.resolve(video_id, false).await?;
         let shared = Shared::new(s.size, s.duration_ms, s.loudness_db, prefetch);
-        let refresh: stream::Refresh = {
-            let (this, id) = (self.clone(), video_id.to_owned());
-            Arc::new(move || {
-                let (this, id) = (this.clone(), id.clone());
-                Box::pin(async move { Ok(this.resolve_from(source, &id).await?.url) })
-            })
-        };
-        self.rt.spawn(stream::download(self.http(), s.url, s.user_agent, shared.clone(), Some(refresh)));
+        self.rt.spawn(stream::download(self.http(), s.url, s.user_agent, shared.clone(), Some(self.refresher(source, video_id))));
         Ok(shared)
     }
 
-    /// Find a stream URL, trying the fastest source that can play the song.
-    async fn resolve(&self, video_id: &str) -> anyhow::Result<(Source, ResolvedStream)> {
+    /// Resolves a fresh URL from the same source, for a download that got a 403.
+    fn refresher(&self, source: Source, video_id: &str) -> stream::Refresh {
+        let (this, id) = (self.clone(), video_id.to_owned());
+        Arc::new(move || {
+            let (this, id) = (this.clone(), id.clone());
+            Box::pin(async move { Ok(this.resolve_from(source, &id).await?.url) })
+        })
+    }
+
+    /// Download a song into the downloads folder, at the best quality the account gets.
+    async fn download(&self, t: &Track) -> anyhow::Result<PathBuf> {
+        let (source, s) = self.resolve(&t.id, true).await?;
+        log::info!("download {}: {} bytes from {source:?}", t.id, s.size);
+        let shared = Shared::new(s.size, s.duration_ms, s.loudness_db, false);
+        stream::download(self.http(), s.url, s.user_agent, shared.clone(), Some(self.refresher(source, &t.id))).await;
+        if let Some(e) = shared.error() {
+            anyhow::bail!("{e}");
+        }
+        let audio = shared.bytes().ok_or_else(|| anyhow::anyhow!("the download stopped early"))?;
+        let cover = match model::pick(&t.thumbs, 120).map(|u| sized(u, 1200)) {
+            Some(url) => async { self.http().get(url).send().await?.error_for_status()?.bytes().await }.await.ok().map(|b| b.to_vec()),
+            None => None,
+        };
+        let (t, duration_ms, loudness) = (t.clone(), shared.duration_ms, shared.loudness_db);
+        tokio::task::spawn_blocking(move || crate::downloads::save(&t, &audio, duration_ms, loudness, cover)).await?
+    }
+
+    /// Find a stream URL, trying the fastest source that can play the song. `best`
+    /// (downloads) takes the high quality stream whatever the setting, and waits for
+    /// the solver it needs.
+    async fn resolve(&self, video_id: &str, best: bool) -> anyhow::Result<(Source, ResolvedStream)> {
+        let hq = best || self.hq.load(Ordering::Relaxed);
+        if best
+            && !self.jsc.ready()
+            && let Some(session) = self.api.account()
+            && self.is_premium(&session).await
+            && let Err(e) = self.jsc.warm(&self.http()).await
+        {
+            log::warn!("solver warm-up failed: {e:#}");
+        }
         // High quality needs the signed-in player's solver. Until it's prepared (a new
         // install, a new player version: ~5 s or more), play standard quality at once.
         let solver_ready = self.jsc.ready();
-        if self.hq.load(Ordering::Relaxed) && !solver_ready && self.api.account().is_some() {
+        if hq && !solver_ready && self.api.account().is_some() {
             log::info!("{video_id}: solver not ready yet, standard quality for now");
             self.warm_signed_in();
         }
-        if self.hq.load(Ordering::Relaxed)
+        if hq
             && solver_ready
             && let Some(session) = self.api.account()
             && self.is_premium(&session).await
@@ -782,7 +826,7 @@ fn reports_plays() -> bool {
     std::env::var_os("YTM_BACKGROUND").is_none() || std::env::var_os("YTM_REPORT_PLAYS").is_some()
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Source {
     VisionOs,
     WebMusic,

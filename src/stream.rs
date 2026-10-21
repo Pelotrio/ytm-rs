@@ -119,6 +119,35 @@ impl Shared {
         })
     }
 
+    /// A buffer that already holds the whole file (a downloaded song).
+    pub fn from_bytes(data: Vec<u8>, duration_ms: u64, loudness_db: Option<f32>) -> Arc<Self> {
+        let total = data.len() as u64;
+        let data = Bytes::from(data);
+        let blocks: Vec<Option<Bytes>> =
+            (0..total.div_ceil(BLOCK)).map(|i| Some(data.slice(i as usize * BLOCK as usize..((i + 1) * BLOCK).min(total) as usize))).collect();
+        let n = blocks.len();
+        let shared = Self::new(total, duration_ms, loudness_db, false);
+        {
+            let mut inner = shared.inner.lock().unwrap();
+            inner.blocks = blocks;
+            inner.windowed = false;
+            inner.ever = vec![true; n];
+            inner.fetched = n;
+        }
+        shared.done.send_replace(true);
+        shared
+    }
+
+    /// The whole file, once every block has arrived (a download nobody's reading).
+    pub fn bytes(&self) -> Option<Vec<u8>> {
+        let inner = self.inner.lock().unwrap();
+        let mut out = Vec::with_capacity(self.total as usize);
+        for b in &inner.blocks {
+            out.extend_from_slice(b.as_ref()?);
+        }
+        Some(out)
+    }
+
     /// Every block is in memory: readers never wait and the buffer can be replayed.
     pub fn is_complete(&self) -> bool {
         self.inner.lock().unwrap().blocks.iter().all(Option::is_some)

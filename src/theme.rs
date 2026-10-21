@@ -159,6 +159,8 @@ pub mod icon {
     pub const LINK: char = '\u{e102}';
     pub const CROWN: char = '\u{e1d6}';
     pub const HEADPHONES: char = '\u{e0f1}';
+    pub const DOWNLOAD: char = '\u{e0b2}';
+    pub const FOLDER_OPEN: char = '\u{e247}';
 }
 
 /// Inter (SIL OFL 1.1), the default face: regular / semibold / extra bold, subset to

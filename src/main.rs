@@ -8,6 +8,7 @@ mod audio;
 mod backend;
 mod deeplink;
 mod discord;
+mod downloads;
 mod images;
 mod jam;
 mod innertube;

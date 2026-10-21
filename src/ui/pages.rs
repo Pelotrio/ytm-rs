@@ -729,6 +729,27 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
         });
     });
 
+    // ---- downloads
+    section_label(ui, "Downloads", None);
+    ui.label(
+        RichText::new("Download songs from their menu. They're saved at the best quality your account gets, tagged with their cover art, and play from the file, even offline.")
+            .font(theme::regular(13.0))
+            .color(theme::text_dim()),
+    );
+    ui.add_space(12.0);
+    settings_card(ui, |ui| {
+        let folder = crate::downloads::folder().display().to_string();
+        setting_row(ui, "Download folder", Some(&folder), |ui| {
+            if pill(ui, "Change", None, false).clicked() {
+                crate::downloads::pick_folder(ui.ctx());
+            }
+            ui.add_space(6.0);
+            if pill(ui, "Open", Some(icon::FOLDER_OPEN), false).clicked() {
+                crate::downloads::open_folder();
+            }
+        });
+    });
+
     // ---- lyrics (the better-lyrics extension's options)
     section_label(ui, "Lyrics", None);
     settings_card(ui, |ui| {

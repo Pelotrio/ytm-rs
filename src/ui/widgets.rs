@@ -435,6 +435,18 @@ pub fn song_actions(ui: &mut Ui, t: &Track, liked: bool, acts: &mut Vec<Action>)
     if menu_action(ui, None, "Copy link") {
         acts.push(Action::Share(Target::Song(t.clone())));
     }
+    match crate::downloads::path(&t.id) {
+        Some(path) => {
+            if menu_action(ui, Some(icon::FOLDER_OPEN), "Show in folder") {
+                crate::downloads::show_file(&path);
+            }
+        }
+        None => {
+            if menu_action(ui, Some(icon::DOWNLOAD), "Download") {
+                acts.push(Action::Download(t.clone()));
+            }
+        }
+    }
     ui.separator();
     if menu_action(ui, Some(icon::SKIP_FORWARD), "Play next") {
         acts.push(Action::PlayNext(t.clone()));

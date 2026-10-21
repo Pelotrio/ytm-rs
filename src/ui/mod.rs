@@ -90,6 +90,7 @@ pub enum Action {
     Dislike(String),
     Share(Target),
     AddToPlaylist(Track),
+    Download(Track),
     NewPlaylist(Option<Track>),
     EditPlaylist,
     DeletePlaylist,
@@ -340,6 +341,7 @@ impl App {
         if app_icon != crate::appicon::CLASSIC {
             crate::appicon::sync_shortcuts(app_icon, backend.data_dir());
         }
+        crate::downloads::init(backend.data_dir(), &get("download_dir").unwrap_or_default());
         let logged_in = backend.is_logged_in();
         // Before any request: a song started at launch (dev hooks) must see this setting.
         backend.set_high_quality(get("high_quality").is_none_or(|v| v == "1"));
@@ -1246,6 +1248,10 @@ impl App {
                 self.share_pending = Some(share_url(&target));
                 self.toast("Link copied");
             }
+            Action::Download(track) => {
+                self.toast(format!("Downloading \u{201c}{}\u{201d}", track.title));
+                self.backend.request(Req::Download(track));
+            }
             Action::AddToPlaylist(track) => {
                 if self.logged_in { self.dialog = Some(Dialog::PickPlaylist(track)); }
                 else { self.toast("Sign in to edit playlists"); }
@@ -1463,6 +1469,10 @@ impl App {
                 if self.page == Page::Library(LibTab::Uploads) {
                     self.loading = false;
                 }
+            }
+            Resp::Downloaded { title, path } => {
+                log::info!("downloaded to {}", path.display());
+                self.toast(format!("Downloaded \u{201c}{title}\u{201d}"));
             }
             Resp::Uploaded { done, failed } => {
                 let songs = |n: usize| if n == 1 { "1 song".to_owned() } else { format!("{n} songs") };
@@ -2222,6 +2232,8 @@ impl eframe::App for App {
         storage.set_string("account_cache", cache.and_then(|c| serde_json::to_string(&c).ok()).unwrap_or_default());
         storage.set_string("normalize", b(self.normalize));
         storage.set_string("high_quality", b(self.high_quality));
+        let folder = crate::downloads::folder();
+        storage.set_string("download_dir", if folder == crate::downloads::default_folder() { String::new() } else { folder.display().to_string() });
         let (device, device_name) = self.output_device.clone().unzip();
         storage.set_string("output_device", device.unwrap_or_default());
         storage.set_string("output_device_name", device_name.unwrap_or_default());
