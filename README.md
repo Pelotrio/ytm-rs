@@ -22,12 +22,13 @@
 | **Your music feed**     | Browse your personalized YouTube Music home feed, including Listen again, Quick picks, your mixes (My Supermix, Discover Mix and more), and mood filters. Keep scrolling for more. Pages refresh each time you open them.                |
 | **Explore and search**  | Find new releases from US charting artists and artists in your music feed, browse charts, and search for songs, albums, and playlists.              |
 | **Your library**        | Access liked songs, saved albums and playlists, listening history and your uploads after signing in. Upload your own songs from the Uploads tab or by dropping audio files on the window. |
-| **Playback controls**   | Manage the queue, start radio from a song, and use shuffle, repeat, and autoplay. The next track is prefetched for instant skips. With YouTube Premium, songs play in 256 kbps high quality. Volume normalization turns loud songs down to an even level, the way YouTube Music does. Turn on **Skip non-music parts** to jump over talking, skits and sponsor breaks in music videos, as marked by SponsorBlock. |
+| **Playback controls**   | Manage the queue, start radio from a song, and use shuffle, repeat, and autoplay. The next track is prefetched for instant skips. With YouTube Premium, songs play in 256 kbps high quality. Volume normalization turns loud songs down to an even level, the way YouTube Music does. Turn on **Skip non-music parts** to jump over talking, skits and sponsor breaks in music videos, as marked by SponsorBlock. Pick which speaker, headset or virtual device plays the music in **Settings → Playback → Output device**. |
+| **Downloads**           | Download any song from its menu. It's saved as an .m4a tagged with its title, artists, album and cover art, at the best quality your account gets, and plays from the file, even offline. |
 | **Lyrics and visuals**  | Follow word-by-word karaoke lyrics rendered the way the Better Lyrics extension draws them, with the same timing, glow and line layout. Lyrics come from every Better Lyrics source; switch sources from the header, and if one has nothing the next takes over automatically. Toggle romanization and translations, nudge the timing per song, and set the source order, translation language and offsets in **Settings → Lyrics**. Click a line to seek, switch to full-screen lyrics, or hide them to see just the artwork over the animated, music-reactive album-art background. |
 | **Listen together**     | Start a jam and share its code or link. Friends who open the link land in ytm-rs and hear the same song at the same moment, each streaming it on their own, up to 16 people. As host you choose whether guests can add songs and whether they can pause, skip and seek. |
 | **Transfer from Spotify** | Bring your Spotify playlists and Liked Songs over to YouTube Music. ytm-rs finds each song in the background while you keep listening, asks you when it isn't sure about a match, and picks up where it left off if a transfer gets interrupted. Liked Songs can go straight into Liked Music in the same order as on Spotify. |
 | **Themes**              | Pick from 26 presets rebuilt from the [Better Lyrics community themes](https://github.com/better-lyrics/themes), such as Apple Music, Spicy, Spinning Record and reCover. Each one restyles the lyrics, background, cover, player bar, fonts and the rest of the app. Prefer another font? Pick a bundled one or any font installed on your PC in **Settings → Appearance**. |
-| **Desktop integration** | Use system media controls, previous/play/next buttons on the taskbar thumbnail, Discord Rich Presence, and screen-reader-accessible controls. Close to the tray to keep music playing in the background, and collapse the sidebar to a slim row of icons. |
+| **Desktop integration** | Use system media controls, previous/play/next buttons on the taskbar thumbnail, Discord Rich Presence, Last.fm scrobbling, and screen-reader-accessible controls. Close to the tray to keep music playing in the background, and collapse the sidebar to a slim row of icons. |
 | **Automatic updates**   | The app (installed or portable) downloads new versions in the background and installs them when you close it, or right away with **Restart to update**. It shows each release's notes when an update is ready and after it installs.              |
 
 ## Screenshots
@@ -92,6 +93,14 @@ Open **Settings → Import** and sign in to Spotify to pick a playlist or your L
 ### Upload your music
 
 Open **Library → Uploads** and click **Upload music**, or drop MP3, M4A, FLAC, OGG or WMA files anywhere on the window. They go to your YouTube Music library, the same as uploading on music.youtube.com. The title, artist, album and cover come from the file's tags, so tag your files before uploading.
+
+### Download songs
+
+Open a song's menu and click **Download**. Songs are saved to `Music\ytm-rs`; change the folder in **Settings → Downloads**. A downloaded song plays from its file, so it works without an internet connection, and its menu offers **Show in folder**.
+
+### Scrobble to Last.fm
+
+Open **Settings → Connections** and click **Connect** next to Last.fm, then allow ytm-rs on the Last.fm page that opens in your browser. Songs show as now playing on your profile and scrobble once they've played half their length or four minutes.
 
 ### Pick a theme
 
