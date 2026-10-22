@@ -50,6 +50,8 @@ pub struct Setup {
     /// The song being matched on the search page (its place in the review); cleared on
     /// leaving search.
     pub picking: Option<usize>,
+    /// The review is open; until then the song list stays up so the matches can be looked over.
+    reviewing: bool,
 }
 
 #[derive(Default, Clone, Copy, PartialEq)]
@@ -175,7 +177,7 @@ pub fn page(app: &mut App, ui: &mut Ui, now: f64) {
             drop(guard);
             match phase {
                 None => setup(app, ui),
-                Some(Phase::Review) => review(app, ui),
+                Some(Phase::Review) if app.xfer.reviewing => review(app, ui),
                 Some(Phase::Done) => done(app, ui),
                 Some(Phase::Failed(e)) => failed(app, ui, &e),
                 Some(_) => running(app, ui, now),
@@ -569,20 +571,35 @@ fn running(app: &mut App, ui: &mut Ui, _now: f64) {
         },
         _ => format!("Copying {}", job.name),
     };
-    let (mut pause, mut cancel) = (false, false);
+    let (mut pause, mut cancel, mut check) = (false, false, false);
     let paused = job.paused;
+    // Searching is done and some songs need a look: they wait until the user starts on them.
+    let to_check = (job.phase == Phase::Review).then(|| job.doubts.iter().filter(|d| d.decision.is_none()).count());
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
-            ui.set_width((ui.available_width() - 230.0).max(200.0));
+            ui.set_width((ui.available_width() - if to_check.is_some() { 400.0 } else { 230.0 }).max(200.0));
             ui.add_space(4.0);
             ui.label(RichText::new(&title).font(theme::bold(28.0)).color(theme::TEXT));
             ui.add_space(2.0);
-            dim(ui, "Keep listening or browse anywhere. This keeps running, and the sidebar shows its progress.");
+            dim(
+                ui,
+                if to_check.is_some() {
+                    "Every song's been searched. Look over the matches below, then check the ones that need a look."
+                } else {
+                    "Keep listening or browse anywhere. This keeps running, and the sidebar shows its progress."
+                },
+            );
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             cancel = pill(ui, "Cancel", None, false).clicked();
             ui.add_space(8.0);
-            pause = pill(ui, if paused { "Resume" } else { "Pause" }, None, false).clicked();
+            match to_check {
+                Some(n) => {
+                    let label = if n == 1 { "Check 1 song".to_owned() } else { format!("Check {} songs", fmt_n(n)) };
+                    check = big_button(ui, &label, accent, true, 220.0);
+                }
+                None => pause = pill(ui, if paused { "Resume" } else { "Pause" }, None, false).clicked(),
+            }
         });
     });
     ui.add_space(16.0);
@@ -602,6 +619,7 @@ fn running(app: &mut App, ui: &mut Ui, _now: f64) {
             None,
         ),
         Phase::Checking => (fmt_n(searched), format!("of {} songs searched", fmt_n(total)), 1.0, Some("checking the doubtful ones".to_owned())),
+        Phase::Review => (fmt_n(searched), format!("of {} songs searched", fmt_n(total)), 1.0, None),
         _ => (fmt_n(searched), format!("of {} songs searched", fmt_n(total)), searched as f32 / total.max(1) as f32, job.eta().map(|s| format!("about {} left", fmt_secs(s)))),
     };
     let eta = if paused { Some("paused".to_owned()) } else { eta };
@@ -674,6 +692,9 @@ fn running(app: &mut App, ui: &mut Ui, _now: f64) {
     ];
     stat_row(ui, &stats, accent);
     ui.add_space(16.0);
+    if check {
+        app.xfer.reviewing = true;
+    }
     if total == 0 {
         drop(guard);
         apply_controls(app, pause, cancel, paused);
@@ -860,6 +881,7 @@ fn review(app: &mut App, ui: &mut Ui) {
     ui.add_space(6.0);
     breadcrumb(app, ui);
     let mut finish = false;
+    let mut list = false;
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             ui.set_width((ui.available_width() - 300.0).max(200.0));
@@ -875,6 +897,10 @@ fn review(app: &mut App, ui: &mut Ui) {
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             finish = pill(ui, "Keep current picks for the rest", None, false).clicked();
+            ui.add_space(8.0);
+            if pill(ui, "All songs", Some(icon::CHEVRON_LEFT), false).on_hover_text("Back to the full list of matches").clicked() {
+                list = true;
+            }
         });
     });
     ui.add_space(12.0);
@@ -1051,6 +1077,10 @@ fn review(app: &mut App, ui: &mut Ui) {
     let next = next_open(at);
     drop(guard);
     app.actions.extend(acts);
+    if list {
+        app.xfer.reviewing = false;
+        return;
+    }
     if search {
         // The search page picks for this song until it's left.
         app.xfer.picking = Some(at);
@@ -1460,6 +1490,9 @@ pub fn poll(app: &mut App, ctx: &egui::Context, now: f64) {
         return;
     }
     app.xfer.done_at = (phase == Some(Phase::Done)).then_some(now);
+    if phase != Some(Phase::Review) {
+        app.xfer.reviewing = false;
+    }
     let on_page = app.page == Page::Transfer;
     match &phase {
         Some(Phase::Review) if !on_page => app.toast(format!("Spotify transfer: {} songs need a look", fmt_n(doubts))),
