@@ -661,10 +661,18 @@ impl Transfer {
         found.sort_by_key(|(i, _)| *i);
         self.with_job(|j| {
             for (i, cands) in found {
-                // YouTube's results vary between searches, so the second one often has the exact song.
-                if let Some((t, _)) = cands.iter().find(|(t, video)| !video && matches(t, &j.tracks[i])) {
-                    j.results[i] = Search::Found(t.clone());
-                    continue;
+                // YouTube's results vary between searches, so the second one often has the exact song,
+                // or at least a likelier pick than the first.
+                let t = &j.tracks[i];
+                let songs: Vec<YtTrack> = cands.iter().filter(|(_, video)| !video).map(|(h, _)| h.clone()).collect();
+                if let Some((hit, sure)) = best(&songs, t) {
+                    if sure {
+                        j.results[i] = Search::Found(hit);
+                        continue;
+                    }
+                    if j.results[i].track().is_none_or(|cur| score(&hit, t) > score(cur, t)) {
+                        j.results[i] = Search::Unsure(hit);
+                    }
                 }
                 let (candidates, videos) = cands.into_iter().unzip();
                 j.doubts.push(Doubt { index: i, candidates, videos, decision: None, loading: false });
@@ -930,7 +938,7 @@ fn best(hits: &[YtTrack], t: &Track) -> Option<(YtTrack, bool)> {
     Some((hit.clone(), matches(hit, t)))
 }
 
-/// What to offer for a doubtful song: the top songs, then videos.
+/// What to offer for a doubtful song: the top songs, likeliest first, then videos.
 async fn candidates(api: &Api, t: &Track) -> Result<Vec<(YtTrack, bool)>> {
     let q = queries(t).swap_remove(0);
     let (songs, videos) = tokio::try_join!(ytm::search_tracks_signed_in(api, &q, ytm::Filter::Songs), ytm::search_tracks_signed_in(api, &q, ytm::Filter::Videos))?;
@@ -942,56 +950,143 @@ async fn candidates(api: &Api, t: &Track) -> Result<Vec<(YtTrack, bool)>> {
             out.push((hit, video));
         }
     }
+    // Likeliest songs first; videos stay last, in YouTube's order.
+    out.sort_by_key(|(h, video)| (*video, if *video { 0 } else { -score(h, t) }));
     Ok(out)
 }
 
-/// Whether a result has the track's title and one of its artists.
+/// Whether a result is surely the track: its title, one of its artists (or, when YouTube
+/// writes the artist in another script, the same length to a few seconds), and not a
+/// recording of a very different length.
 fn matches(hit: &YtTrack, t: &Track) -> bool {
-    title_matches(hit, t) && artist_matches(hit, t)
+    let same_length = gap(hit, t).is_some_and(|g| g <= 3);
+    title_matches(hit, t) && !too_long_or_short(hit, t) && (artist_matches(hit, t) || (same_length && other_script(hit, t)))
 }
 
 fn title_matches(hit: &YtTrack, t: &Track) -> bool {
+    title_score(hit, t) > 0
+}
+
+/// 4 for the same title, 3 for one a letter or so off ("Mais Que Nada" for "Mas Que
+/// Nada"), 2 when one holds the other. YouTube writes Japanese and other titles as
+/// "はつこい - Hatsukoi": either half may be the Spotify title.
+fn title_score(hit: &YtTrack, t: &Track) -> i32 {
     let want = base_title(&t.name);
-    // YouTube writes Japanese and other titles as "はつこい - Hatsukoi": either half may be the Spotify title.
-    std::iter::once(hit.title.as_str()).chain(hit.title.split(" - ")).map(base_title).any(|got| !want.is_empty() && !got.is_empty() && (want.contains(&got) || got.contains(&want)))
+    let parts = std::iter::once(hit.title.as_str()).chain(hit.title.split(" - "));
+    parts
+        .map(base_title)
+        .map(|got| match () {
+            _ if want.is_empty() || got.is_empty() => 0,
+            _ if want == got => 4,
+            _ if similar(&want, &got) => 3,
+            _ if want.contains(&got) || got.contains(&want) => 2,
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// At most one edit per seven letters, for titles of six letters or more.
+fn similar(a: &str, b: &str) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let longest = a.len().max(b.len());
+    if a.len().min(b.len()) < 6 || a.len().abs_diff(b.len()) * 7 > longest {
+        return false;
+    }
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut diag = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let next = (diag + (ca != cb) as usize).min(row[j] + 1).min(row[j + 1] + 1);
+            diag = row[j + 1];
+            row[j + 1] = next;
+        }
+    }
+    row[b.len()] * 7 <= longest
 }
 
 fn artist_matches(hit: &YtTrack, t: &Track) -> bool {
-    let artists = norm(&hit.artist_line());
-    t.artists.iter().map(|a| norm(a)).any(|a| !a.is_empty() && artists.contains(&a))
+    t.artists.iter().any(|a| same_artist(hit, a))
+}
+
+/// Whether a result credits this artist: by name, give or take "The" and a typo, or as
+/// part of a group ("The Miracles" for "Smokey Robinson & The Miracles").
+fn same_artist(hit: &YtTrack, artist: &str) -> bool {
+    let name = |s: &str| {
+        let s = s.trim();
+        norm(s.get(..4).filter(|p| p.eq_ignore_ascii_case("the ")).map_or(s, |_| &s[4..]))
+    };
+    let (want, line) = (name(artist), norm(&hit.artist_line()));
+    let members: Vec<String> = artist.split(" & ").flat_map(|p| p.split(" and ")).flat_map(|p| p.split(", ")).map(name).collect();
+    !want.is_empty()
+        && (line.contains(&want)
+            || hit.artists.iter().map(|a| name(&a.name)).any(|got| similar(&want, &got) || (members.len() > 1 && members.contains(&got))))
+}
+
+/// One side names the artist in Latin letters and the other doesn't ("Junko Yagami" and
+/// "八神純子"), so the names can't be compared.
+fn other_script(hit: &YtTrack, t: &Track) -> bool {
+    let latin = |s: &str| s.chars().any(|c| c.is_ascii_alphabetic());
+    latin(&t.artist_line()) != latin(&hit.artist_line())
+}
+
+/// How many seconds apart the two lengths are, when both are known.
+fn gap(hit: &YtTrack, t: &Track) -> Option<u32> {
+    Some(hit.duration?.abs_diff(t.duration?))
+}
+
+/// A different recording (a live take, an extended mix), not just another master.
+fn too_long_or_short(hit: &YtTrack, t: &Track) -> bool {
+    gap(hit, t).is_some_and(|g| g > 30.max(t.duration.unwrap_or(0) / 5))
 }
 
 /// Lowercase alphanumerics, with "(feat. ...)" / " - Remastered" style suffixes cut off.
+/// A title that starts with brackets keeps them: "(Sittin' On) the Dock of the Bay".
 fn base_title(s: &str) -> String {
-    let cut = s.find(['(', '[']).into_iter().chain(s.find(" - ")).min().unwrap_or(s.len());
+    let s = s.trim();
+    let from = if s.starts_with(['(', '[']) { s.find([')', ']']).map_or(s.len(), |i| i + 1) } else { 0 };
+    let rest = &s[from..];
+    let cut = rest.find(['(', '[']).into_iter().chain(rest.find(" - ")).min().map_or(s.len(), |i| from + i);
     norm(&s[..cut])
 }
 
+/// Lowercase letters and digits, with accents dropped ("RŮDE" is "rude") and full-width
+/// forms made plain. Japanese voicing marks stay: they change the word.
 fn norm(s: &str) -> String {
-    s.replace('&', "and").chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+    use unicode_normalization::UnicodeNormalization;
+    s.replace('&', "and").nfkd().filter(|c| !('\u{300}'..='\u{36f}').contains(c) && c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
 /// Versions that aren't the original recording unless the Spotify title says so.
-const VARIANTS: &[&str] = &["remix", "edit", "mix", "live", "karaoke", "instrumental", "cover", "sped up", "slowed", "acoustic", "version", "made famous", "originally performed"];
+const VARIANTS: &[&str] = &[
+    "remix", "edit", "mix", "live", "karaoke", "instrumental", "cover", "sped up", "slowed", "acoustic", "version", "made famous", "originally performed", "in the style of", "tribute", "tv size",
+];
 
 fn score(hit: &YtTrack, t: &Track) -> i32 {
-    let (want, got) = (base_title(&t.name), base_title(&hit.title));
-    let mut score = if want == got {
-        4
-    } else if !want.is_empty() && !got.is_empty() && (want.contains(&got) || got.contains(&want)) {
-        2
-    } else {
-        0
-    };
-    let artists = norm(&hit.artist_line());
+    let title = title_score(hit, t);
+    let mut score = title;
     for (i, artist) in t.artists.iter().enumerate() {
-        let artist = norm(artist);
-        if !artist.is_empty() && artists.contains(&artist) {
+        if same_artist(hit, artist) {
             score += if i == 0 { 3 } else { 1 };
         }
     }
+    // The length only says something about a song with the title (or the title in another script).
+    score += match gap(hit, t) {
+        Some(0..=3) if title > 0 => 3,
+        Some(4..=10) if title > 0 => 1,
+        _ if too_long_or_short(hit, t) => -3,
+        _ => 0,
+    };
+    // A remix on Spotify should find that remix, and an original shouldn't find one.
     let (spotify, youtube) = (t.name.to_lowercase(), hit.title.to_lowercase());
-    score -= VARIANTS.iter().filter(|v| youtube.contains(*v) && !spotify.contains(*v)).count() as i32;
+    for v in VARIANTS {
+        score += match (youtube.contains(v), spotify.contains(v)) {
+            (true, false) => -1,
+            (true, true) => 1,
+            _ => 0,
+        };
+    }
     score
 }
 
@@ -1014,7 +1109,7 @@ mod tests {
     }
 
     fn track(name: &str, artists: &[&str]) -> Track {
-        Track { name: name.into(), artists: artists.iter().map(|a| a.to_string()).collect(), local: false, art: None }
+        Track { name: name.into(), artists: artists.iter().map(|a| a.to_string()).collect(), local: false, art: None, duration: None }
     }
 
     #[test]
@@ -1039,6 +1134,73 @@ mod tests {
         assert!(best(&[hit("死ぬのがいいわ - Shinunoga E-Wa", "Fujii Kaze")], &track("Shinunoga E-Wa", &["Fujii Kaze"])).unwrap().1);
         let t = track("Silk & Cologne (EI8HT & Offset) - Spider-Verse Remix", &["EI8HT", "Offset"]);
         assert!(best(&[hit("Silk and Cologne (Spider-Verse Remix)", "EI8HT & Offset")], &t).unwrap().1);
+    }
+
+    fn timed(mut h: YtTrack, id: &str, secs: u32) -> YtTrack {
+        h.id = id.into();
+        h.duration = Some(secs);
+        h
+    }
+
+    fn track_of(name: &str, artists: &[&str], secs: u32) -> Track {
+        Track { duration: Some(secs), ..track(name, artists) }
+    }
+
+    #[test]
+    fn ranking_with_lengths() {
+        let pick = |t: &Track, hits: Vec<YtTrack>| best(&hits, t).map(|(h, sure)| (h.id, sure)).unwrap();
+        // The 1967 single, not a 4:35 compilation recording or a smooth-jazz cover.
+        let t = track_of("Respect", &["Aretha Franklin"], 147);
+        let hits = vec![timed(hit("Respect", "Aretha Franklin"), "long", 275), timed(hit("Respect", "Smooth Jazz All Stars"), "cover", 180), timed(hit("Respect (Mono)", "Aretha Franklin"), "mono", 146)];
+        assert_eq!(pick(&t, hits), ("mono".into(), true));
+        // Only a recording of a very different length: picked, but flagged.
+        assert!(!best(&[timed(hit("Respect", "Aretha Franklin"), "long", 275)], &t).unwrap().1);
+        // A spelling a letter off by the right artist beats the exact title by someone else.
+        let t = track_of("Mas Que Nada", &["Sergio Mendes & Brasil '66"], 159);
+        let hits = vec![timed(hit("Mas Que Nada", "Styline, Raul Mendes"), "styline", 275), timed(hit("Mais Que Nada", "Sergio Mendes & Brasil '66"), "real", 159)];
+        assert_eq!(pick(&t, hits), ("real".into(), true));
+        // Accents: "RŮDE" is "Rude.".
+        assert!(best(&[hit("Loneliness", "Rude.")], &track("Loneliness", &["RŮDE"])).unwrap().1);
+        // The artist in another script, with the same length.
+        let t = track_of("夜空のイヤリング", &["Junko Yagami"], 238);
+        assert_eq!(pick(&t, vec![timed(hit("夜空のイヤリング", "八神純子"), "a", 239)]), ("a".into(), true));
+        // ...but not someone else's song of the same name and length in the same script.
+        let t = track_of("Come To Me", &["ITSA THEIS"], 250);
+        assert!(!pick(&t, vec![timed(hit("Come To Me", "itsnottheis"), "a", 251)]).1);
+        // A cover with the English title vs the artist's own "原題 - English title".
+        let t = track_of("Fleeting Lullaby", &["Ado"], 173);
+        let hits = vec![timed(hit("Fleeting Lullaby (from \"One Piece Film: Red\")", "AmaLee"), "cover", 173), timed(hit("ウタカタララバイ - Fleeting Lullaby", "Ado"), "ado", 174)];
+        assert_eq!(pick(&t, hits), ("ado".into(), true));
+        // The remix Spotify names, not the original.
+        let t = track_of("You're My Angel - Hypnose Remix Edit", &["Styles & Breeze", "Hypnose"], 170);
+        let hits = vec![timed(hit("You're My Angel", "Styles & Breeze"), "orig", 315), timed(hit("You're My Angel (Hypnose Remix Edit)", "Styles & Breeze"), "remix", 171)];
+        assert_eq!(pick(&t, hits), ("remix".into(), true));
+        // A length alone doesn't make an unrelated song likelier than the artist's others.
+        let t = track_of("Friends Die", &["F1guss"], 205);
+        let hits = vec![timed(hit("Burn", "F1guss"), "same artist", 218), timed(hit("Stolen", "ABress"), "same length", 205)];
+        assert_eq!(pick(&t, hits), ("same artist".into(), false));
+    }
+
+    #[test]
+    fn bracketed_titles_and_groups() {
+        assert_eq!(base_title("(Sittin' On) the Dock of the Bay"), "sittinonthedockofthebay");
+        assert_eq!(base_title("(Love Is Like A) Heat Wave (Mono) - 2005 Remaster"), "loveislikeaheatwave");
+        assert_eq!(base_title("Respect (Mono)"), "respect");
+        assert!(best(&[hit("I Left My Heart in San Francisco", "Tony Bennett")], &track("(I Left My Heart) In San Francisco", &["Tony Bennett"])).unwrap().1);
+        assert!(best(&[hit("Wonderful World", "Sam Cooke")], &track("(What A) Wonderful World", &["Sam Cooke"])).unwrap().1);
+        assert!(best(&[hit("Who's Lovin' You", "Jackson 5")], &track("Who's Lovin' You", &["The Jackson 5"])).unwrap().1);
+        assert!(best(&[hit("The Tracks of My Tears", "The Miracles")], &track("The Tracks Of My Tears", &["Smokey Robinson & The Miracles"])).unwrap().1);
+        assert!(best(&[hit("A Natural Woman", "Aretha Frankiln")], &track("A Natural Woman", &["Aretha Franklin"])).unwrap().1);
+        // Someone else whose name is in the group's isn't the group.
+        assert!(!best(&[hit("Black Magic Woman", "Madeaux")], &track("Black Magic Woman", &["Santana"])).unwrap().1);
+        assert!(!best(&[hit("Found a Way", "Drake")], &track("Found a Way", &["Drake Bell"])).unwrap().1);
+    }
+
+    #[test]
+    fn near_titles() {
+        assert!(similar("masquenada", "maisquenada"));
+        assert!(!similar("loveme", "loveyou"));
+        assert!(!similar("numb", "numa"));
     }
 
     #[test]
@@ -1080,7 +1242,7 @@ mod live {
         ];
         let mut sure = 0;
         for (name, artists) in songs {
-            let t = super::Track { name: name.to_string(), artists: artists.iter().map(|a| a.to_string()).collect(), local: false, art: None };
+            let t = super::Track { name: name.to_string(), artists: artists.iter().map(|a| a.to_string()).collect(), local: false, art: None, duration: None };
             let r = super::search_song(&api, &t).await.unwrap();
             println!("{name} -> {:?}", r.as_ref().map(|(h, s)| (h.title.clone(), h.artist_line(), *s)));
             sure += r.is_some_and(|(_, s)| s) as usize;
