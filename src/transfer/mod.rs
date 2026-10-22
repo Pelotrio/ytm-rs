@@ -412,6 +412,31 @@ impl Transfer {
         }
     }
 
+    /// Decide a doubt with a song found by hand (a search outside the candidates): it joins
+    /// the candidates and is picked.
+    pub fn decide_with(&self, doubt: usize, track: YtTrack) {
+        {
+            let mut guard = self.job.lock().unwrap();
+            let Some(job) = guard.as_mut().filter(|j| j.phase == Phase::Review) else { return };
+            let Some(d) = job.doubts.get_mut(doubt) else { return };
+            let k = match d.candidates.iter().position(|c| c.id == track.id) {
+                Some(k) => k,
+                None => {
+                    // Search results without an album are videos.
+                    d.videos.push(track.album.is_none());
+                    d.candidates.push(track);
+                    d.candidates.len() - 1
+                }
+            };
+            d.loading = false;
+            d.decision = Some(Decision::Pick(k));
+            if job.current_doubt().is_none() {
+                self.review_done.notify_one();
+            }
+        }
+        self.wake();
+    }
+
     /// Open a song that matched for a change: it joins the review (its current match is
     /// kept unless another is picked) and its alternatives are searched. Returns its place
     /// in the review.

@@ -585,6 +585,8 @@ pub struct RowOpts {
     pub liked: bool,
     /// In a jam: who added the song.
     pub added_by: Option<String>,
+    /// Choosing a match for the Spotify transfer: a click picks the song and its cover plays it.
+    pub pick: bool,
 }
 
 const ROW_H: f32 = 56.0;
@@ -611,12 +613,20 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
     if !ui.is_rect_visible(rect) {
         return base;
     }
-    let hit_rect = Rect::from_min_max(rect.min, pos2(rect.right() - 42.0, rect.bottom()));
+    // Picking: the cover (left 54 px) plays, the rest of the row picks.
+    let hit_left = if o.pick && o.number.is_none() { rect.left() + 54.0 } else { rect.left() };
+    let hit_rect = Rect::from_min_max(pos2(hit_left, rect.top()), pos2(rect.right() - 42.0, rect.bottom()));
     let resp = named(ui.interact(hit_rect, base.id.with("play"), Sense::click()), &t.title);
     let h = theme::anim_bool(ui.ctx(), base.id.with("h"), base.contains_pointer(), 0.15);
     if h > 0.0 || o.current {
         let a = if o.current { 0.07 + 0.05 * h } else { 0.07 * h };
         ui.painter().rect_filled(rect, 8.0, theme::glass(a));
+    }
+    if o.pick {
+        let p = theme::anim_bool(ui.ctx(), base.id.with("p"), resp.hovered(), 0.12);
+        if p > 0.0 {
+            ui.painter().rect_stroke(rect, 8.0, egui::Stroke::new(1.5, theme::with_alpha(o.accent, p)), egui::StrokeKind::Inside);
+        }
     }
     let mut x = rect.left() + 10.0;
     let cy = rect.center().y;
@@ -634,6 +644,12 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
         let img = Rect::from_min_size(pos2(x, cy - 20.0), Vec2::splat(40.0));
         let tr = theme::thumb_radius();
         paint_cover(ui, img, &t.thumbs, tr, 1.0);
+        if o.pick {
+            let play = named(ui.interact(img, base.id.with("cover"), Sense::click()), "Play").on_hover_text("Play");
+            if play.clicked() {
+                acts.push(Action::Play(vec![t.clone()], 0));
+            }
+        }
         if o.current {
             ui.painter().rect_filled(img, tr, theme::shade(0.45));
             equalizer(ui, img.shrink(10.0), o.time, o.playing, Color32::WHITE);

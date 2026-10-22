@@ -89,6 +89,7 @@ impl Rows {
             time: self.now,
             liked: liked.contains(&t.id),
             added_by: None,
+            pick: false,
         }
     }
 }
@@ -268,6 +269,7 @@ pub(super) fn page_title(ui: &mut Ui, title: &str) {
 // ------------------------------------------------------------------ search
 
 fn search(app: &mut App, ui: &mut Ui, q: &str, now: f64) {
+    let pick = super::transfer::pick_banner(app, ui);
     if app.search.as_ref().is_none_or(|r| r.query != q) {
         placeholder(app, ui, now, 2, CARD);
         return;
@@ -284,7 +286,7 @@ fn search(app: &mut App, ui: &mut Ui, q: &str, now: f64) {
     // Top result: the first artist when the query names one, otherwise the first song.
     ui.horizontal_top(|ui| {
         if let Some(top) = r.artists.first().filter(|a| a.title.eq_ignore_ascii_case(q.trim())) {
-            top_result(ui, top, acts);
+            top_result(ui, top, false, acts);
         } else if let Some(t) = r.tracks.first() {
             let c = Card {
                 title: t.title.clone(),
@@ -294,16 +296,16 @@ fn search(app: &mut App, ui: &mut Ui, q: &str, now: f64) {
                 round: false,
                 links: t.artists.clone(),
             };
-            top_result(ui, &c, acts);
+            top_result(ui, &c, pick, acts);
         }
         ui.add_space(24.0);
         ui.vertical(|ui| {
             ui.label(RichText::new("Songs").font(theme::bold(24.0)));
             ui.add_space(8.0);
             for (i, t) in r.tracks.iter().take(4).enumerate() {
-                let o = rows.opts(liked, t, None, false);
+                let o = RowOpts { pick, ..rows.opts(liked, t, None, false) };
                 if track_row(ui, t, &o, acts).clicked() {
-                    acts.push(Action::Play(r.tracks.clone(), i));
+                    acts.push(if pick { Action::TransferPick(t.clone()) } else { Action::Play(r.tracks.clone(), i) });
                 }
             }
         });
@@ -315,16 +317,17 @@ fn search(app: &mut App, ui: &mut Ui, q: &str, now: f64) {
         ui.label(RichText::new("More songs").font(theme::bold(24.0)));
         ui.add_space(10.0);
         for (i, t) in r.tracks.iter().enumerate().skip(4) {
-            let o = rows.opts(liked, t, None, true);
+            let o = RowOpts { pick, ..rows.opts(liked, t, None, true) };
             if track_row(ui, t, &o, acts).clicked() {
-                acts.push(Action::Play(r.tracks.clone(), i));
+                acts.push(if pick { Action::TransferPick(t.clone()) } else { Action::Play(r.tracks.clone(), i) });
             }
         }
     }
     card_row(ui, "s-pl", "Playlists", &r.playlists, acts);
 }
 
-fn top_result(ui: &mut Ui, c: &Card, acts: &mut Vec<Action>) {
+/// `pick`: choosing a transfer match, so clicking a song picks it.
+fn top_result(ui: &mut Ui, c: &Card, pick: bool, acts: &mut Vec<Action>) {
     ui.vertical(|ui| {
         ui.label(RichText::new("Top result").font(theme::bold(24.0)));
         ui.add_space(8.0);
@@ -354,7 +357,10 @@ fn top_result(ui: &mut Ui, c: &Card, acts: &mut Vec<Action>) {
                 t => Action::PlayCollection(t.clone(), false),
             });
         } else if resp.clicked() {
-            acts.push(Action::Open(c.target.clone()));
+            acts.push(match &c.target {
+                Target::Song(t) if pick => Action::TransferPick(t.clone()),
+                t => Action::Open(t.clone()),
+            });
         }
     });
 }

@@ -99,6 +99,8 @@ pub enum Action {
     OpenNowPlaying(bool),
     /// Play/pause what's already loaded (a card's button on the playing item).
     TogglePlay,
+    /// A song chosen on the search page as the Spotify transfer's match.
+    TransferPick(Track),
 }
 
 enum Dialog {
@@ -610,6 +612,10 @@ impl App {
     /// showing the cached copy meanwhile.
     fn page_loaded(&mut self) {
         self.page_changed = -1.0; // stamped with the frame time on the next pass
+        // Choosing a transfer match lasts while searching; any other page ends it.
+        if !matches!(self.page, Page::Search(_)) {
+            self.xfer.picking = None;
+        }
         let req = match &self.page {
             Page::Home if !self.home_loading => {
                 self.home_loading = true;
@@ -1238,6 +1244,7 @@ impl App {
                 self.play_list(tracks, i);
             }
             Action::TogglePlay => self.toggle(),
+            Action::TransferPick(t) => transfer::use_pick(self, t),
             Action::PlayCollection(target, shuffle) => {
                 self.toast("Starting playback…");
                 self.pending_source = Some(target.clone());

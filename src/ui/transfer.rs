@@ -47,6 +47,9 @@ pub struct Setup {
     scrolled_to: Option<usize>,
     /// When the last review decision was made (app time), so a double click decides one song, not two.
     decided_at: f64,
+    /// The song being matched on the search page (its place in the review); cleared on
+    /// leaving search.
+    pub picking: Option<usize>,
 }
 
 #[derive(Default, Clone, Copy, PartialEq)]
@@ -848,6 +851,11 @@ fn review(app: &mut App, ui: &mut Ui) {
         _ => None,
     };
     let picked = app.xfer.pick.filter(|(k, _)| *k == at).map(|(_, c)| c).or(decided_pick).or(current);
+    let query = match sp.artists.first() {
+        Some(a) if !a.is_empty() => format!("{} {a}", sp.name),
+        _ => sp.name.clone(),
+    };
+    let mut search = false;
 
     ui.add_space(6.0);
     breadcrumb(app, ui);
@@ -977,7 +985,13 @@ fn review(app: &mut App, ui: &mut Ui) {
                 let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
                 ui.painter().rect_filled(line, 0.0, theme::glass(0.10));
                 ui.add_space(12.0);
-                small_caps(ui, "PICK THE RIGHT ONE ON YOUTUBE MUSIC");
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("PICK THE RIGHT ONE ON YOUTUBE MUSIC").font(theme::bold(11.5)).color(theme::TEXT_FAINT));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        search = pill(ui, "Search YouTube Music", Some(icon::SEARCH), false).on_hover_text("Not in the list? Find it yourself").clicked();
+                    });
+                });
+                ui.add_space(8.0);
                 // A fixed height, the same for every song, so the buttons under the list stay
                 // put; longer lists scroll inside it.
                 let room = (ui.ctx().content_rect().height() - 560.0).clamp(52.0 * 3.5, 52.0 * 8.0);
@@ -1037,6 +1051,14 @@ fn review(app: &mut App, ui: &mut Ui) {
     let next = next_open(at);
     drop(guard);
     app.actions.extend(acts);
+    if search {
+        // The search page picks for this song until it's left.
+        app.xfer.picking = Some(at);
+        app.xfer.pick = None;
+        app.search_text = query.clone();
+        app.actions.push(Action::Go(Page::Search(query)));
+        return;
+    }
     if let Some(k) = focus_to {
         app.xfer.focus = Some(k);
         app.xfer.pick = None;
@@ -1065,6 +1087,65 @@ fn review(app: &mut App, ui: &mut Ui) {
     } else if finish {
         xfer.finish_review();
     }
+}
+
+/// On the search page while choosing a match: which Spotify song it's for, and the way
+/// back. Returns whether a match is being chosen.
+pub fn pick_banner(app: &mut App, ui: &mut Ui) -> bool {
+    let Some(at) = app.xfer.picking else { return false };
+    let song = {
+        let guard = app.transfer.job.lock().unwrap();
+        guard.as_ref().filter(|j| j.phase == Phase::Review).and_then(|j| j.tracks.get(j.doubts.get(at)?.index).cloned())
+    };
+    let Some(sp) = song else {
+        // The review ended meanwhile (cancelled, or finished elsewhere).
+        app.xfer.picking = None;
+        return false;
+    };
+    let accent = app.accent_color();
+    let mut back = false;
+    ui.add_space(8.0);
+    egui::Frame::new()
+        .fill(theme::with_alpha(accent, 0.12))
+        .stroke(egui::Stroke::new(1.0, theme::with_alpha(accent, 0.35)))
+        .corner_radius(theme::panel_radius())
+        .inner_margin(14)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (img, _) = ui.allocate_exact_size(vec2(52.0, 52.0), Sense::hover());
+                paint_cover(ui, img, &spotify_thumbs(&sp.art), 6.0, 1.0);
+                ui.add_space(8.0);
+                let text_w = (ui.available_width() - 200.0).max(120.0);
+                ui.vertical(|ui| {
+                    ui.set_width(text_w);
+                    ui.label(RichText::new("CHOOSING A MATCH FOR").font(theme::bold(11.5)).color(theme::TEXT_FAINT));
+                    ui.add(egui::Label::new(RichText::new(format!("{} · {}", sp.name, sp.artist_line())).font(theme::semibold(15.0)).color(theme::TEXT)).truncate());
+                    dim(ui, "Click a song to use it. Click a cover to play it.");
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    back = pill(ui, "Back to transfer", Some(icon::CHEVRON_LEFT), false).clicked();
+                });
+            });
+        });
+    ui.add_space(6.0);
+    if back {
+        app.actions.push(Action::Go(Page::Transfer));
+    }
+    true
+}
+
+/// A song was chosen on the search page: it becomes the match, and the review moves on.
+pub fn use_pick(app: &mut App, t: YtTrack) {
+    let Some(at) = app.xfer.picking.take() else { return };
+    app.transfer.decide_with(at, t);
+    // Back on the next song still to check (after this one, then from the top).
+    app.xfer.focus = app.transfer.job.lock().unwrap().as_ref().and_then(|j| {
+        let n = j.doubts.len();
+        (at + 1..n).chain(0..at.min(n)).find(|&k| j.doubts[k].decision.is_none())
+    });
+    app.xfer.pick = None;
+    app.go(Page::Transfer);
 }
 
 /// One candidate; returns true when it was picked.
