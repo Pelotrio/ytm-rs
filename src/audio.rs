@@ -70,6 +70,8 @@ pub struct AudioStatus {
     volume: AtomicU32,
     /// Turn loud tracks down to YouTube's loudness target.
     pub normalize: AtomicBool,
+    /// The volume slider follows loudness (cubic) rather than amplitude.
+    log_volume: AtomicBool,
     /// Smoothed output loudness 0..1 (f32 bits), for audio-reactive visuals.
     level: AtomicU32,
     /// How far the output device runs behind the position (its buffer), in ms.
@@ -245,6 +247,15 @@ impl AudioHandle {
         self.send(AudioCmd::Volume(self.volume()));
     }
 
+    /// Switches the slider's curve, moving it so the music stays as loud as it was.
+    pub fn set_log_volume(&self, on: bool) {
+        if self.status.log_volume.swap(on, Ordering::Relaxed) != on {
+            let v = self.volume();
+            self.status.volume.store(if on { v.cbrt() } else { v.powi(3) }.to_bits(), Ordering::Relaxed);
+        }
+        self.send(AudioCmd::Volume(self.volume()));
+    }
+
     pub fn set_crossfade(&self, secs: u32) {
         self.status.crossfade_ms.store(secs * 1000, Ordering::Relaxed);
     }
@@ -330,6 +341,13 @@ const QUICK_FADE_MS: u32 = 40;
 /// How long a song keeps playing at full volume for the next one to load before it
 /// fades out anyway.
 const HANDOFF_WAIT: Duration = Duration::from_secs(3);
+
+/// Gain for a volume slider position. Ears hear amplitude roughly logarithmically,
+/// so on a linear slider nearly all the change is in its bottom few pixels; the cubic
+/// curve (PulseAudio's) spreads it out: half way is -18 dB.
+fn slider_gain(status: &AudioStatus, v: f32) -> f32 {
+    if status.log_volume.load(Ordering::Relaxed) { v.powi(3) } else { v }
+}
 
 fn norm_gain(status: &AudioStatus, shared: Option<&Shared>) -> f32 {
     match shared.and_then(|s| s.loudness_db) {
@@ -518,10 +536,11 @@ impl Drop for Bridge {
 /// How often to look for a new default device while playing.
 const DEVICE_CHECK: Duration = Duration::from_secs(1);
 
-pub fn spawn(volume: f32, device: Option<String>, events: Sender<AudioEvent>, wake: impl Fn() + Send + 'static) -> AudioHandle {
+pub fn spawn(volume: f32, log_volume: bool, device: Option<String>, events: Sender<AudioEvent>, wake: impl Fn() + Send + 'static) -> AudioHandle {
     let (tx, rx) = unbounded();
     let status = Arc::new(AudioStatus::default());
     status.volume.store(volume.to_bits(), Ordering::Relaxed);
+    status.log_volume.store(log_volume, Ordering::Relaxed);
     let st = status.clone();
     std::thread::Builder::new()
         .name("audio".into())
@@ -548,7 +567,7 @@ fn run(
         wake();
     }
     let mut player = Player::connect_new(&output.mixer);
-    player.set_volume(volume);
+    player.set_volume(slider_gain(&status, volume));
     // The playing source's fade-out control (see `Meter`).
     let mut fade_out = Arc::new(AtomicU32::new(0));
     // Songs fading out under the current one (more than one only for a moment).
@@ -590,7 +609,7 @@ fn run(
                 player.clear();
                 let gain = norm_gain(&status, Some(&s));
                 log::info!("audio: loudness {:?} dB, normalization gain {gain:.3}", s.loudness_db);
-                player.set_volume(f32::from_bits(status.volume.load(Ordering::Relaxed)) * gain);
+                player.set_volume(slider_gain(&status, f32::from_bits(status.volume.load(Ordering::Relaxed))) * gain);
                 // Fade in only over a song still playing, both over the same length.
                 fading.retain(|f| !f.player.empty());
                 let crossfade = status.crossfade_ms.load(Ordering::Relaxed);
@@ -771,6 +790,7 @@ fn run(
                 }
             }
             Ok(AudioCmd::Volume(v)) => {
+                let v = slider_gain(&status, v);
                 player.set_volume(v * norm_gain(&status, shared.as_deref()));
                 for f in &fading {
                     f.player.set_volume(v * norm_gain(&status, f.shared.as_deref()));
@@ -882,5 +902,19 @@ mod tests {
         assert_eq!(norm_gain(&status, None), 1.0);
         status.normalize.store(false, Ordering::Relaxed);
         assert_eq!(norm_gain(&status, Some(&loud)), 1.0);
+    }
+
+    #[test]
+    fn log_volume_keeps_loudness_when_switched() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let audio = AudioHandle { tx, status: Arc::new(AudioStatus::default()) };
+        audio.set_volume(0.125);
+        audio.set_log_volume(true);
+        assert!((audio.volume() - 0.5).abs() < 1e-6);
+        assert!((slider_gain(&audio.status, audio.volume()) - 0.125).abs() < 1e-6);
+        audio.set_log_volume(true);
+        assert!((audio.volume() - 0.5).abs() < 1e-6);
+        audio.set_log_volume(false);
+        assert!((audio.volume() - 0.125).abs() < 1e-6);
     }
 }

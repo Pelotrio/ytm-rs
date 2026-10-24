@@ -700,6 +700,12 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
             }
         });
         divider(ui);
+        setting_row(ui, "Logarithmic volume", Some("Space the volume slider out the way ears hear loudness, so quiet levels aren't squeezed into its first few pixels."), |ui| {
+            if toggle(ui, &mut app.log_volume, "Logarithmic volume").changed() {
+                app.audio.set_log_volume(app.log_volume);
+            }
+        });
+        divider(ui);
         setting_row(ui, "High quality audio", Some("256 kbps instead of 128 kbps, for accounts with YouTube Premium. Applies from the next song."), |ui| {
             if toggle(ui, &mut app.high_quality, "High quality audio").changed() {
                 app.backend.set_high_quality(app.high_quality);

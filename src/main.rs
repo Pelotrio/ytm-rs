@@ -133,13 +133,18 @@ fn main() -> eframe::Result {
                 .and_then(|s| s.get_string("volume"))
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.8f32);
+            // The slider is logarithmic unless turned off. A volume saved before that
+            // existed was linear: move it to where it sounds the same.
+            let log_setting = cc.storage.and_then(|s| s.get_string("log_volume"));
+            let log_volume = log_setting.as_deref().is_none_or(|v| v == "1");
+            let volume = if log_setting.is_none() { volume.cbrt() } else { volume };
             // Dev hook: YTM_MUTE starts silent and never persists the volume.
             let volume = if std::env::var_os("YTM_MUTE").is_some() { 0.0 } else { volume };
 
             let device = cc.storage.and_then(|s| s.get_string("output_device")).filter(|d| !d.is_empty());
 
             let (audio_tx, audio_rx) = unbounded();
-            let audio = audio::spawn(volume, device, audio_tx, wake);
+            let audio = audio::spawn(volume, log_volume, device, audio_tx, wake);
 
             let data_dir = data_dir();
             let (resp_tx, resp_rx) = unbounded();
