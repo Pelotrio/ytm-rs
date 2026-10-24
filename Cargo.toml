@@ -6,19 +6,6 @@ license = "GPL-3.0-only"
 repository = "https://github.com/grapedjuice/ytm-rs"
 description = "Native YouTube Music client"
 
-# The Linux .deb (cargo deb). Library dependencies come from the binary; the tray's
-# appindicator is loaded at run time, so it's listed by hand.
-[package.metadata.deb]
-maintainer = "grapedjuice"
-section = "sound"
-depends = "$auto, libayatana-appindicator3-1"
-assets = [
-    ["target/release/ytm-rs", "usr/bin/", "755"],
-    ["linux/ytm-rs.desktop", "usr/share/applications/", "644"],
-    ["assets/icon/icon.png", "usr/share/icons/hicolor/256x256/apps/ytm-rs.png", "644"],
-    ["README.md", "usr/share/doc/ytm-rs/", "644"],
-]
-
 [dependencies]
 anyhow = "1.0.104"
 base64 = "0.22.1"
