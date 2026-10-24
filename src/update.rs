@@ -208,7 +208,9 @@ impl Updater {
         }
         let version = tag.trim_start_matches('v').to_owned();
         let portable = portable_dir().is_some();
-        let want = if portable { format!("ytm-rs-portable-{version}.zip") } else { format!("ytm-rs-setup-{version}.exe") };
+        // ARM64 builds have their own assets; x64 keeps the original names.
+        let arch = if cfg!(target_arch = "aarch64") { "-arm64" } else { "" };
+        let want = if portable { format!("ytm-rs-portable-{version}{arch}.zip") } else { format!("ytm-rs-setup-{version}{arch}.exe") };
         // A release published before its installer was built: nothing to install
         // yet, so this isn't an error. The next check picks it up.
         let Some(asset) = release["assets"].as_array().and_then(|a| a.iter().find(|x| x["name"] == want.as_str())) else {

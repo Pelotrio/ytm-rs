@@ -21,6 +21,8 @@ jobs:
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
 
       - uses: Swatinem/rust-cache@v2
 
@@ -39,19 +41,30 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+      # Cross-compiled on the x64 runner, whose Visual Studio has the ARM64 tools.
+      - name: Build ARM64
+        run: cargo build --release --locked --target aarch64-pc-windows-msvc
+
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
 
       - name: Build installer
-        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q installer\ytm-rs.iss'
-
-      # The portable zip: the exe, the marker that makes it portable, README and LICENSE.
-      - name: Build portable zip
         run: |
-          New-Item -ItemType Directory -Force installer\Output\portable | Out-Null
-          Copy-Item target\release\ytm-rs.exe, installer\portable.txt, README.md, LICENSE installer\Output\portable
-          & "$env:SystemRoot\System32\tar.exe" -a -c -f "installer\Output\ytm-rs-portable-$env:VERSION.zip" -C installer\Output\portable ytm-rs.exe portable.txt README.md LICENSE
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q installer\ytm-rs.iss
           if ($LASTEXITCODE) { exit 1 }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q /DArm64 installer\ytm-rs.iss
+          if ($LASTEXITCODE) { exit 1 }
+
+      # The portable zips: the exe, the marker that makes it portable, README and LICENSE.
+      - name: Build portable zips
+        run: |
+          foreach ($b in @(@{ dir = "target\release"; suffix = "" }, @{ dir = "target\aarch64-pc-windows-msvc\release"; suffix = "-arm64" })) {
+            $out = "installer\Output\portable$($b.suffix)"
+            New-Item -ItemType Directory -Force $out | Out-Null
+            Copy-Item "$($b.dir)\ytm-rs.exe", installer\portable.txt, README.md, LICENSE $out
+            & "$env:SystemRoot\System32\tar.exe" -a -c -f "installer\Output\ytm-rs-portable-$env:VERSION$($b.suffix).zip" -C $out ytm-rs.exe portable.txt README.md LICENSE
+            if ($LASTEXITCODE) { exit 1 }
+          }
 
       - uses: actions/upload-artifact@v5
         with:
@@ -59,6 +72,8 @@ jobs:
           path: |
             installer/Output/ytm-rs-setup-${{ env.VERSION }}.exe
             installer/Output/ytm-rs-portable-${{ env.VERSION }}.zip
+            installer/Output/ytm-rs-setup-${{ env.VERSION }}-arm64.exe
+            installer/Output/ytm-rs-portable-${{ env.VERSION }}-arm64.zip
           if-no-files-found: error
 
       - name: Attach to release
@@ -67,7 +82,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          files=("installer/Output/ytm-rs-setup-$VERSION.exe" "installer/Output/ytm-rs-portable-$VERSION.zip")
+          files=("installer/Output/ytm-rs-setup-$VERSION.exe" "installer/Output/ytm-rs-portable-$VERSION.zip"
+                 "installer/Output/ytm-rs-setup-$VERSION-arm64.exe" "installer/Output/ytm-rs-portable-$VERSION-arm64.zip")
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
             gh release edit "$GITHUB_REF_NAME" --draft=false --latest

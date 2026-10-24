@@ -16,8 +16,10 @@ use serde_json::Value;
 const BIN: &str = "yt-dlp.exe";
 #[cfg(not(windows))]
 const BIN: &str = "yt-dlp";
-#[cfg(windows)]
+#[cfg(all(windows, not(target_arch = "aarch64")))]
 const URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
+#[cfg(all(windows, target_arch = "aarch64"))]
+const URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_arm64.exe";
 #[cfg(target_os = "macos")]
 const URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
 #[cfg(all(unix, not(target_os = "macos")))]

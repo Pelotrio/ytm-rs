@@ -554,11 +554,17 @@ void main(){
   cached("ytmrs-release", `https://api.github.com/repos/${REPO}/releases/latest`).then((rel) => {
     if (!rel || !rel.tag_name) return;
     $$("[data-version]").forEach((el) => (el.textContent = rel.tag_name));
-    const exe = (rel.assets || []).find((a) => /setup.*\.exe$/i.test(a.name));
-    if (exe) {
+    const assets = rel.assets || [];
+    const x64 = assets.find((a) => /setup-[\d.]+\.exe$/i.test(a.name));
+    const arm = assets.find((a) => /setup-[\d.]+-arm64\.exe$/i.test(a.name));
+    const show = (exe) => {
+      if (!exe) return;
       $$("[data-dl-direct]").forEach((a) => (a.href = exe.browser_download_url));
       $$("[data-size]").forEach((el) => (el.textContent = `${(exe.size / 1048576).toFixed(1)} MB`));
-    }
+    };
+    show(x64);
+    // ARM64 Windows gets the native build (Chromium reports the CPU; elsewhere x64, which runs emulated).
+    navigator.userAgentData?.getHighEntropyValues?.(["architecture"]).then((h) => { if (h.architecture === "arm") show(arm); }).catch(() => {});
     if (rel.published_at) {
       const d = new Date(rel.published_at);
       $$("[data-date]").forEach((el) => (el.textContent = d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })));
