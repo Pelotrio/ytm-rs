@@ -118,6 +118,16 @@ cargo build --release
 
 The built application is at `target\release\ytm-rs.exe`.
 
+On Linux (Debian/Ubuntu package names), install the libraries first:
+
+```sh
+sudo apt install build-essential pkg-config libssl-dev libasound2-dev libgtk-3-dev \
+  libwebkit2gtk-4.1-dev libxdo-dev libayatana-appindicator3-dev libdbus-1-dev
+cargo build --release
+```
+
+The built application is at `target/release/ytm-rs`.
+
 The Listen together relay in `server/` is a separate Cloudflare Worker, also in Rust ([workers-rs](https://github.com/cloudflare/workers-rs)). You don't need it to build or run the app, which connects to the hosted relay. To run it locally, start `npx wrangler dev --local` in `server/` and launch the app with `YTM_JAM_SERVER=ws://127.0.0.1:8787`.
 
 ## Notes

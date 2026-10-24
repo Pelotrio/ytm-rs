@@ -4,6 +4,20 @@ version = "0.2.22"
 edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/grapedjuice/ytm-rs"
+description = "Native YouTube Music client"
+
+# The Linux .deb (cargo deb). Library dependencies come from the binary; the tray's
+# appindicator is loaded at run time, so it's listed by hand.
+[package.metadata.deb]
+maintainer = "grapedjuice"
+section = "sound"
+depends = "$auto, libayatana-appindicator3-1"
+assets = [
+    ["target/release/ytm-rs", "usr/bin/", "755"],
+    ["linux/ytm-rs.desktop", "usr/share/applications/", "644"],
+    ["assets/icon/icon.png", "usr/share/icons/hicolor/256x256/apps/ytm-rs.png", "644"],
+    ["README.md", "usr/share/doc/ytm-rs/", "644"],
+]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -48,6 +62,13 @@ unicode-normalization = "0.1.26"
 # Windows Credential Manager, for the Google and Spotify sign-ins.
 keyring = { version = "3.6.3", features = ["windows-native"] }
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Registry", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The Secret Service (GNOME Keyring, KWallet) for the sign-ins.
+keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust"] }
+# The tray icon needs GTK running on a thread of its own.
+gtk = "0.18"
+libc = "0.2"
 
 [profile.release]
 opt-level = 3
