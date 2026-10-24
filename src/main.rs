@@ -162,6 +162,14 @@ fn main() -> eframe::Result {
             }
             let media = media::Media::new(hwnd(cc), media_tx, wake);
 
+            // Which GL driver this is, for reports of drawing problems (Windows on ARM runs
+            // GL through Mesa's D3D12 layer).
+            if let Some(gl) = &cc.gl {
+                use eframe::glow::HasContext;
+                // SAFETY: plain string queries on the current context.
+                let (renderer, version) = unsafe { (gl.get_parameter_string(eframe::glow::RENDERER), gl.get_parameter_string(eframe::glow::VERSION)) };
+                log::info!("gl: {renderer} ({version})");
+            }
             // The animated background needs the GL context; without it the UI falls back
             // to a flat gradient.
             let bg = cc.gl.as_ref().filter(|_| std::env::var_os("YTM_NO_SHADER").is_none()).and_then(|gl| {
