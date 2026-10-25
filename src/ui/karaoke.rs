@@ -779,7 +779,7 @@ impl View {
         let ppp = ctx.pixels_per_point();
         // Cached per position, so a moved or resized view re-renders it.
         let key = (hash(("text-glow", at.x.round() as i32, at.y.round() as i32, g.job.text.as_str())), usize::MAX);
-        self.glow.blurred_line(ctx, key, blur / 2.0, &[], &[(g, at, 1.0)], atlas, ppp)
+        self.glow.blurred_line(ctx, key, blur / 2.0, &[], &[(g, at, 1.0)], &[], 1.0, atlas, ppp)
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, f: Frame) -> Out {
@@ -1057,8 +1057,13 @@ impl View {
                     })
                     .collect();
                 let words: Vec<(&Word, f32)> = b.words.iter().map(|w| (w, if w.bg { dim * 0.78 } else { dim })).chain(deco_words).collect();
-                if let Some((tex, rr, uv)) = self.glow.blurred_line(&ctx, (f.key, i), r, &words, &texts, atlas, ppp) {
-                    painter.image(tex, xf.rect(rr), uv, theme::with_alpha(Color32::WHITE, opacity));
+                // The romanization pill is part of the line, so it's blurred with it.
+                let pills: Vec<(Rect, f32)> = b.decos.iter().filter(|d| d.pill).map(|d| (d.rect, cfg.rem())).collect();
+                if let Some((tex, rr, uv)) = self.glow.blurred_line(&ctx, (f.key, i), r, &words, &texts, &pills, scale, atlas, ppp) {
+                    // Rendered at the line's scale; snapped so it lands 1:1 on screen pixels.
+                    let to = xf.rect(rr);
+                    let snapped = (to.min.to_vec2() * ppp).round() / ppp;
+                    painter.image(tex, to.translate(snapped - to.min.to_vec2()), uv, theme::with_alpha(Color32::WHITE, opacity));
                 }
                 animating |= st.exit.is_some();
             } else {
@@ -1685,6 +1690,7 @@ fn paint_words(
                 word: word_box,
                 by_letter: w.letters,
                 radius: look.glow * xf.scale,
+                pills: Vec::new(),
                 color: theme::with_alpha(cfg.glow, look.glow_alpha * look.opacity * opacity),
                 look,
                 layer: painter.add(Shape::Noop),
@@ -1707,6 +1713,9 @@ pub struct GlowJob {
     by_letter: bool,
     /// Blur radius in points (CSS: std deviation = radius / 2).
     radius: f32,
+    /// Romanization pills under the text (box, corner radius): `rgba(255,255,255,.05)` with
+    /// a 1px `rgba(255,255,255,.1)` border.
+    pills: Vec<(Rect, f32)>,
     color: Color32,
     /// Placeholder in the paint list, under the word's lit text.
     layer: ShapeIdx,
@@ -1735,13 +1744,17 @@ impl Slot {
     }
 }
 
+/// A blurred line's radius in 1/4 px and scale in 1/1000.
+type LineStep = (i32, i32);
+
 #[derive(Default)]
 struct Glow {
     /// A copy of the font atlas, refreshed when glyphs we need aren't in it yet.
     atlas: Option<Arc<Coverage>>,
     textures: HashMap<(u64, usize, u32, u32), (Slot, f64)>,
-    /// Per line: its blurred image, the radius (in 1/4 px) it was drawn at, where it goes.
-    lines: HashMap<(u64, usize), (Slot, i32, Rect, f64)>,
+    /// Per line: its blurred image, the radius (in 1/4 px) and scale (in 1/1000) it was
+    /// drawn at, where it goes.
+    lines: HashMap<(u64, usize), (Slot, LineStep, Rect, f64)>,
     spare: Vec<Slot>,
     scratch: Vec<f32>,
     note: Option<(usize, Arc<Vec<f32>>)>,
@@ -1836,15 +1849,27 @@ impl Glow {
         }
     }
 
-    /// A whole line blurred (`filter: blur()`): its words, each at its own alpha, and its
-    /// text decorations, in content coordinates. Cached per line at its latest radius.
+    /// A whole line blurred (`filter: blur()`): its words, each at its own alpha, its text
+    /// decorations and pills, in content coordinates, rendered at the line's `scale` so the
+    /// image isn't resampled on screen. Cached per line at its latest radius and scale.
     #[allow(clippy::too_many_arguments)]
-    fn blurred_line(&mut self, ctx: &egui::Context, key: (u64, usize), radius: f32, words: &[(&Word, f32)], texts: &[(Arc<Galley>, Pos2, f32)], atlas_size: [usize; 2], ppp: f32) -> Option<(TextureId, Rect, Rect)> {
+    fn blurred_line(
+        &mut self,
+        ctx: &egui::Context,
+        key: (u64, usize),
+        radius: f32,
+        words: &[(&Word, f32)],
+        texts: &[(Arc<Galley>, Pos2, f32)],
+        pills: &[(Rect, f32)],
+        scale: f32,
+        atlas_size: [usize; 2],
+        ppp: f32,
+    ) -> Option<(TextureId, Rect, Rect)> {
         if dev_off("blur") {
             return None;
         }
         let now = ctx.input(|i| i.time);
-        let step = (radius * 4.0) as i32;
+        let step = ((radius * 4.0) as i32, (scale * 1000.0).round() as i32);
         if let Some((s, r, rect, used)) = self.lines.get_mut(&key)
             && *r == step
         {
@@ -1891,10 +1916,11 @@ impl Glow {
             by_letter: false,
             // CSS `blur(r)` is a Gaussian with σ = r.
             radius: radius * 2.0,
+            pills: pills.to_vec(),
             color: Color32::WHITE,
             layer: ShapeIdx(0),
         };
-        let (img, content_rect) = rasterize_glow(&atlas, &job, ppp, &mut self.scratch)?;
+        let (img, content_rect) = rasterize_glow(&atlas, &job, ppp * scale, &mut self.scratch)?;
         let old = self.lines.remove(&key).map(|(s, ..)| s);
         let slot = self.upload(ctx, old, img, "lyric-blur");
         let out = (slot.tex.id(), content_rect, slot.uv());
@@ -1927,11 +1953,12 @@ fn glyph_blank(a: &Coverage, uv: Rect) -> bool {
 }
 
 /// The lit glyph pixels (coverage × gradient) blurred: CSS `drop-shadow(0 0 r color)`
-/// is a Gaussian with σ = r / 2 of the element's alpha, drawn under it.
+/// is a Gaussian with σ = r / 2 of the element's alpha, drawn under it. `ppp`: bitmap
+/// pixels per unit of the quads' coordinates.
 fn rasterize_glow(atlas: &Coverage, j: &GlowJob, ppp: f32, scratch: &mut Vec<f32>) -> Option<(ColorImage, Rect)> {
     let sigma = (j.radius * 0.5 * ppp).max(0.3);
     let pad = (sigma * 3.0).ceil() + 2.0;
-    let bounds = j.quads.iter().fold(Rect::NOTHING, |a, q| a.union(q.0));
+    let bounds = j.quads.iter().map(|q| q.0).chain(j.pills.iter().map(|p| p.0)).fold(Rect::NOTHING, |a, r| a.union(r));
     if !bounds.is_positive() {
         return None;
     }
@@ -1943,6 +1970,9 @@ fn rasterize_glow(atlas: &Coverage, j: &GlowJob, ppp: f32, scratch: &mut Vec<f32
     }
     scratch.clear();
     scratch.resize(w * h, 0.0);
+    for &(r, radius) in &j.pills {
+        paint_pill(scratch, w, h, (r.min - origin) * ppp, r.size() * ppp, radius * ppp, ppp);
+    }
     let (aw, ah) = (atlas.size[0] as f32, atlas.size[1] as f32);
     for &(r, uv, letter, letters, weight) in &j.quads {
         let (alpha, _) = lit_gradient(&r, letter, letters, j.word, &j.look, j.by_letter);
@@ -1960,12 +1990,23 @@ fn rasterize_glow(atlas: &Coverage, j: &GlowJob, ppp: f32, scratch: &mut Vec<f32
         let dh = r.height() * ppp;
         let (ix0, iy0) = (dx0.floor().max(0.0) as usize, dy0.floor().max(0.0) as usize);
         let (ix1, iy1) = (((dx0 + dw).ceil() as usize).min(w), ((dy0 + dh).ceil() as usize).min(h));
+        // Bilinear, with nothing outside the glyph's own texels: at another scale than the
+        // atlas's, nearest-texel picks drop or double rows and the edges go jagged.
+        let texel = |x: isize, y: isize| -> f32 {
+            if x < 0 || y < 0 || x >= tw || y >= th {
+                return 0.0;
+            }
+            atlas.alpha.get((ty0 + y) as usize * atlas.size[0] + (tx0 + x) as usize).map_or(0.0, |&p| p as f32 / 255.0)
+        };
         for y in iy0..iy1 {
-            let sy = ty0 + (((y as f32 + 0.5 - dy0) / dh * th as f32).floor() as isize).clamp(0, th - 1);
+            let fy = (y as f32 + 0.5 - dy0) / dh * th as f32 - 0.5;
+            let (sy, ky) = (fy.floor() as isize, fy - fy.floor());
             for x in ix0..ix1 {
-                let sx = tx0 + (((x as f32 + 0.5 - dx0) / dw * tw as f32).floor() as isize).clamp(0, tw - 1);
-                let Some(&p) = atlas.alpha.get(sy as usize * atlas.size[0] + sx as usize) else { continue };
-                let cov = p as f32 / 255.0;
+                let fx = (x as f32 + 0.5 - dx0) / dw * tw as f32 - 0.5;
+                let (sx, kx) = (fx.floor() as isize, fx - fx.floor());
+                let top = texel(sx, sy) * (1.0 - kx) + texel(sx + 1, sy) * kx;
+                let bottom = texel(sx, sy + 1) * (1.0 - kx) + texel(sx + 1, sy + 1) * kx;
+                let cov = top * (1.0 - ky) + bottom * ky;
                 if cov <= 0.0 {
                     continue;
                 }
@@ -1988,8 +2029,20 @@ fn rasterize_glow(atlas: &Coverage, j: &GlowJob, ppp: f32, scratch: &mut Vec<f32
     Some((img, Rect::from_min_size(origin, vec2(w as f32, h as f32) / ppp)))
 }
 
-/// Gaussian blur by three box passes per axis (what browsers use for large blurs).
+/// Gaussian blur: a true kernel for small σ (Skia's cut-off is 2), else three box passes
+/// per axis (what browsers use for large blurs). Boxes for a σ under 1 come out as one
+/// 3-tap box, which looks blocky instead of soft.
 fn gaussian(buf: &mut [f32], w: usize, h: usize, sigma: f32) {
+    if sigma < 2.0 {
+        let r = (sigma * 3.0).ceil() as usize;
+        let mut k: Vec<f32> = (0..=2 * r).map(|i| (-(i as f32 - r as f32).powi(2) / (2.0 * sigma * sigma)).exp()).collect();
+        let sum: f32 = k.iter().sum();
+        k.iter_mut().for_each(|v| *v /= sum);
+        let mut tmp = vec![0.0f32; buf.len()];
+        convolve(buf, &mut tmp, w, h, &k, true);
+        convolve(&tmp, buf, w, h, &k, false);
+        return;
+    }
     // Box sizes for n = 3 (W3C filter effects / "boxes for gauss").
     let n = 3.0f32;
     let ideal = (12.0 * sigma * sigma / n + 1.0).sqrt();
@@ -2009,6 +2062,49 @@ fn gaussian(buf: &mut [f32], w: usize, h: usize, sigma: f32) {
         }
         box_pass(buf, &mut tmp, w, h, r, true);
         box_pass(&tmp, buf, w, h, r, false);
+    }
+}
+
+/// One axis of a separable kernel (odd length, centred), zero past the edges.
+fn convolve(src: &[f32], dst: &mut [f32], w: usize, h: usize, k: &[f32], horizontal: bool) {
+    let r = (k.len() / 2) as isize;
+    let (n, lines) = if horizontal { (w, h) } else { (h, w) };
+    let at = |line: usize, i: usize| if horizontal { line * w + i } else { i * w + line };
+    for line in 0..lines {
+        for i in 0..n {
+            let mut acc = 0.0;
+            for (j, kv) in k.iter().enumerate() {
+                let s = i as isize + j as isize - r;
+                if s >= 0 && (s as usize) < n {
+                    acc += src[at(line, s as usize)] * kv;
+                }
+            }
+            dst[at(line, i)] = acc;
+        }
+    }
+}
+
+/// A romanization pill into an alpha bitmap, anti-aliased like egui's rect: the 5% fill
+/// with its 1-point 10% border inside (`min`/`size`/`radius` in bitmap pixels).
+fn paint_pill(buf: &mut [f32], w: usize, h: usize, min: Vec2, size: Vec2, radius: f32, ppp: f32) {
+    let radius = radius.min(size.x * 0.5).min(size.y * 0.5);
+    let half = size * 0.5;
+    let centre = min + half;
+    let (x0, y0) = (min.x.floor().max(0.0) as usize, min.y.floor().max(0.0) as usize);
+    let (x1, y1) = (((min.x + size.x).ceil() as usize).min(w), ((min.y + size.y).ceil() as usize).min(h));
+    let over = |d: &mut f32, a: f32| *d = (*d + a - *d * a).min(1.0);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            // Signed distance to the rounded box, negative inside.
+            let p = vec2(x as f32 + 0.5, y as f32 + 0.5) - centre;
+            let q = vec2(p.x.abs(), p.y.abs()) - half + Vec2::splat(radius);
+            let d = vec2(q.x.max(0.0), q.y.max(0.0)).length() + q.x.max(q.y).min(0.0) - radius;
+            let inside = (0.5 - d).clamp(0.0, 1.0);
+            let border = inside - (0.5 - (d + ppp)).clamp(0.0, 1.0);
+            let px = &mut buf[y * w + x];
+            over(px, 0.05 * inside);
+            over(px, 0.1 * border);
+        }
     }
 }
 
