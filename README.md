@@ -6,6 +6,7 @@
   <p>
     <a href="https://grapedjuice.github.io/ytm-rs/">Website</a>
     · <a href="https://github.com/grapedjuice/ytm-rs/releases/latest">Download for Windows</a>
+    · <a href="#install-on-linux">Install on Linux</a>
     · <a href="#features">Features</a>
     · <a href="#build-from-source">Build from source</a>
   </p>
@@ -74,6 +75,16 @@ Download the latest `ytm-rs-setup-<version>.exe` from [GitHub Releases](https://
 
 Once installed, ytm-rs keeps itself up to date. You can turn this off in **Settings → Updates**.
 
+### Install on Linux
+
+Run this in a terminal:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/grapedjuice/ytm-rs/main/linux/install.sh | sh
+```
+
+It installs ytm-rs for your user (no root) in `~/.local/lib/ytm-rs`, with a `ytm-rs` command and an app menu entry, and installs WebKitGTK and the other libraries it needs if they're missing (that step asks for your password). Or download `ytm-rs-<version>-linux-x86_64.tar.gz` from the releases, extract it and run `./install.sh`. Like on Windows, it then keeps itself up to date. Sign-ins are kept in your keyring (GNOME Keyring or KWallet). To uninstall, run `~/.local/lib/ytm-rs/install.sh --uninstall`.
+
 ### Portable
 
 Prefer not to install? Download `ytm-rs-portable-<version>.zip` from the same page, unzip it anywhere and run `ytm-rs.exe`. It keeps its settings in a `data` folder beside the exe (as long as `portable.txt` is there) and updates itself in place. Your sign-in is kept by Windows Credential Manager, so on another PC you sign in again. Opening jam links needs the installed app; in the portable one, type the code on the **Listen together** page.
@@ -117,6 +128,16 @@ cargo build --release
 ```
 
 The built application is at `target\release\ytm-rs.exe`.
+
+On Linux (Debian/Ubuntu package names), install the libraries first:
+
+```sh
+sudo apt install build-essential pkg-config libssl-dev libasound2-dev libgtk-3-dev \
+  libwebkit2gtk-4.1-dev libxdo-dev libayatana-appindicator3-dev libdbus-1-dev
+cargo build --release
+```
+
+The built application is at `target/release/ytm-rs`.
 
 The Listen together relay in `server/` is a separate Cloudflare Worker, also in Rust ([workers-rs](https://github.com/cloudflare/workers-rs)). You don't need it to build or run the app, which connects to the hosted relay. To run it locally, start `npx wrangler dev --local` in `server/` and launch the app with `YTM_JAM_SERVER=ws://127.0.0.1:8787`.
 

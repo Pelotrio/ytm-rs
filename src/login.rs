@@ -120,6 +120,26 @@ pub fn child_main(site: Site, profile_dir: PathBuf) {
 }
 
 /// Delete the webview profile so the next sign-in starts fresh (used on sign-out).
+/// Put the webview in its window. On Linux it goes in the GTK box tao made for it:
+/// wry's plain `build` only works with an X11 window that already exists, and these
+/// start hidden (and Wayland has no such window at all).
+pub trait BuildIn<'a> {
+    fn build_in(self, window: &'a tao::window::Window) -> wry::Result<wry::WebView>;
+}
+
+impl<'a> BuildIn<'a> for WebViewBuilder<'a> {
+    fn build_in(self, window: &'a tao::window::Window) -> wry::Result<wry::WebView> {
+        #[cfg(target_os = "linux")]
+        {
+            use tao::platform::unix::WindowExtUnix;
+            use wry::WebViewBuilderExtUnix;
+            self.build_gtk(window.default_vbox().expect("tao makes a vbox by default"))
+        }
+        #[cfg(not(target_os = "linux"))]
+        self.build(window)
+    }
+}
+
 pub fn forget(profile_dir: &std::path::Path) {
     let _ = std::fs::remove_dir_all(profile_dir);
 }
@@ -141,7 +161,7 @@ fn run(site: Site, profile_dir: PathBuf) -> anyhow::Result<Outcome> {
                 let _ = proxy.send_event(());
             }
         })
-        .build(&window)?;
+        .build_in(&window)?;
 
     let mut outcome = Outcome::Cancelled;
     event_loop.run_return(|event, _, flow| {

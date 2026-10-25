@@ -17,6 +17,8 @@ use tao::platform::run_return::EventLoopExtRunReturn;
 use tao::window::WindowBuilder;
 use wry::{WebContext, WebViewBuilder};
 
+use crate::login::BuildIn;
+
 pub const FLAG: &str = "--turnstile";
 const CHALLENGE: &str = "https://lyrics.api.dacubeking.com/challenge";
 /// How long to wait for an invisible pass before showing the window.
@@ -80,7 +82,7 @@ fn run(profile_dir: PathBuf) -> anyhow::Result<String> {
             let _ = proxy.send_event(req.body().clone());
         })
         .with_url(CHALLENGE)
-        .build(&window)?;
+        .build_in(&window)?;
 
     let started = Instant::now();
     let mut result: anyhow::Result<String> = Err(anyhow::anyhow!("closed before verification finished"));

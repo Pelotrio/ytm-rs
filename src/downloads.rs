@@ -71,18 +71,34 @@ pub fn pick_folder(ctx: &egui::Context) {
 pub fn open_folder() {
     let dir = folder();
     let _ = std::fs::create_dir_all(&dir);
+    #[cfg(windows)]
     let _ = std::process::Command::new("explorer").arg(dir).spawn();
+    #[cfg(not(windows))]
+    let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
 }
 
 /// Open the song's folder in Explorer with the file selected.
 pub fn show_file(path: &Path) {
-    let mut cmd = std::process::Command::new("explorer");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.raw_arg(format!("/select,\"{}\"", path.display()));
+        let _ = std::process::Command::new("explorer").raw_arg(format!("/select,\"{}\"", path.display())).spawn();
     }
-    let _ = cmd.spawn();
+    // Linux: the file manager's ShowItems selects it (Nautilus, Dolphin, Nemo, …);
+    // without one, just open the folder.
+    #[cfg(not(windows))]
+    {
+        let uri = url::Url::from_file_path(path).map(|u| u.to_string()).unwrap_or_default();
+        let shown = std::process::Command::new("dbus-send")
+            .args(["--session", "--print-reply", "--dest=org.freedesktop.FileManager1", "/org/freedesktop/FileManager1", "org.freedesktop.FileManager1.ShowItems"])
+            .arg(format!("array:string:{uri}"))
+            .arg("string:")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !shown && let Some(dir) = path.parent() {
+            let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+        }
+    }
 }
 
 /// The song's file, if it's downloaded and still there.

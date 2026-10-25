@@ -1,11 +1,11 @@
 name: Release
 
-# Builds the Windows installer and the portable zip from the tagged source and
-# attaches them to the GitHub release for that tag. Releases are written as drafts
-# (with notes) and published here only once both are attached, so the app's
-# updater, which reads the latest published release, never sees one without them.
-# If no release exists yet, one is created as a draft to be given notes and
-# published by hand.
+# Builds the Windows installers and portable zips (x64 and ARM64), and the Linux tarball, from
+# the tagged source, then attaches them all to the GitHub release for that tag.
+# Releases are written as drafts (with notes) and published here only once every
+# file is attached, so the app's updater, which reads the latest published release,
+# never sees one without them. If no release exists yet, one is created as a draft
+# to be given notes and published by hand.
 on:
   push:
     tags: ["v*"]
@@ -68,7 +68,7 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
-          name: ytm-rs-${{ env.VERSION }}
+          name: windows
           path: |
             installer/Output/ytm-rs-setup-${{ env.VERSION }}.exe
             installer/Output/ytm-rs-portable-${{ env.VERSION }}.zip
@@ -76,17 +76,63 @@ jobs:
             installer/Output/ytm-rs-portable-${{ env.VERSION }}-arm64.zip
           if-no-files-found: error
 
+  linux:
+    # The oldest supported Ubuntu, so the binary runs on older glibc too.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev libasound2-dev libgtk-3-dev libwebkit2gtk-4.1-dev libxdo-dev libayatana-appindicator3-dev libdbus-1-dev
+
+      - name: Build
+        run: |
+          cargo build --release --locked
+          echo "VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_ENV"
+
+      # The tarball: the binary, install.sh with the launcher and icon it installs,
+      # README and LICENSE. The updater on Linux reads it too.
+      - name: Build tarball
+        run: |
+          dir="ytm-rs-$VERSION-linux-x86_64"
+          mkdir -p "out/$dir"
+          cp target/release/ytm-rs linux/install.sh linux/ytm-rs.desktop README.md LICENSE "out/$dir/"
+          cp assets/icon/icon.png "out/$dir/ytm-rs.png"
+          chmod 755 "out/$dir/ytm-rs" "out/$dir/install.sh"
+          tar -czf "out/$dir.tar.gz" -C out "$dir"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: linux
+          path: |
+            out/ytm-rs-${{ env.VERSION }}-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  attach:
+    if: github.ref_type == 'tag'
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: files
+          merge-multiple: true
+
       - name: Attach to release
-        if: github.ref_type == 'tag'
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          files=("installer/Output/ytm-rs-setup-$VERSION.exe" "installer/Output/ytm-rs-portable-$VERSION.zip"
-                 "installer/Output/ytm-rs-setup-$VERSION-arm64.exe" "installer/Output/ytm-rs-portable-$VERSION-arm64.zip")
+          ls -l files
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+            gh release upload "$GITHUB_REF_NAME" files/* --clobber
             gh release edit "$GITHUB_REF_NAME" --draft=false --latest
           else
-            gh release create "$GITHUB_REF_NAME" "${files[@]}" --draft --title "ytm-rs $VERSION" --notes ""
+            gh release create "$GITHUB_REF_NAME" files/* --draft --title "ytm-rs ${GITHUB_REF_NAME#v}" --notes ""
           fi

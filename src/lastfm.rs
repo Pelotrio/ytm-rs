@@ -232,6 +232,8 @@ fn open_browser(url: &str) {
         use windows::core::{HSTRING, w};
         ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL);
     }
+    #[cfg(not(windows))]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
 #[cfg(test)]
