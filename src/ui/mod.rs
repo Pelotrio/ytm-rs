@@ -87,11 +87,15 @@ pub enum Action {
     QueueRemove(usize),
     Seek(f32),
     Like(String, bool),
+    /// Like (or unlike) a selection of songs.
+    LikeMany(Vec<Track>, bool),
     Dislike(String),
     Share(Target),
-    AddToPlaylist(Track),
+    AddToPlaylist(Vec<Track>),
+    /// Rows (indices into the open playlist) to take out of it.
+    RemoveFromPlaylist(Vec<usize>),
     Download(Track),
-    NewPlaylist(Option<Track>),
+    NewPlaylist(Vec<Track>),
     EditPlaylist,
     DeletePlaylist,
     SaveCollection(String, bool),
@@ -104,10 +108,54 @@ pub enum Action {
 }
 
 enum Dialog {
-    PickPlaylist(Track),
-    NewPlaylist { title: String, track: Option<Track> },
+    PickPlaylist(Vec<Track>),
+    NewPlaylist { title: String, tracks: Vec<Track> },
     EditPlaylist { id: String, title: String, description: String, privacy: Option<String> },
     ConfirmDelete { id: String, title: String },
+}
+
+/// Songs picked in a list for a batch action: Ctrl-click toggles one, Shift-click a range,
+/// or the Select button makes every click pick.
+#[derive(Default)]
+pub struct Selection {
+    /// The page the picks belong to; on any other page there are none.
+    pub page: Option<Page>,
+    /// Row indices into that page's list.
+    pub rows: std::collections::BTreeSet<usize>,
+    pub anchor: Option<usize>,
+    /// Select mode: a plain click picks instead of playing.
+    pub active: bool,
+}
+
+impl Selection {
+    pub fn on(&self, page: &Page) -> bool {
+        self.page.as_ref() == Some(page) && (self.active || !self.rows.is_empty())
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Start select mode on `page` with nothing picked yet.
+    pub fn start(&mut self, page: &Page) {
+        *self = Self { page: Some(page.clone()), active: true, ..Self::default() };
+    }
+
+    /// Toggle row `i`, or with `range` pick every row from the last one toggled to it.
+    pub fn pick(&mut self, page: &Page, i: usize, range: bool) {
+        if self.page.as_ref() != Some(page) {
+            *self = Self { page: Some(page.clone()), ..Self::default() };
+        }
+        match self.anchor.filter(|_| range) {
+            Some(a) => self.rows.extend(a.min(i)..=a.max(i)),
+            None => {
+                if !self.rows.remove(&i) {
+                    self.rows.insert(i);
+                }
+                self.anchor = Some(i);
+            }
+        }
+    }
 }
 
 pub struct HomeState {
@@ -176,6 +224,7 @@ pub struct App {
     /// Files chosen in the upload dialog, handed over from its thread.
     picked_uploads: Arc<std::sync::Mutex<Option<Vec<std::path::PathBuf>>>>,
     liked: HashSet<String>,
+    selection: Selection,
     account_name: Option<String>,
     account_avatar: Option<String>,
     /// Last launch's playlists, shown in the sidebar until the library arrives.
@@ -402,6 +451,7 @@ impl App {
             uploads: None,
             picked_uploads: Default::default(),
             liked: HashSet::new(),
+            selection: Selection::default(),
             account_name: None,
             account_avatar: None,
             sidebar_cache: None,
@@ -1321,6 +1371,25 @@ impl App {
                 }
                 self.backend.request(Req::Like { video_id: id, like });
             }
+            Action::LikeMany(tracks, like) => {
+                if !self.logged_in {
+                    self.toast("Sign in to like songs");
+                    return;
+                }
+                let tracks: Vec<Track> = tracks.into_iter().filter(|t| self.liked.contains(&t.id) != like).collect();
+                if tracks.is_empty() { return; }
+                for t in &tracks {
+                    if like { self.liked.insert(t.id.clone()); } else { self.liked.remove(&t.id); }
+                }
+                if let Some(lib) = &mut self.library {
+                    if like {
+                        for t in tracks.iter().rev() { lib.liked.insert(0, t.clone()); }
+                    } else {
+                        lib.liked.retain(|t| !tracks.iter().any(|x| x.id == t.id));
+                    }
+                }
+                self.backend.request(Req::LikeMany { video_ids: tracks.into_iter().map(|t| t.id).collect(), like });
+            }
             Action::Dislike(id) => {
                 if !self.logged_in { self.toast("Sign in to rate songs"); return; }
                 self.liked.remove(&id);
@@ -1335,12 +1404,30 @@ impl App {
                 self.toast(format!("Downloading \u{201c}{}\u{201d}", track.title));
                 self.backend.request(Req::Download(track));
             }
-            Action::AddToPlaylist(track) => {
-                if self.logged_in { self.dialog = Some(Dialog::PickPlaylist(track)); }
+            Action::AddToPlaylist(tracks) => {
+                if self.logged_in { self.dialog = Some(Dialog::PickPlaylist(tracks)); }
                 else { self.toast("Sign in to edit playlists"); }
             }
-            Action::NewPlaylist(track) => {
-                if self.logged_in { self.dialog = Some(Dialog::NewPlaylist { title: String::new(), track }); }
+            Action::RemoveFromPlaylist(mut rows) => {
+                let Some(c) = self.collection.as_mut().filter(|c| c.owned && !c.is_album) else { return };
+                rows.sort_unstable();
+                rows.dedup();
+                rows.retain(|&i| c.set_ids.get(i).is_some_and(Option::is_some));
+                if rows.is_empty() {
+                    self.toast("YouTube Music didn't say where these songs are in the playlist. Reload it and try again.");
+                    return;
+                }
+                let items = rows.iter().map(|&i| (c.tracks[i].id.clone(), c.set_ids[i].clone().unwrap_or_default())).collect();
+                // Optimistic: drop the rows now; the playlist reloads once YouTube confirms.
+                for &i in rows.iter().rev() {
+                    c.tracks.remove(i);
+                    c.set_ids.remove(i);
+                }
+                self.selection.clear();
+                self.backend.request(Req::RemoveFromPlaylist { playlist_id: c.id.clone(), items });
+            }
+            Action::NewPlaylist(tracks) => {
+                if self.logged_in { self.dialog = Some(Dialog::NewPlaylist { title: String::new(), tracks }); }
                 else { self.toast("Sign in to create playlists"); }
             }
             Action::EditPlaylist => {
@@ -1637,15 +1724,25 @@ impl App {
                     }
                 }
             }
-            Resp::PlaylistCreated { id, had_song } => {
+            Resp::LikedMany { count, like } => {
+                self.toast(format!("{} {count} {}", if like { "Liked" } else { "Removed like from" }, if count == 1 { "song" } else { "songs" }));
+            }
+            Resp::PlaylistCreated { id, songs } => {
                 self.request_library();
-                self.toast(if had_song { "Song added to new playlist" } else { "Playlist created" });
+                self.toast(match songs {
+                    0 => "Playlist created".to_owned(),
+                    1 => "Song added to new playlist".to_owned(),
+                    n => format!("{n} songs added to new playlist"),
+                });
                 self.go(Page::Playlist(id));
             }
             Resp::PlaylistChanged { id, message } => {
                 self.request_library();
+                // A removal already shows (the rows went right away), and a reload this soon
+                // still gets the songs back from YouTube Music.
+                let removed = message == "Removed from playlist";
                 if let Some(id) = id {
-                    if self.page == Page::Playlist(id.clone()) { self.backend.request(Req::Playlist(id)); }
+                    if self.page == Page::Playlist(id.clone()) && !removed { self.backend.request(Req::Playlist(id)); }
                 } else if matches!(self.page, Page::Playlist(_)) {
                     self.go(Page::Library(LibTab::Playlists));
                 }
@@ -1881,9 +1978,9 @@ impl App {
                 ui.label(egui::RichText::new(heading).font(theme::bold(22.0)).color(theme::TEXT));
                 ui.add_space(18.0);
                 match &mut dialog {
-                    Dialog::PickPlaylist(track) => {
+                    Dialog::PickPlaylist(tracks) => {
                         if dialog_row(ui, None, Some(theme::icon::LIST_PLUS), "New playlist") {
-                            self.actions.push(Action::NewPlaylist(Some(track.clone())));
+                            self.actions.push(Action::NewPlaylist(tracks.clone()));
                             done = true;
                         }
                         ui.add_space(6.0);
@@ -1895,14 +1992,15 @@ impl App {
                                 if let Target::Playlist(id) = card.target {
                                     if !id.starts_with("PL") { continue; }
                                     if dialog_row(ui, Some(&card.thumbs), None, &card.title) {
-                                        self.backend.request(Req::AddToPlaylist { playlist_id: id, video_id: track.id.clone() });
+                                        let video_ids = tracks.iter().map(|t| t.id.clone()).collect();
+                                        self.backend.request(Req::AddToPlaylist { playlist_id: id, video_ids });
                                         done = true;
                                     }
                                 }
                             }
                         });
                     }
-                    Dialog::NewPlaylist { title, track } => {
+                    Dialog::NewPlaylist { title, tracks } => {
                         let name = text_field(ui, "Name", title, false, "My playlist");
                         if ui.memory(|m| m.focused().is_none()) { name.request_focus(); }
                         ui.add_space(8.0);
@@ -1911,7 +2009,7 @@ impl App {
                         let enter = name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         let (ok, cancel) = dialog_buttons(ui, "Create", !title.trim().is_empty(), accent);
                         if (ok || enter) && !title.trim().is_empty() {
-                            self.backend.request(Req::CreatePlaylist { title: title.trim().to_owned(), video_id: track.as_ref().map(|t| t.id.clone()) });
+                            self.backend.request(Req::CreatePlaylist { title: title.trim().to_owned(), video_ids: tracks.iter().map(|t| t.id.clone()).collect() });
                             done = true;
                         }
                         done |= cancel;

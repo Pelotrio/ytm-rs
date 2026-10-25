@@ -364,7 +364,7 @@ pub fn card(ui: &mut Ui, c: &Card, width: f32, liked: bool, acts: &mut Vec<Actio
 
 fn card_menu_contents(ui: &mut Ui, c: &Card, liked: bool, acts: &mut Vec<Action>) {
     match &c.target {
-        Target::Song(t) => song_menu(ui, t, liked, acts),
+        Target::Song(t) => song_menu(ui, t, liked, None, acts),
         t => {
             ui.set_width(226.0);
             ui.add_space(3.0);
@@ -414,15 +414,16 @@ fn menu_action(ui: &mut Ui, glyph: Option<char>, label: &str) -> bool {
     response.clicked()
 }
 
-pub fn song_menu(ui: &mut Ui, t: &Track, liked: bool, acts: &mut Vec<Action>) {
+/// `remove`: the song's row in the open playlist, when it's yours and the song can come out.
+pub fn song_menu(ui: &mut Ui, t: &Track, liked: bool, remove: Option<usize>, acts: &mut Vec<Action>) {
     ui.set_width(226.0);
     ui.add_space(3.0);
-    song_actions(ui, t, liked, acts);
+    song_actions(ui, t, liked, remove, acts);
     ui.add_space(3.0);
 }
 
 /// The song menu's items, for menus that add their own (now playing's options).
-pub fn song_actions(ui: &mut Ui, t: &Track, liked: bool, acts: &mut Vec<Action>) {
+pub fn song_actions(ui: &mut Ui, t: &Track, liked: bool, remove: Option<usize>, acts: &mut Vec<Action>) {
     if menu_action(ui, Some(icon::HEART), if liked { "Remove like" } else { "Like song" }) {
         acts.push(Action::Like(t.id.clone(), !liked));
     }
@@ -430,7 +431,12 @@ pub fn song_actions(ui: &mut Ui, t: &Track, liked: bool, acts: &mut Vec<Action>)
         acts.push(Action::Dislike(t.id.clone()));
     }
     if menu_action(ui, Some(icon::LIST_PLUS), "Add to playlist") {
-        acts.push(Action::AddToPlaylist(t.clone()));
+        acts.push(Action::AddToPlaylist(vec![t.clone()]));
+    }
+    if let Some(i) = remove {
+        if menu_action(ui, Some(icon::LIST_MINUS), "Remove from playlist") {
+            acts.push(Action::RemoveFromPlaylist(vec![i]));
+        }
     }
     if menu_action(ui, None, "Copy link") {
         acts.push(Action::Share(Target::Song(t.clone())));
@@ -587,6 +593,10 @@ pub struct RowOpts {
     pub added_by: Option<String>,
     /// Choosing a match for the Spotify transfer: a click picks the song and its cover plays it.
     pub pick: bool,
+    /// Selecting songs: a checkbox leads the row; `Some(true)` when this one is picked.
+    pub selected: Option<bool>,
+    /// The row's index in your own open playlist, so its menu can take it out.
+    pub remove: Option<usize>,
 }
 
 const ROW_H: f32 = 56.0;
@@ -622,6 +632,11 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
         let a = if o.current { 0.07 + 0.05 * h } else { 0.07 * h };
         ui.painter().rect_filled(rect, 8.0, theme::glass(a));
     }
+    // While selecting, the cover only shows the song (clicks pick) and picked rows are tinted.
+    let h = if o.selected.is_some() { 0.0 } else { h };
+    if o.selected == Some(true) {
+        ui.painter().rect_filled(rect, 8.0, theme::with_alpha(o.accent, 0.14));
+    }
     if o.pick {
         let p = theme::anim_bool(ui.ctx(), base.id.with("p"), resp.hovered(), 0.12);
         if p > 0.0 {
@@ -630,6 +645,10 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
     }
     let mut x = rect.left() + 10.0;
     let cy = rect.center().y;
+    if let Some(on) = o.selected {
+        checkbox(ui, pos2(x + 9.0, cy), on);
+        x += 30.0;
+    }
     if let Some(n) = o.number {
         let slot = Rect::from_center_size(pos2(x + 12.0, cy), vec2(24.0, 24.0));
         if o.current {
@@ -715,8 +734,21 @@ pub fn track_row(ui: &mut Ui, t: &Track, o: &RowOpts, acts: &mut Vec<Action>) ->
     }
     let more_rect = Rect::from_center_size(pos2(rect.right() - 20.0, cy), Vec2::splat(30.0));
     let more = more_button(ui, more_rect, base.id.with("more"), "Song options");
-    egui::Popup::menu(&more).show(|ui| song_menu(ui, t, o.liked, acts));
+    egui::Popup::menu(&more).show(|ui| song_menu(ui, t, o.liked, o.remove, acts));
+    // Right-click anywhere on the row opens the same menu.
+    egui::Popup::context_menu(&resp).show(|ui| song_menu(ui, t, o.liked, o.remove, acts));
     resp
+}
+
+/// An 18 px tick box centred on `c`, white like a primary pill when ticked.
+fn checkbox(ui: &Ui, c: Pos2, on: bool) {
+    let r = Rect::from_center_size(c, Vec2::splat(18.0));
+    if on {
+        ui.painter().rect_filled(r, 5.0, theme::TEXT);
+        icon_at(ui, c, icon::CHECK, 13.0, Color32::from_gray(12));
+    } else {
+        ui.painter().rect_stroke(r, 5.0, egui::Stroke::new(1.5, theme::text_dim()), egui::StrokeKind::Inside);
+    }
 }
 
 /// Section header with optional strapline/avatar and ‹ › scroll arrows.

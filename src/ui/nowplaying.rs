@@ -493,7 +493,7 @@ fn options_menu(app: &mut App, ui: &mut Ui, track: &crate::model::Track, lyrics:
             menu_divider(ui);
         }
         let liked = app.liked.contains(&track.id);
-        widgets::song_actions(ui, track, liked, &mut app.actions);
+        widgets::song_actions(ui, track, liked, None, &mut app.actions);
         ui.add_space(4.0);
     });
 }

@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use egui::{Align2, Color32, Rect, RichText, Sense, Ui, Vec2, pos2, vec2};
 
 use super::widgets::{self, RowOpts, card, chip, h_scroll, named, paint_cover, pill, shelf_header, track_row};
-use super::{Action, App, LibTab, Page};
+use super::{Action, App, LibTab, Page, Selection};
 use crate::backend::compact;
 use crate::model::{Card, ShelfKind, Target, Track};
 use crate::theme::{self, icon};
@@ -43,6 +43,7 @@ pub fn page(app: &mut App, ui: &mut Ui, now: f64) {
         }
         ui.add_space(40.0);
     });
+    selection_bar(app, ui.ctx(), &page, out.inner_rect);
     // Infinite scroll on home: fetch the next shelves when nearing the bottom.
     if page == Page::Home {
         let remaining = out.content_size.y - (out.state.offset.y + out.inner_rect.height());
@@ -90,6 +91,8 @@ impl Rows {
             liked: liked.contains(&t.id),
             added_by: None,
             pick: false,
+            selected: None,
+            remove: None,
         }
     }
 }
@@ -167,15 +170,122 @@ fn song_grid(ui: &mut Ui, rows_ctx: &Rows, liked: &HashSet<String>, acts: &mut V
     reached_end
 }
 
-/// A long song list; only the rows on screen are built. Clicking one plays `tracks` from it.
-fn list(ui: &mut Ui, rows: &Rows, liked: &HashSet<String>, tracks: &[Track], show_album: bool, number: impl Fn(usize, &Track) -> Option<usize>, acts: &mut Vec<Action>) {
+/// Where a song list lives: the page its selection belongs to, and whether it's your own
+/// playlist (so songs can be taken out of it).
+struct ListCtx<'a> {
+    sel: &'a mut Selection,
+    page: &'a Page,
+    own: bool,
+}
+
+/// A long song list; only the rows on screen are built. Clicking one plays `tracks` from it,
+/// or picks it while selecting: Ctrl-click picks one song, Shift-click a run of them.
+fn list(ui: &mut Ui, rows: &Rows, liked: &HashSet<String>, tracks: &[Track], show_album: bool, number: impl Fn(usize, &Track) -> Option<usize>, cx: ListCtx, acts: &mut Vec<Action>) {
+    let ListCtx { sel, page, own } = cx;
+    let selecting = sel.on(page);
+    let mods = ui.input(|i| i.modifiers);
     widgets::visible_rows(ui, tracks.len(), |ui, i| {
         let t = &tracks[i];
-        let o = rows.opts(liked, t, number(i, t), show_album);
+        let o = RowOpts {
+            selected: selecting.then(|| sel.rows.contains(&i)),
+            remove: own.then_some(i),
+            ..rows.opts(liked, t, number(i, t), show_album)
+        };
         if track_row(ui, t, &o, acts).clicked() {
-            acts.push(Action::Play(tracks.to_vec(), i));
+            if selecting || mods.command || mods.shift {
+                sel.pick(page, i, mods.shift);
+            } else {
+                acts.push(Action::Play(tracks.to_vec(), i));
+            }
         }
     });
+}
+
+/// A list page's "Select" button: turns select mode on and off.
+fn select_pill(ui: &mut Ui, sel: &mut Selection, page: &Page) {
+    let on = sel.on(page);
+    if pill(ui, if on { "Done" } else { "Select" }, Some(icon::LIST_CHECKS), false).clicked() {
+        if on { sel.clear() } else { sel.start(page) }
+    }
+}
+
+/// The songs a page lists, and whether they're your own playlist's.
+fn selectable<'a>(app: &'a App, page: &Page) -> Option<(&'a [Track], bool)> {
+    match page {
+        Page::Album(id) | Page::Playlist(id) => {
+            app.collection.as_ref().filter(|c| &c.id == id).map(|c| (c.tracks.as_slice(), app.logged_in && c.owned && !c.is_album))
+        }
+        Page::Library(LibTab::Songs) => app.library.as_ref().map(|l| (l.liked.as_slice(), false)),
+        Page::Library(LibTab::History) => app.history.as_deref().map(|h| (h, false)),
+        Page::Library(LibTab::Uploads) => app.uploads.as_deref().map(|u| (u, false)),
+        _ => None,
+    }
+}
+
+/// While selecting: a bar floating over the bottom of the page with what to do with the picks.
+fn selection_bar(app: &mut App, ctx: &egui::Context, page: &Page, area: Rect) {
+    if !app.selection.on(page) {
+        return;
+    }
+    let Some((tracks, own)) = selectable(app, page) else { return };
+    let n = tracks.len();
+    let picked: Vec<Track> = app.selection.rows.iter().filter_map(|&i| tracks.get(i).cloned()).collect();
+    let all = !picked.is_empty() && picked.len() == n;
+    let all_liked = !picked.is_empty() && picked.iter().all(|t| app.liked.contains(&t.id));
+    // Labelled buttons when there's room, icons with tooltips when the window is narrow.
+    let wide = area.width() > 820.0;
+    let button = |ui: &mut Ui, label: &str, glyph: char, primary: bool| {
+        if wide { pill(ui, label, Some(glyph), primary) } else { widgets::icon_button(ui, glyph, 18.0, label, false) }
+    };
+    let mut acts = Vec::new();
+    let mut toggle_all = false;
+    let mut done = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+    egui::Area::new("selection-bar".into())
+        .order(egui::Order::Foreground)
+        .pivot(Align2::CENTER_BOTTOM)
+        .fixed_pos(pos2(area.center().x, area.bottom() - 18.0))
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(Color32::from_rgb(38, 34, 42))
+                .corner_radius(14)
+                .inner_margin(egui::Margin { left: 20, right: 10, top: 8, bottom: 8 })
+                .shadow(egui::epaint::Shadow { offset: [0, 8], blur: 24, spread: 0, color: theme::shade(0.45) })
+                .show(ui, |ui| {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        let count = if picked.is_empty() { "Select songs".to_owned() } else { format!("{} selected", picked.len()) };
+                        ui.label(RichText::new(count).font(theme::semibold(14.0)).color(theme::TEXT));
+                        ui.add_space(10.0);
+                        if !picked.is_empty() {
+                            if button(ui, "Add to playlist", icon::LIST_PLUS, true).clicked() {
+                                acts.push(Action::AddToPlaylist(picked.clone()));
+                            }
+                            if own && button(ui, "Remove from playlist", icon::LIST_MINUS, false).clicked() {
+                                acts.push(Action::RemoveFromPlaylist(app.selection.rows.iter().copied().collect()));
+                            }
+                            if button(ui, if all_liked { "Remove like" } else { "Like" }, icon::HEART, false).clicked() {
+                                acts.push(Action::LikeMany(picked.clone(), !all_liked));
+                            }
+                            if button(ui, "Add to queue", icon::LIST_MUSIC, false).clicked() {
+                                acts.extend(picked.iter().cloned().map(Action::Enqueue));
+                            }
+                        }
+                        toggle_all = button(ui, if all { "Select none" } else { "Select all" }, icon::LIST_CHECKS, false).clicked();
+                        done |= widgets::icon_button(ui, icon::X, 18.0, "Done selecting", false).clicked();
+                    });
+                });
+        });
+    if toggle_all {
+        let page = page.clone();
+        app.selection.start(&page);
+        if !all {
+            app.selection.rows = (0..n).collect();
+        }
+    }
+    if done || !acts.is_empty() {
+        app.selection.clear();
+    }
+    app.actions.extend(acts);
 }
 
 // ------------------------------------------------------------------ home
@@ -403,8 +513,9 @@ fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
                 ui.label(g);
             }
             ui.add_space(16.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
+            // Wraps on narrow windows, where your own playlist's buttons don't fit on one line.
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
                 let target = if is_album { Target::Album(id.to_owned()) } else { Target::Playlist(id.to_owned()) };
                 play_pill(ui, acts, &target, tracks);
                 if pill(ui, "Shuffle", Some(icon::SHUFFLE), false).clicked() && !tracks.is_empty() {
@@ -419,6 +530,9 @@ fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
                 }
                 if pill(ui, "Share", None, false).clicked() {
                     acts.push(Action::Share(target.clone()));
+                }
+                if !tracks.is_empty() {
+                    select_pill(ui, &mut app.selection, &app.page);
                 }
                 // Liked Music and Episodes for later are the account's own lists: they can't be
                 // saved, removed, edited or deleted.
@@ -446,7 +560,8 @@ fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
     });
     ui.add_space(26.0);
     let number = |i: usize, t: &Track| is_album.then(|| t.track_nr.map_or(i + 1, |n| n as usize));
-    list(ui, &rows, &app.liked, tracks, !is_album, number, acts);
+    let own = app.logged_in && c.owned && !is_album;
+    list(ui, &rows, &app.liked, tracks, !is_album, number, ListCtx { sel: &mut app.selection, page: &app.page, own }, acts);
 }
 
 // ------------------------------------------------------------------ artist
@@ -572,7 +687,7 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
                 return;
             }
             let Some(h) = &app.history else { return };
-            list(ui, &rows, &app.liked, h, true, plain, &mut app.actions);
+            list(ui, &rows, &app.liked, h, true, plain, ListCtx { sel: &mut app.selection, page: &app.page, own: false }, &mut app.actions);
         }
         LibTab::Uploads => {
             ui.horizontal(|ui| {
@@ -597,7 +712,7 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
                 ui.add_space(20.0);
                 ui.label(RichText::new("No uploads yet").color(theme::text_dim()));
             }
-            list(ui, &rows, &app.liked, up, true, plain, &mut app.actions);
+            list(ui, &rows, &app.liked, up, true, plain, ListCtx { sel: &mut app.selection, page: &app.page, own: false }, &mut app.actions);
         }
         _ => {
             if app.library.is_none() {
@@ -608,7 +723,7 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
             match tab {
                 LibTab::Playlists => {
                     if pill(ui, "New playlist", None, false).clicked() {
-                        app.actions.push(Action::NewPlaylist(None));
+                        app.actions.push(Action::NewPlaylist(Vec::new()));
                     }
                     ui.add_space(14.0);
                     grid(ui, &lib.playlists, &mut app.actions)
@@ -626,10 +741,11 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
                                 super::shuffle(&mut t);
                                 app.actions.push(Action::Play(t, 0));
                             }
+                            select_pill(ui, &mut app.selection, &app.page);
                         });
                         ui.add_space(10.0);
                     }
-                    list(ui, &rows, &app.liked, liked, true, plain, &mut app.actions);
+                    list(ui, &rows, &app.liked, liked, true, plain, ListCtx { sel: &mut app.selection, page: &app.page, own: false }, &mut app.actions);
                 }
                 LibTab::History | LibTab::Uploads => unreachable!(),
             }

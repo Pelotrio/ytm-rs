@@ -149,6 +149,7 @@ fn parse_album(v: &Value, id: &str) -> Option<Collection> {
         description: text(&h["description"]["musicDescriptionShelfRenderer"]["description"]),
         thumbs,
         tracks,
+        set_ids: Vec::new(),
         owned: false,
     })
 }
@@ -162,14 +163,16 @@ pub async fn playlist(api: &Api, id: &str, auth: bool, limit: usize) -> anyhow::
     while pl.tracks.len() < limit {
         let Some(t) = token.take() else { break };
         let v = api.call("browse", json!({ "continuation": t }), auth).await?;
-        let (more, next) = playlist_continuation(&v);
+        let (more, ids, next) = playlist_continuation(&v);
         if more.is_empty() {
             break;
         }
         pl.tracks.extend(more);
+        pl.set_ids.extend(ids);
         token = next;
     }
     pl.tracks.truncate(limit);
+    pl.set_ids.truncate(limit);
     Ok(pl)
 }
 
@@ -179,7 +182,7 @@ fn parse_playlist(v: &Value, id: &str) -> Option<(Collection, Option<String>, Op
     let h = header(two)?;
     let shelf = &two["secondaryContents"]["sectionListRenderer"]["contents"][0];
     let shelf = if shelf["musicPlaylistShelfRenderer"].is_null() { &shelf["musicShelfRenderer"] } else { &shelf["musicPlaylistShelfRenderer"] };
-    let (tracks, token) = list_page(arr(&shelf["contents"]));
+    let (tracks, set_ids, token) = list_page(arr(&shelf["contents"]));
     let token = token.or_else(|| continuation(shelf));
     // The owner: a channel avatar row on newer pages, a strapline on older ones.
     let face = &h["facepile"]["avatarStackViewModel"];
@@ -207,6 +210,7 @@ fn parse_playlist(v: &Value, id: &str) -> Option<(Collection, Option<String>, Op
             description: text(&h["description"]["musicDescriptionShelfRenderer"]["description"]),
             thumbs: thumbs(thumb),
             tracks,
+            set_ids,
             owned: owned(two),
         },
         token,
@@ -227,20 +231,27 @@ fn owned(two: &Value) -> bool {
     !two["tabs"][0]["tabRenderer"]["content"]["sectionListRenderer"]["contents"][0]["musicEditablePlaylistDetailHeaderRenderer"].is_null()
 }
 
-fn playlist_continuation(v: &Value) -> (Vec<Track>, Option<String>) {
+fn playlist_continuation(v: &Value) -> (Vec<Track>, Vec<Option<String>>, Option<String>) {
     let items = &v["onResponseReceivedActions"][0]["appendContinuationItemsAction"]["continuationItems"];
     if !items.is_null() {
         return list_page(arr(items));
     }
     let shelf = &v["continuationContents"]["musicPlaylistShelfContinuation"];
-    let (tracks, token) = list_page(arr(&shelf["contents"]));
-    (tracks, token.or_else(|| continuation(shelf)))
+    let (tracks, ids, token) = list_page(arr(&shelf["contents"]));
+    (tracks, ids, token.or_else(|| continuation(shelf)))
 }
 
-/// Song rows, and the token for the next page when the list continues.
-fn list_page(items: &[Value]) -> (Vec<Track>, Option<String>) {
-    let tracks = items.iter().filter_map(|i| list_item(&i["musicResponsiveListItemRenderer"])).collect();
-    (tracks, item_token(items))
+/// Song rows, each one's playlist entry id (`setVideoId`, what removing it takes), and the
+/// token for the next page when the list continues.
+fn list_page(items: &[Value]) -> (Vec<Track>, Vec<Option<String>>, Option<String>) {
+    let (tracks, ids) = items
+        .iter()
+        .filter_map(|i| {
+            let r = &i["musicResponsiveListItemRenderer"];
+            Some((list_item(r)?, r["playlistItemData"]["playlistSetVideoId"].as_str().map(str::to_owned)))
+        })
+        .unzip();
+    (tracks, ids, item_token(items))
 }
 
 // ----------------------------------------------------------------------- artists
@@ -334,7 +345,8 @@ fn panel_page(panel: &Value) -> (Vec<Track>, Option<String>) {
         .iter()
         .filter_map(|i| {
             let wrapped = &i["playlistPanelVideoWrapperRenderer"]["primaryRenderer"]["playlistPanelVideoRenderer"];
-            panel_item(if wrapped.is_null() { &i["playlistPanelVideoRenderer"] } else { wrapped })
+            let r = if wrapped.is_null() { &i["playlistPanelVideoRenderer"] } else { wrapped };
+            if is_video(r) { None } else { panel_item(r) }
         })
         .collect();
     let token = panel["continuations"][0]["nextRadioContinuationData"]["continuation"].as_str().map(str::to_owned);
@@ -359,7 +371,7 @@ fn parse_charts(v: &Value) -> Charts {
     let mut c = Charts { top: Vec::new(), playlists: Vec::new(), artists: Vec::new() };
     let sections = &v["contents"]["singleColumnBrowseResultsRenderer"]["tabs"][0]["tabRenderer"]["content"]["sectionListRenderer"]["contents"];
     for s in arr(sections) {
-        for i in arr(&s["musicCarouselShelfRenderer"]["contents"]) {
+        for i in arr(&s["musicCarouselShelfRenderer"]["contents"]).iter().filter(|i| !is_video(i)) {
             if let Some(card) = two_row(&i["musicTwoRowItemRenderer"]) {
                 if matches!(card.target, Target::Playlist(_)) {
                     c.playlists.push(card);
@@ -601,10 +613,10 @@ pub async fn edit_playlist(api: &Api, id: &str, title: &str, description: &str, 
     Ok(())
 }
 
-pub async fn add_to_playlist(api: &Api, playlist_id: &str, video_id: &str) -> anyhow::Result<()> {
-    write(api, "browse/edit_playlist", json!({"playlistId": playlist_id, "actions": [
-        {"action": "ACTION_ADD_VIDEO", "addedVideoId": video_id, "dedupeOption": "DEDUPE_OPTION_SKIP"}
-    ]})).await?;
+/// Take entries out of a playlist, `(videoId, setVideoId)` pairs, in one request.
+pub async fn remove_videos(api: &Api, playlist_id: &str, items: &[(String, String)]) -> anyhow::Result<()> {
+    let actions: Vec<Value> = items.iter().map(|(v, set)| json!({"action": "ACTION_REMOVE_VIDEO", "removedVideoId": v, "setVideoId": set})).collect();
+    write(api, "browse/edit_playlist", json!({"playlistId": playlist_id, "actions": actions})).await?;
     Ok(())
 }
 
@@ -642,7 +654,7 @@ fn shelf(s: &Value) -> Option<Shelf> {
     let title = text(&h["title"])?;
     let strapline = text(&h["strapline"]);
     let strap_thumb = thumbs(&h["thumbnail"]["musicThumbnailRenderer"]).into_iter().next().map(|t| t.url);
-    let items = arr(&r["contents"]);
+    let items: Vec<&Value> = arr(&r["contents"]).iter().filter(|i| !is_video(i)).collect();
     let kind = if items.iter().any(|i| !i["musicResponsiveListItemRenderer"].is_null()) {
         let tracks: Vec<Track> = items.iter().filter_map(|i| list_item(&i["musicResponsiveListItemRenderer"])).collect();
         let rows = r["numItemsPerColumn"].as_str().and_then(|n| n.parse().ok()).unwrap_or(4);
@@ -716,6 +728,22 @@ fn list_card(r: &Value) -> Option<Card> {
 }
 
 /// A song row (playlists, search, history, album tracks, Quick picks).
+/// Music videos and other uploaded videos (not songs). Feeds, charts and radios drop them;
+/// your own playlists, likes and history keep what you put there.
+fn is_video(item: &Value) -> bool {
+    fn video_type(v: &Value) -> Option<&str> {
+        match v {
+            Value::Object(m) => m.get("musicVideoType").and_then(Value::as_str).or_else(|| m.values().find_map(video_type)),
+            Value::Array(a) => a.iter().find_map(video_type),
+            _ => None,
+        }
+    }
+    // Only where the item itself plays: a playlist card can hold its first video's type too.
+    let (two, row) = (&item["musicTwoRowItemRenderer"], &item["musicResponsiveListItemRenderer"]);
+    let own = [&two["navigationEndpoint"], &row["overlay"], &row["flexColumns"][0], &item["navigationEndpoint"]];
+    matches!(own.into_iter().find_map(video_type), Some("MUSIC_VIDEO_TYPE_OMV" | "MUSIC_VIDEO_TYPE_UGC" | "MUSIC_VIDEO_TYPE_OFFICIAL_SOURCE_MUSIC"))
+}
+
 fn list_item(r: &Value) -> Option<Track> {
     let cols = arr(&r["flexColumns"]);
     let col = |i: usize| cols.get(i).map(|c| &c["musicResponsiveListItemFlexColumnRenderer"]["text"]);

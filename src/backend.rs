@@ -56,10 +56,14 @@ pub enum Req {
     /// Resolve and download a track ahead of time so skipping to it is instant.
     Prefetch(String),
     Like { video_id: String, like: bool },
+    /// Several likes (or unlikes) one after another, for a selection.
+    LikeMany { video_ids: Vec<String>, like: bool },
     Dislike(String),
-    CreatePlaylist { title: String, video_id: Option<String> },
+    CreatePlaylist { title: String, video_ids: Vec<String> },
     EditPlaylist { id: String, title: String, description: String, privacy: Option<String> },
-    AddToPlaylist { playlist_id: String, video_id: String },
+    AddToPlaylist { playlist_id: String, video_ids: Vec<String> },
+    /// `(videoId, setVideoId)` entries to take out of the playlist.
+    RemoveFromPlaylist { playlist_id: String, items: Vec<(String, String)> },
     DeletePlaylist(String),
     SaveCollection { id: String, save: bool },
     SetCookie(String),
@@ -91,11 +95,12 @@ impl Req {
             Req::PlayCollection { .. } => "Playback",
             Req::Play { .. } => "Playback",
             Req::Prefetch(_) => "Prefetch",
-            Req::Like { .. } => "Like",
+            Req::Like { .. } | Req::LikeMany { .. } => "Like",
             Req::Dislike(_) => "Dislike",
             Req::CreatePlaylist { .. } => "Create playlist",
             Req::EditPlaylist { .. } => "Edit playlist",
             Req::AddToPlaylist { .. } => "Add to playlist",
+            Req::RemoveFromPlaylist { .. } => "Remove from playlist",
             Req::DeletePlaylist(_) => "Delete playlist",
             Req::SaveCollection { .. } => "Save to library",
             Req::SetCookie(_) => "Sign in",
@@ -136,6 +141,8 @@ pub struct Collection {
     pub description: Option<String>,
     pub thumbs: Vec<Thumb>,
     pub tracks: Vec<Track>,
+    /// Each track's playlist entry id (`setVideoId`), for removing it; empty for albums.
+    pub set_ids: Vec<Option<String>>,
     /// The account's own playlist (editable), not one saved from someone else.
     pub owned: bool,
 }
@@ -185,7 +192,8 @@ pub enum Resp {
     Radio { seed: String, tracks: Vec<Track> },
     PlayQueue { tracks: Vec<Track> },
     Liked { video_id: String, like: bool },
-    PlaylistCreated { id: String, had_song: bool },
+    LikedMany { count: usize, like: bool },
+    PlaylistCreated { id: String, songs: usize },
     PlaylistChanged { id: Option<String>, message: &'static str },
     /// Playback for `generation` failed before reaching the audio engine.
     PlayError { generation: u64, msg: String },
@@ -454,21 +462,35 @@ impl Backend {
                     ytm::set_like(api, &video_id, like).await?;
                     Resp::Liked { video_id, like }
                 }
+                Req::LikeMany { video_ids, like } => {
+                    for id in &video_ids {
+                        ytm::set_like(api, id, like).await?;
+                    }
+                    Resp::LikedMany { count: video_ids.len(), like }
+                }
                 Req::Dislike(video_id) => {
                     ytm::dislike(api, &video_id).await?;
                     Resp::Liked { video_id, like: false }
                 }
-                Req::CreatePlaylist { title, video_id } => {
-                    let id = ytm::create_playlist(api, &title, video_id.as_deref()).await?;
-                    Resp::PlaylistCreated { id, had_song: video_id.is_some() }
+                Req::CreatePlaylist { title, video_ids } => {
+                    let id = match video_ids.as_slice() {
+                        [] => ytm::create_playlist(api, &title, None).await?,
+                        [one] => ytm::create_playlist(api, &title, Some(one)).await?,
+                        many => ytm::create_playlist_with(api, &title, many).await?,
+                    };
+                    Resp::PlaylistCreated { id, songs: video_ids.len() }
                 }
                 Req::EditPlaylist { id, title, description, privacy } => {
                     ytm::edit_playlist(api, &id, &title, &description, privacy.as_deref()).await?;
                     Resp::PlaylistChanged { id: Some(id), message: "Playlist updated" }
                 }
-                Req::AddToPlaylist { playlist_id, video_id } => {
-                    ytm::add_to_playlist(api, &playlist_id, &video_id).await?;
+                Req::AddToPlaylist { playlist_id, video_ids } => {
+                    ytm::add_videos(api, &playlist_id, &video_ids).await?;
                     Resp::PlaylistChanged { id: Some(playlist_id), message: "Added to playlist" }
+                }
+                Req::RemoveFromPlaylist { playlist_id, items } => {
+                    ytm::remove_videos(api, &playlist_id, &items).await?;
+                    Resp::PlaylistChanged { id: Some(playlist_id), message: "Removed from playlist" }
                 }
                 Req::DeletePlaylist(id) => {
                     ytm::delete_playlist(api, &id).await?;

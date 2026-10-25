@@ -142,6 +142,8 @@ pub mod icon {
     pub const X: char = '\u{e1b2}';
     pub const ELLIPSIS_VERTICAL: char = '\u{e0b7}';
     pub const LIST_PLUS: char = '\u{e23f}';
+    pub const LIST_MINUS: char = '\u{e23e}';
+    pub const LIST_CHECKS: char = '\u{e1d0}';
     pub const RADIO: char = '\u{e142}';
     pub const DISC_3: char = '\u{e494}';
     pub const USER: char = '\u{e19f}';
