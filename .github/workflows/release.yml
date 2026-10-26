@@ -127,6 +127,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The tests run on the Apple silicon runner itself; a release isn't published
+      # without them passing.
+      - name: Test
+        run: cargo test --locked --target aarch64-apple-darwin
+
       # The Intel build is cross-compiled on the Apple silicon runner.
       - name: Build
         run: |
