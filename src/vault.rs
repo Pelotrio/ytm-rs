@@ -1,11 +1,11 @@
 //! Secrets (the Google and Spotify sign-ins) in the OS credential store: Windows
-//! Credential Manager, encrypted to the signed-in Windows user, or on Linux the
-//! Secret Service (GNOME Keyring, KWallet).
+//! Credential Manager, encrypted to the signed-in Windows user, on macOS the login
+//! Keychain, or on Linux the Secret Service (GNOME Keyring, KWallet).
 //!
 //! A credential holds at most 2,560 bytes and a Google cookie is close to that, so a
 //! secret is split over numbered entries: `name`, `name #2`, `name #3`, …
-//! Linux without a Secret Service running, and other systems, keep the secret in a
-//! file only this user can read, in the data folder.
+//! Linux without a Secret Service running, a Keychain that refuses, and other
+//! systems keep the secret in a file only this user can read, in the data folder.
 
 use std::path::Path;
 
@@ -25,7 +25,7 @@ fn key(name: &str, data_dir: &Path) -> String {
     }
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod store {
     /// Credential Manager's limit on one secret.
     const CHUNK: usize = 2560;
@@ -130,34 +130,34 @@ mod file {
 #[cfg(not(windows))]
 static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
-/// The store everywhere but Windows: the Secret Service on Linux when one answers,
-/// otherwise the file.
+/// The store everywhere but Windows: the Keychain on macOS or the Secret Service on
+/// Linux when one answers, otherwise the file.
 #[cfg(not(windows))]
 mod either {
     pub fn get(key: &str) -> anyhow::Result<Option<Vec<u8>>> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         match super::store::get(key) {
             Ok(Some(s)) => return Ok(Some(s)),
             Ok(None) => {}
-            Err(e) => log::debug!("secret service unavailable: {e:#}"),
+            Err(e) => log::debug!("credential store unavailable: {e:#}"),
         }
         super::file::get(key)
     }
 
     pub fn set(key: &str, secret: &[u8]) -> anyhow::Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         match super::store::set(key, secret) {
             // Saved in the keyring: drop any copy an earlier run left in a file.
             Ok(()) => return super::file::delete(key),
-            Err(e) => log::info!("no secret service, keeping {key:?} in a file: {e:#}"),
+            Err(e) => log::info!("no credential store, keeping {key:?} in a file: {e:#}"),
         }
         super::file::set(key, secret)
     }
 
     pub fn delete(key: &str) -> anyhow::Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Err(e) = super::store::delete(key) {
-            log::debug!("secret service unavailable: {e:#}");
+            log::debug!("credential store unavailable: {e:#}");
         }
         super::file::delete(key)
     }
@@ -229,8 +229,8 @@ mod stress {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
-mod linux_tests {
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod unix_tests {
     #[test]
     fn round_trip_in_keyring_or_file() {
         let dir = std::env::temp_dir().join(format!("ytm-rs-vault-test-{}", std::process::id()));
@@ -250,7 +250,7 @@ mod linux_tests {
             assert_eq!(files.len(), 1);
             assert_eq!(files[0].metadata().unwrap().permissions().mode() & 0o777, 0o600);
         }
-        eprintln!("stored in {}", if in_keyring { "the secret service" } else { "a file" });
+        eprintln!("stored in {}", if in_keyring { "the credential store" } else { "a file" });
         super::delete("test", &dir);
         assert!(super::get("test", &dir).is_none());
         let _ = std::fs::remove_dir_all(&dir);

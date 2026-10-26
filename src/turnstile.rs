@@ -68,6 +68,12 @@ pub fn child_main(profile_dir: PathBuf) {
 
 fn run(profile_dir: PathBuf) -> anyhow::Result<String> {
     let mut event_loop = EventLoopBuilder::<String>::with_user_event().build();
+    // macOS: no Dock icon for a window that's usually never shown.
+    #[cfg(target_os = "macos")]
+    {
+        use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+        event_loop.set_activation_policy(ActivationPolicy::Accessory);
+    }
     let window = WindowBuilder::new()
         .with_title("Verifying lyrics access")
         .with_inner_size(tao::dpi::LogicalSize::new(360.0, 120.0))

@@ -2,7 +2,9 @@
 //!
 //! The icon must be created on the UI thread (it owns a Win32 message window), so
 //! the app creates and drops it from `logic`. Clicks arrive on that thread's message
-//! loop; they are queued here and the UI is woken to handle them.
+//! loop; they are queued here and the UI is woken to handle them. On macOS it is a
+//! menu bar item, made the same way (AppKit wants it on the main thread, which is the
+//! UI thread there).
 //!
 //! On Linux the icon is a GTK one, and GTK runs its own loop on one thread for the
 //! life of the process (it can't be started twice); the icon is made and dropped there.
