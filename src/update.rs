@@ -6,9 +6,11 @@
 //! update". The portable build (a `portable.txt` beside the exe) downloads the new
 //! portable zip instead and swaps the exe in place as it closes. On Linux, a copy
 //! put in place by `install.sh` (an `install.txt` beside the binary) downloads the new
-//! tarball and renames the new binary over itself as it closes. On macOS, a copy run
-//! from its app bundle downloads the new tarball and puts the new bundle in place of
-//! its own as it closes. Dev builds never update themselves.
+//! tarball and renames the new binary over itself as it closes. On macOS, the copy
+//! installed from the disk image downloads the new one and puts the app from it in
+//! place of its own as it closes. Every platform has a portable build too (a
+//! `portable.txt` marker; inside the app bundle on macOS), which updates from the
+//! portable download. Dev builds never update themselves.
 //!
 //! Release notes (the release's Markdown body) are kept per version: the one a check
 //! finds, and any other on request ([`Updater::notes`]), for the update dialog, the
@@ -56,14 +58,14 @@ pub fn current_version() -> String {
 
 /// Whether this copy was installed by the installer (which leaves its uninstaller
 /// beside the exe, or on Linux `install.sh` its `install.txt`), or on macOS runs from
-/// its app bundle, so it's safe to update in place.
+/// an app bundle that isn't the portable one, so it's safe to update in place.
 pub fn installed() -> bool {
     if std::env::var_os("YTM_UPDATE_FORCE").is_some() {
         return true;
     }
     let Ok(exe) = std::env::current_exe() else { return false };
     if cfg!(target_os = "macos") {
-        return bundle_of(&exe).is_some();
+        return bundle_of(&exe).is_some() && portable_dir().is_none();
     }
     let marker = if cfg!(windows) { "unins000.exe" } else { "install.txt" };
     exe.parent().is_some_and(|d| d.join(marker).exists())
@@ -76,19 +78,38 @@ fn bundle_of(exe: &Path) -> Option<&Path> {
 
 /// The release asset this copy updates from.
 fn asset_name(version: &str) -> String {
-    if cfg!(unix) {
-        format!("ytm-rs-{version}-{}-{}.tar.gz", std::env::consts::OS, std::env::consts::ARCH)
-    } else {
-        // ARM64 builds have their own assets; x64 keeps the original names.
-        let arch = if cfg!(target_arch = "aarch64") { "-arm64" } else { "" };
-        if portable_dir().is_some() { format!("ytm-rs-portable-{version}{arch}.zip") } else { format!("ytm-rs-setup-{version}{arch}.exe") }
+    let portable = portable_dir().is_some();
+    let arch = std::env::consts::ARCH;
+    if cfg!(target_os = "linux") {
+        let kind = if portable { "portable-" } else { "" };
+        return format!("ytm-rs-{kind}{version}-linux-{arch}.tar.gz");
     }
+    // ARM64 Windows builds have their own assets; x64 keeps the original names.
+    let (suffix, setup) = if cfg!(target_os = "macos") {
+        (format!("-macos-{arch}"), "dmg")
+    } else {
+        (if cfg!(target_arch = "aarch64") { "-arm64" } else { "" }.to_owned(), "exe")
+    };
+    if portable { format!("ytm-rs-portable-{version}{suffix}.zip") } else { format!("ytm-rs-setup-{version}{suffix}.{setup}") }
 }
 
-/// The portable build's folder: the zip ships a `portable.txt` beside the exe, which
-/// keeps settings in `data` next to it and has updates replace the exe in place.
+/// The portable build's folder: the download ships a `portable.txt` beside the exe
+/// (on macOS inside the app bundle, where code signing allows it), which keeps
+/// settings in `data` next to it (next to the bundle) and has updates replace it in place.
 pub fn portable_dir() -> Option<PathBuf> {
-    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let exe = std::env::current_exe().ok()?;
+    if let Some(app) = bundle_of(&exe) {
+        // Opened without being moved out of quarantine, macOS runs the app from a
+        // random read-only copy; there's no folder beside it to keep data in.
+        if app.to_string_lossy().contains("/AppTranslocation/") {
+            return None;
+        }
+        if !app.join("Contents/Resources/portable.txt").exists() {
+            return None;
+        }
+        return app.parent().map(Path::to_path_buf);
+    }
+    let dir = exe.parent()?.to_path_buf();
     dir.join("portable.txt").exists().then_some(dir)
 }
 
@@ -280,7 +301,14 @@ impl Updater {
                 }
             }
         }
-        let ready = if portable || cfg!(unix) { unzip_exe(&path, &self.dir.join(format!("ytm-rs-{version}")))? } else { path };
+        let unpacked = self.dir.join(format!("ytm-rs-{version}"));
+        let ready = if cfg!(target_os = "macos") && !portable {
+            open_dmg(&path, &unpacked)?
+        } else if portable || cfg!(unix) {
+            unzip_exe(&path, &unpacked)?
+        } else {
+            path
+        };
         log::info!("update: {version} ready at {}", ready.display());
         Ok(State::Ready { version, installer: ready })
     }
@@ -413,8 +441,22 @@ fn replace_bundle(new: &Path, app: &Path, relaunch: bool) {
     }
 }
 
-/// The new binary from a downloaded update (the portable zip, or on Linux and macOS
-/// the tarball), unpacked into `dir` with tar (on Windows, its own).
+/// macOS: the app from a downloaded installer disk image, copied out into `dir`.
+fn open_dmg(dmg: &Path, dir: &Path) -> anyhow::Result<PathBuf> {
+    let _ = std::fs::remove_dir_all(dir);
+    let mnt = dir.join("mnt");
+    std::fs::create_dir_all(&mnt)?;
+    let attached = std::process::Command::new("hdiutil").args(["attach", "-nobrowse", "-readonly", "-noautoopen", "-quiet", "-mountpoint"]).arg(&mnt).arg(dmg).status()?;
+    anyhow::ensure!(attached.success(), "couldn't open {}", dmg.display());
+    let copied = std::process::Command::new("ditto").arg(mnt.join("ytm-rs.app")).arg(dir.join("ytm-rs.app")).status();
+    let _ = std::process::Command::new("hdiutil").args(["detach", "-quiet"]).arg(&mnt).status();
+    let exe = dir.join("ytm-rs.app/Contents/MacOS/ytm-rs");
+    anyhow::ensure!(copied.is_ok_and(|s| s.success()) && exe.exists(), "couldn't copy the app out of {}", dmg.display());
+    Ok(exe)
+}
+
+/// The new binary from a downloaded update (the portable zip, or on Linux the
+/// tarball), unpacked into `dir` with tar (on Windows, its own; macOS's reads zips).
 fn unzip_exe(zip: &Path, dir: &Path) -> anyhow::Result<PathBuf> {
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir)?;
@@ -435,7 +477,7 @@ fn unzip_exe(zip: &Path, dir: &Path) -> anyhow::Result<PathBuf> {
     let status = cmd.status()?;
     #[cfg(windows)]
     let exe = dir.join("ytm-rs.exe");
-    // The tarball has everything in one top-level folder: the binary, or on macOS the app bundle.
+    // Everything is in one top-level folder: the binary, or on macOS the app bundle.
     #[cfg(not(windows))]
     let exe = std::fs::read_dir(dir)?
         .flatten()

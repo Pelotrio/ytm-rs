@@ -37,7 +37,7 @@ if [ ! -f "$here/ytm-rs" ]; then
     arch=$(uname -m)
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
-    url=$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" | grep -o "https://[^\"]*-linux-$arch\.tar\.gz" | head -n 1)
+    url=$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" | grep -o "https://[^\"]*/ytm-rs-[0-9][^\"/]*-linux-$arch\.tar\.gz" | head -n 1)
     [ -n "$url" ] || { echo "No Linux $arch download in the latest release."; exit 1; }
     echo "Downloading $(basename "$url")"
     curl -fL# "$url" | tar -xz -C "$tmp"

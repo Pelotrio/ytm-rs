@@ -1,6 +1,7 @@
 #!/bin/sh
 # Make ytm-rs.app from a built binary:
-#   macos/bundle.sh target/release/ytm-rs 0.2.24 out
+#   macos/bundle.sh target/release/ytm-rs 0.2.24 out [portable]
+# With `portable`, the app keeps its data in a folder beside itself (see portable.txt).
 # The app is signed ad hoc (there's no Developer ID), so macOS asks before its first
 # launch: right-click it and pick Open, or run `xattr -dr com.apple.quarantine ytm-rs.app`.
 set -e
@@ -8,6 +9,7 @@ set -e
 bin=$1
 version=$2
 out=$3
+kind=$4
 [ -n "$bin" ] && [ -n "$version" ] && [ -n "$out" ] || { echo "usage: $0 <binary> <version> <out dir>"; exit 1; }
 here=$(cd "$(dirname "$0")" && pwd)
 icon="$here/../assets/icon/icon.png"
@@ -28,6 +30,9 @@ for spec in 16:16x16 32:16x16@2x 32:32x32 64:32x32@2x 128:128x128 256:128x128@2x
     sips -z "${spec%%:*}" "${spec%%:*}" "$icon" --out "$set/icon_${spec#*:}.png" >/dev/null
 done
 iconutil -c icns "$set" -o "$app/Contents/Resources/ytm-rs.icns"
+
+# Before signing: the signature seals everything in Resources.
+[ "$kind" = portable ] && cp "$here/portable.txt" "$app/Contents/Resources/portable.txt"
 
 codesign --force --sign - "$app"
 echo "Made $app"
