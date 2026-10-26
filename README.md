@@ -88,11 +88,17 @@ It installs ytm-rs for your user (no root) in `~/.local/lib/ytm-rs`, with a `ytm
 
 ### Install on macOS
 
-Download `ytm-rs-<version>-macos-aarch64.tar.gz` (Apple silicon) or `ytm-rs-<version>-macos-x86_64.tar.gz` (Intel) from the releases, open it, and drag **ytm-rs.app** to Applications. It needs macOS 11 or later. The app isn't notarized, so the first time, right-click it and pick **Open** (or run `xattr -dr com.apple.quarantine /Applications/ytm-rs.app`). Like on Windows, it then keeps itself up to date. Sign-ins are kept in your login Keychain. Jam links don't open the app on macOS yet; type the code on the **Listen together** page.
+Download `ytm-rs-setup-<version>-macos-aarch64.dmg` (Apple silicon) or `ytm-rs-setup-<version>-macos-x86_64.dmg` (Intel) from the releases, open it, and drag **ytm-rs** to Applications. It needs macOS 11 or later. The app isn't notarized, so the first time, right-click it and pick **Open** (or run `xattr -dr com.apple.quarantine /Applications/ytm-rs.app`). Like on Windows, it then keeps itself up to date. Sign-ins are kept in your login Keychain. Jam links don't open the app on macOS yet; type the code on the **Listen together** page.
 
 ### Portable
 
-Prefer not to install? Download `ytm-rs-portable-<version>.zip` from the same page, unzip it anywhere and run `ytm-rs.exe`. It keeps its settings in a `data` folder beside the exe (as long as `portable.txt` is there) and updates itself in place. Your sign-in is kept by Windows Credential Manager, so on another PC you sign in again. Opening jam links needs the installed app; in the portable one, type the code on the **Listen together** page.
+Prefer not to install? Every platform has a portable download that keeps its settings in a `data` folder beside the app and updates itself in place:
+
+- **Windows:** `ytm-rs-portable-<version>.zip` (`-arm64` for ARM). Unzip it anywhere and run `ytm-rs.exe`; it stays portable as long as `portable.txt` is beside it.
+- **macOS:** `ytm-rs-portable-<version>-macos-aarch64.zip` or `-macos-x86_64.zip`. Unzip it anywhere, run `xattr -dr com.apple.quarantine` on the folder (otherwise macOS runs the app from a read-only copy, and it falls back to the normal data location), then open `ytm-rs.app`.
+- **Linux:** `ytm-rs-portable-<version>-linux-x86_64.tar.gz`. Extract it anywhere and run `./ytm-rs`.
+
+Sign-ins are kept by the system (Credential Manager, the Keychain or your keyring), so on another computer you sign in again. Opening jam links needs the installed app; in the portable one, type the code on the **Listen together** page.
 
 ### Sign in
 

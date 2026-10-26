@@ -1,7 +1,8 @@
 name: Release
 
-# Builds the Windows installers and portable zips (x64 and ARM64), the Linux tarball, and the
-# macOS app tarballs (Apple silicon and Intel) from the tagged source, then attaches them all to the GitHub release for that tag.
+# Builds an installer and a portable download for every platform from the tagged source:
+# Windows (setup exe and portable zip, x64 and ARM64), Linux (install.sh tarball and
+# portable tarball) and macOS (disk image and portable zip, Apple silicon and Intel), then attaches them all to the GitHub release for that tag.
 # Releases are written as drafts (with notes) and published here only once every
 # file is attached, so the app's updater, which reads the latest published release,
 # never sees one without them. If no release exists yet, one is created as a draft
@@ -96,9 +97,10 @@ jobs:
           cargo build --release --locked
           echo "VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_ENV"
 
-      # The tarball: the binary, install.sh with the launcher and icon it installs,
-      # README and LICENSE. The updater on Linux reads it too.
-      - name: Build tarball
+      # The installer tarball: the binary, install.sh with the launcher and icon it
+      # installs, README and LICENSE. The portable one: the binary, the marker that makes
+      # it portable, README and LICENSE. The updater on Linux reads them too.
+      - name: Build tarballs
         run: |
           dir="ytm-rs-$VERSION-linux-x86_64"
           mkdir -p "out/$dir"
@@ -106,12 +108,18 @@ jobs:
           cp assets/icon/icon.png "out/$dir/ytm-rs.png"
           chmod 755 "out/$dir/ytm-rs" "out/$dir/install.sh"
           tar -czf "out/$dir.tar.gz" -C out "$dir"
+          dir="ytm-rs-portable-$VERSION-linux-x86_64"
+          mkdir -p "out/$dir"
+          cp target/release/ytm-rs linux/portable.txt README.md LICENSE "out/$dir/"
+          chmod 755 "out/$dir/ytm-rs"
+          tar -czf "out/$dir.tar.gz" -C out "$dir"
 
       - uses: actions/upload-artifact@v5
         with:
           name: linux
           path: |
             out/ytm-rs-${{ env.VERSION }}-linux-x86_64.tar.gz
+            out/ytm-rs-portable-${{ env.VERSION }}-linux-x86_64.tar.gz
           if-no-files-found: error
 
   macos:
@@ -139,24 +147,39 @@ jobs:
           cargo build --release --locked --target x86_64-apple-darwin
           echo "VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_ENV"
 
-      # One tarball per architecture: the app bundle, README and LICENSE. The updater on
-      # macOS reads it too.
-      - name: Build tarballs
+      # Per architecture, the installer: a disk image with the app and an Applications
+      # link to drag it to. And the portable zip: the app with the portable marker,
+      # README and LICENSE. The updater on macOS reads them too.
+      - name: Build installers and portable zips
         run: |
           for arch in aarch64 x86_64; do
-            dir="ytm-rs-$VERSION-macos-$arch"
+            bin="target/$arch-apple-darwin/release/ytm-rs"
+            stage="out/dmg-$arch"
+            dmg="out/ytm-rs-setup-$VERSION-macos-$arch.dmg"
+            mkdir -p "$stage"
+            sh macos/bundle.sh "$bin" "$VERSION" "$stage"
+            ln -s /Applications "$stage/Applications"
+            # hdiutil on the hosted runners sometimes fails with "Resource busy"; retry.
+            for try in 1 2 3; do
+              hdiutil create -volname "YT Music" -srcfolder "$stage" -ov -format UDZO "$dmg" && break
+              sleep 10
+            done
+            [ -f "$dmg" ]
+            dir="ytm-rs-portable-$VERSION-macos-$arch"
             mkdir -p "out/$dir"
-            sh macos/bundle.sh "target/$arch-apple-darwin/release/ytm-rs" "$VERSION" "out/$dir"
+            sh macos/bundle.sh "$bin" "$VERSION" "out/$dir" portable
             cp README.md LICENSE "out/$dir/"
-            tar -czf "out/$dir.tar.gz" -C out "$dir"
+            ditto -c -k --norsrc --keepParent "out/$dir" "out/$dir.zip"
           done
 
       - uses: actions/upload-artifact@v5
         with:
           name: macos
           path: |
-            out/ytm-rs-${{ env.VERSION }}-macos-aarch64.tar.gz
-            out/ytm-rs-${{ env.VERSION }}-macos-x86_64.tar.gz
+            out/ytm-rs-setup-${{ env.VERSION }}-macos-aarch64.dmg
+            out/ytm-rs-portable-${{ env.VERSION }}-macos-aarch64.zip
+            out/ytm-rs-setup-${{ env.VERSION }}-macos-x86_64.dmg
+            out/ytm-rs-portable-${{ env.VERSION }}-macos-x86_64.zip
           if-no-files-found: error
 
   attach:
