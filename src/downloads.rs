@@ -73,7 +73,9 @@ pub fn open_folder() {
     let _ = std::fs::create_dir_all(&dir);
     #[cfg(windows)]
     let _ = std::process::Command::new("explorer").arg(dir).spawn();
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(dir).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
     let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
 }
 
@@ -84,9 +86,12 @@ pub fn show_file(path: &Path) {
         use std::os::windows::process::CommandExt;
         let _ = std::process::Command::new("explorer").raw_arg(format!("/select,\"{}\"", path.display())).spawn();
     }
+    // macOS: Finder reveals it.
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
     // Linux: the file manager's ShowItems selects it (Nautilus, Dolphin, Nemo, …);
     // without one, just open the folder.
-    #[cfg(not(windows))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         let uri = url::Url::from_file_path(path).map(|u| u.to_string()).unwrap_or_default();
         let shown = std::process::Command::new("dbus-send")

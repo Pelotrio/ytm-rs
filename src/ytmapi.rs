@@ -380,7 +380,7 @@ fn utc_offset_minutes() -> i32 {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn utc_offset_minutes() -> i32 {
     // SAFETY: localtime_r fills the out-parameter from a valid time_t.
     unsafe {
@@ -388,11 +388,6 @@ fn utc_offset_minutes() -> i32 {
         let mut tm: libc::tm = std::mem::zeroed();
         if libc::localtime_r(&now, &mut tm).is_null() { 0 } else { (tm.tm_gmtoff / 60) as i32 }
     }
-}
-
-#[cfg(not(any(windows, target_os = "linux")))]
-fn utc_offset_minutes() -> i32 {
-    0
 }
 
 #[cfg(test)]

@@ -1,8 +1,8 @@
 //! "Sign in with Google" and "Sign in to Spotify" windows.
 //!
 //! Opens the service's normal sign-in page in the system webview (WebView2 on Windows,
-//! which ships with the OS), waits until the flow lands on the app's site, then hands the
-//! session cookies (HttpOnly ones included) to the app.
+//! WKWebView on macOS, WebKitGTK on Linux), waits until the flow lands on the app's
+//! site, then hands the session cookies (HttpOnly ones included) to the app.
 //!
 //! The window runs in a child process (`ytm-rs --login <dir>`): tao and winit crash
 //! when both pump windows in one process (STATUS_FATAL_USER_CALLBACK_EXCEPTION), and a
@@ -144,6 +144,27 @@ pub fn forget(profile_dir: &std::path::Path) {
     let _ = std::fs::remove_dir_all(profile_dir);
 }
 
+/// WKWebView has no profile folder (wry ignores the context's on macOS), so each
+/// profile gets a data store of its own (macOS 14+; older ones share the default),
+/// named by an id kept in the folder. `forget` deletes the folder, so the next sign-in
+/// starts from a fresh store.
+#[cfg(target_os = "macos")]
+fn store_id(profile_dir: &std::path::Path) -> [u8; 16] {
+    use sha1::Digest;
+    let file = profile_dir.join("store-id");
+    if let Ok(saved) = std::fs::read(&file)
+        && let Ok(id) = <[u8; 16]>::try_from(saved.as_slice())
+    {
+        return id;
+    }
+    let seed = format!("{} {:?} {}", profile_dir.display(), std::time::SystemTime::now(), std::process::id());
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&sha1::Sha1::digest(seed)[..16]);
+    let _ = std::fs::create_dir_all(profile_dir);
+    let _ = std::fs::write(&file, id);
+    id
+}
+
 fn run(site: Site, profile_dir: PathBuf) -> anyhow::Result<Outcome> {
     let mut event_loop = EventLoopBuilder::<()>::with_user_event().build();
 
@@ -153,8 +174,16 @@ fn run(site: Site, profile_dir: PathBuf) -> anyhow::Result<Outcome> {
         .build(&event_loop)?;
 
     let proxy = event_loop.create_proxy();
+    #[cfg(target_os = "macos")]
+    let store = store_id(&profile_dir);
     let mut context = WebContext::new(Some(profile_dir));
-    let webview = crate::proxy::webview(WebViewBuilder::new_with_web_context(&mut context))
+    let builder = WebViewBuilder::new_with_web_context(&mut context);
+    #[cfg(target_os = "macos")]
+    let builder = {
+        use wry::WebViewBuilderExtDarwin;
+        builder.with_data_store_identifier(store)
+    };
+    let webview = crate::proxy::webview(builder)
         .with_url(site.start())
         .with_on_page_load_handler(move |ev, url| {
             if matches!(ev, PageLoadEvent::Finished) && url.starts_with(site.home()) {

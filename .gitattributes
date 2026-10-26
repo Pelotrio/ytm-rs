@@ -2,3 +2,4 @@
 site/** linguist-documentation
 assets/ejs/** linguist-vendored
 linux/** text eol=lf
+macos/** text eol=lf

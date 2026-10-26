@@ -1,7 +1,7 @@
 name: Release
 
-# Builds the Windows installers and portable zips (x64 and ARM64), and the Linux tarball, from
-# the tagged source, then attaches them all to the GitHub release for that tag.
+# Builds the Windows installers and portable zips (x64 and ARM64), the Linux tarball, and the
+# macOS app tarballs (Apple silicon and Intel) from the tagged source, then attaches them all to the GitHub release for that tag.
 # Releases are written as drafts (with notes) and published here only once every
 # file is attached, so the app's updater, which reads the latest published release,
 # never sees one without them. If no release exists yet, one is created as a draft
@@ -114,9 +114,54 @@ jobs:
             out/ytm-rs-${{ env.VERSION }}-linux-x86_64.tar.gz
           if-no-files-found: error
 
+  macos:
+    runs-on: macos-latest
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The tests run on the Apple silicon runner itself; a release isn't published
+      # without them passing.
+      - name: Test
+        run: cargo test --locked --target aarch64-apple-darwin
+
+      # The Intel build is cross-compiled on the Apple silicon runner.
+      - name: Build
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          echo "VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_ENV"
+
+      # One tarball per architecture: the app bundle, README and LICENSE. The updater on
+      # macOS reads it too.
+      - name: Build tarballs
+        run: |
+          for arch in aarch64 x86_64; do
+            dir="ytm-rs-$VERSION-macos-$arch"
+            mkdir -p "out/$dir"
+            sh macos/bundle.sh "target/$arch-apple-darwin/release/ytm-rs" "$VERSION" "out/$dir"
+            cp README.md LICENSE "out/$dir/"
+            tar -czf "out/$dir.tar.gz" -C out "$dir"
+          done
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: macos
+          path: |
+            out/ytm-rs-${{ env.VERSION }}-macos-aarch64.tar.gz
+            out/ytm-rs-${{ env.VERSION }}-macos-x86_64.tar.gz
+          if-no-files-found: error
+
   attach:
     if: github.ref_type == 'tag'
-    needs: [windows, linux]
+    needs: [windows, linux, macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v5
