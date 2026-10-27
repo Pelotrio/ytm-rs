@@ -9,6 +9,7 @@
 //! whole screen for a frame each time they switch in or out of that mode.
 
 /// The main window, from `main`.
+#[cfg_attr(not(windows), allow(unused_variables))]
 pub fn set_hwnd(hwnd: *mut std::ffi::c_void) {
     #[cfg(windows)]
     imp::init(hwnd as usize);
