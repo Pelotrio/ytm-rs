@@ -97,6 +97,8 @@ pub enum Action {
     Download(Track),
     NewPlaylist(Vec<Track>),
     EditPlaylist,
+    /// The open playlist's collaboration settings.
+    Collaborate,
     DeletePlaylist,
     SaveCollection(String, bool),
     HomeChip(Option<String>),
@@ -112,6 +114,9 @@ enum Dialog {
     NewPlaylist { title: String, tracks: Vec<Track> },
     EditPlaylist { id: String, title: String, description: String, privacy: Option<String> },
     ConfirmDelete { id: String, title: String },
+    /// `info` until it loads; `busy` while a change is on its way; `confirm_off` asks
+    /// before turning collaboration off (that removes the collaborators).
+    Collaborate { id: String, info: Option<crate::ytm::Collaboration>, busy: bool, confirm_off: bool },
 }
 
 /// Songs picked in a list for a batch action: Ctrl-click toggles one, Shift-click a range,
@@ -191,6 +196,13 @@ pub struct App {
     scrobble: Option<(u64, bool)>,
     /// Last session's song, restored paused: Play starts it from here.
     resume_at: Option<Duration>,
+    /// That song came from another device's queue, so playing it here is a new play.
+    resume_counts: bool,
+    /// When something last played here (unix seconds), to tell whether another
+    /// device has played since. When the cross-device queue was last asked for (`now`).
+    listened_at: u64,
+    queue_checked: Option<f64>,
+    was_focused: bool,
     /// Album / playlist / artist the queue was started from, so its card shows pause.
     queue_source: Option<Target>,
     /// Source of a PlayCollection request until its tracks arrive.
@@ -427,6 +439,10 @@ impl App {
             lastfm_result: Default::default(),
             scrobble: None,
             resume_at: None,
+            resume_counts: false,
+            listened_at: 0,
+            queue_checked: None,
+            was_focused: false,
             queue_source: None,
             pending_source: None,
             bg,
@@ -954,8 +970,50 @@ impl App {
         self.audio.status.duration_ms.store(dur, Ordering::Relaxed);
         self.audio.status.position_ms.store(s.position_ms, Ordering::Relaxed);
         self.resume_at = Some(Duration::from_millis(s.position_ms));
+        self.listened_at = s.listened_at;
         self.request_art();
         self.backend.request(Req::Lyrics(track));
+    }
+
+    /// Ask for the queue YouTube Music keeps across devices when the app starts and
+    /// whenever its window comes back into focus with nothing playing, so a song
+    /// started on the phone is here to carry on with.
+    fn sync_server_queue(&mut self, ctx: &egui::Context, now: f64) {
+        if self.playing() {
+            self.listened_at = unix_now();
+        }
+        let focused = ctx.input(|i| i.focused);
+        let refocused = focused && !std::mem::replace(&mut self.was_focused, focused);
+        let idle = !self.playing() && !self.buffering && !self.jam.active() && self.smoke.is_none();
+        let due = self.queue_checked.is_none_or(|t| refocused && now - t > 60.0);
+        if self.logged_in && idle && due && std::env::var_os("YTM_SMOKE").is_none() {
+            self.queue_checked = Some(now);
+            self.backend.request(Req::ServerQueue);
+        }
+    }
+
+    /// Take up what another device was playing, paused at its start like a restored
+    /// session, when it played there after anything played here.
+    fn adopt_server_queue(&mut self, q: crate::ytm::ServerQueue) {
+        let Some(track) = q.tracks.get(q.index).cloned() else { return };
+        let idle = !self.playing() && !self.buffering && !self.jam.active();
+        // A minute's slack: this app's own plays reach that queue too.
+        if !idle || q.watched_at <= self.listened_at + 60 || self.current_id() == Some(track.id.as_str()) {
+            return;
+        }
+        log::info!("picking up {} from another device ({} in its queue)", track.id, q.tracks.len());
+        self.queue = q.tracks;
+        self.index = Some(q.index);
+        self.queue_source = None;
+        self.listened_at = q.watched_at;
+        self.audio.send(AudioCmd::Stop);
+        self.audio.status.duration_ms.store(track.duration.map_or(0, |d| d as u64 * 1000), Ordering::Relaxed);
+        self.audio.status.position_ms.store(0, Ordering::Relaxed);
+        self.resume_at = Some(Duration::ZERO);
+        self.resume_counts = true;
+        self.request_art();
+        self.backend.request(Req::Lyrics(track.clone()));
+        self.toast(format!("Picked up \"{}\" from your other device. Press play to carry on.", track.title));
     }
 
     fn session_json(&self) -> Option<String> {
@@ -968,6 +1026,7 @@ impl App {
             index: i - from,
             position_ms: self.audio.status.position().as_millis() as u64,
             duration_ms: self.audio.status.duration_ms.load(Ordering::Relaxed),
+            listened_at: if self.playing() { unix_now() } else { self.listened_at },
         })
         .ok()
     }
@@ -1019,6 +1078,7 @@ impl App {
     fn play_current_at(&mut self, at: Duration, report: bool) {
         let Some(track) = self.current().cloned() else { return };
         self.resume_at = None;
+        self.resume_counts = false;
         self.generation += 1;
         self.audio.status.wanted_gen.store(self.generation, Ordering::Relaxed);
         self.audio.status.duration_ms.store(track.duration.map_or(0, |d| d as u64 * 1000), Ordering::Relaxed);
@@ -1161,8 +1221,10 @@ impl App {
             return jam::request(self, crate::jam::Cmd::Toggle);
         }
         if let Some(at) = self.resume_at {
-            // Last session's song, already counted when it started then.
-            self.play_current_at(at, false);
+            // Last session's song, already counted when it started then (unless it was
+            // another device's).
+            let report = std::mem::take(&mut self.resume_counts);
+            self.play_current_at(at, report);
             return;
         }
         let playing = self.playing();
@@ -1435,6 +1497,12 @@ impl App {
                     self.dialog = Some(Dialog::EditPlaylist {
                         id: c.id.clone(), title: c.title.clone(), description: c.description.clone().unwrap_or_default(), privacy: None,
                     });
+                }
+            }
+            Action::Collaborate => {
+                if let Some(c) = self.collection.as_ref().filter(|c| !c.is_album && c.owned) {
+                    self.backend.request(Req::Collaboration(c.id.clone()));
+                    self.dialog = Some(Dialog::Collaborate { id: c.id.clone(), info: None, busy: true, confirm_off: false });
                 }
             }
             Action::DeletePlaylist => {
@@ -1748,6 +1816,14 @@ impl App {
                 }
                 self.toast(message);
             }
+            Resp::Collaboration(c) => {
+                if let Some(Dialog::Collaborate { id, info, busy, .. }) = &mut self.dialog
+                    && *id == c.playlist_id
+                {
+                    *info = Some(c);
+                    *busy = false;
+                }
+            }
             Resp::PlayError { generation, msg } => {
                 if generation == self.generation {
                     self.buffering = false;
@@ -1774,6 +1850,7 @@ impl App {
                     }
                 }
             }
+            Resp::ServerQueue(q) => self.adopt_server_queue(q),
             Resp::Account { name, photo } => {
                 self.account_name = name.or(self.account_name.take());
                 self.account_avatar = photo.or(self.account_avatar.take());
@@ -1798,6 +1875,13 @@ impl App {
                 self.toast(if v { "Signed in" } else { "Signed out" });
             }
             Resp::Error(e) => {
+                if let Some(Dialog::Collaborate { info, busy, .. }) = &mut self.dialog {
+                    *busy = false;
+                    // Nothing to show if it never loaded.
+                    if info.is_none() {
+                        self.dialog = None;
+                    }
+                }
                 // A page still waiting for its first data shows a retry instead of loading forever.
                 self.load_failed |= self.loading || (self.page == Page::Home && self.home_loading);
                 self.loading = false;
@@ -1969,6 +2053,7 @@ impl App {
             Dialog::NewPlaylist { .. } => "New playlist",
             Dialog::EditPlaylist { .. } => "Edit playlist",
             Dialog::ConfirmDelete { .. } => "Delete playlist",
+            Dialog::Collaborate { .. } => "Collaborate",
         };
         // The same modal card as "Delete playlist?" and the update dialog.
         let modal = egui::Modal::new("playlist-dialog".into()).frame(notes::surface()).backdrop_color(theme::shade(0.55)).show(ctx, |ui| {
@@ -2029,12 +2114,90 @@ impl App {
                         }
                         done |= cancel;
                     }
+                    Dialog::Collaborate { info, busy, confirm_off, .. } => done = self.collaborate_dialog(ui, info, busy, confirm_off, accent),
                     Dialog::ConfirmDelete { .. } => unreachable!("drawn by confirm_delete"),
                 }
             });
         });
         let dismissed = modal.should_close() || ctx.input(|i| i.key_pressed(egui::Key::Escape));
         if !done && !dismissed { self.dialog = Some(dialog); }
+    }
+}
+
+impl App {
+    /// The Collaborate dialog's body: the two switches, the invite link and who has
+    /// joined. True once it's closed.
+    fn collaborate_dialog(&mut self, ui: &mut Ui, info: &mut Option<crate::ytm::Collaboration>, busy: &mut bool, confirm_off: &mut bool, accent: Color32) -> bool {
+        use crate::ytm::CollabChange;
+        let Some(c) = info.clone() else {
+            ui.label(egui::RichText::new("Loading…").font(theme::regular(14.0)).color(theme::text_dim()));
+            ui.add_space(24.0);
+            return done_button(ui);
+        };
+        let mut change = None;
+        if *confirm_off {
+            ui.label(egui::RichText::new("Turn off collaboration?").font(theme::semibold(15.0)).color(theme::TEXT));
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Collaborators will be removed from the playlist. Songs they added stay.").font(theme::regular(13.0)).color(theme::text_dim()));
+            ui.add_space(24.0);
+            let (ok, cancel) = dialog_buttons(ui, "Turn off", !*busy, accent);
+            if ok {
+                change = Some(CollabChange::Collaborate(false));
+            }
+            if ok || cancel {
+                *confirm_off = false;
+            }
+        } else {
+            ui.add_enabled_ui(!*busy, |ui| {
+                let desc = if c.private && !c.on { "Collaborators can add songs. Makes this private playlist unlisted." } else { "Collaborators can add songs." };
+                pages::setting_row(ui, "Collaborate", Some(desc), |ui| {
+                    let mut on = c.on;
+                    if pages::toggle(ui, &mut on, "Collaborate").changed() {
+                        if on { change = Some(CollabChange::Collaborate(true)) } else { *confirm_off = true }
+                    }
+                });
+                if c.on {
+                    pages::setting_row(ui, "Allow new collaborators", Some("Turn off to stop new people joining with the link."), |ui| {
+                        let mut on = c.allow_new;
+                        if pages::toggle(ui, &mut on, "Allow new collaborators").changed() {
+                            change = Some(CollabChange::AllowNew(on));
+                        }
+                    });
+                }
+            });
+            if c.on {
+                ui.add_space(10.0);
+                if let Some(link) = c.invite_link.as_deref().filter(|_| c.allow_new) {
+                    if widgets::pill(ui, "Copy invite link", Some(theme::icon::LINK), true).clicked() {
+                        ui.ctx().copy_text(link.to_owned());
+                        self.toast("Invite link copied. Whoever opens it can add songs.");
+                    }
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("Send the link to the people you want to add. They join from YouTube Music.").font(theme::regular(12.5)).color(theme::TEXT_FAINT));
+                } else {
+                    ui.label(egui::RichText::new("New collaborators can't join. Turn on Allow new collaborators for an invite link.").font(theme::regular(12.5)).color(theme::TEXT_FAINT));
+                }
+                ui.add_space(16.0);
+                field_label(ui, "Collaborators");
+                if c.collaborators.is_empty() {
+                    ui.label(egui::RichText::new("No one has joined yet.").font(theme::regular(13.5)).color(theme::text_dim()));
+                }
+                for name in &c.collaborators {
+                    ui.label(egui::RichText::new(name).font(theme::regular(14.0)).color(theme::TEXT));
+                    ui.add_space(4.0);
+                }
+            }
+            ui.add_space(24.0);
+            // Each switch applies right away, so there's nothing to cancel.
+            if done_button(ui) {
+                return true;
+            }
+        }
+        if let Some(change) = change {
+            *busy = true;
+            self.backend.request(Req::SetCollaboration { info: c, change });
+        }
+        false
     }
 }
 
@@ -2110,6 +2273,11 @@ fn dialog_buttons(ui: &mut Ui, primary: &str, enabled: bool, accent: Color32) ->
         cancel = widgets::pill(ui, "Cancel", None, false).clicked();
     });
     (ok, cancel)
+}
+
+/// A lone right-aligned Done for a dialog whose changes apply as they're made.
+fn done_button(ui: &mut Ui) -> bool {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| widgets::pill(ui, "Done", None, true).clicked()).inner
 }
 
 /// A playlist (or "New playlist") row in the Add to playlist dialog.
@@ -2222,6 +2390,7 @@ impl eframe::App for App {
         self.window_hidden = self.tray.is_some() || ctx.input(|i| i.viewport().minimized == Some(true));
         self.sync_discord();
         self.sync_lastfm();
+        self.sync_server_queue(ctx, now);
         self.tick_updates(ctx, now);
         let np = widgets::NowPlaying {
             song: self.current_id().map(str::to_owned),
@@ -2517,6 +2686,12 @@ struct Session {
     index: usize,
     position_ms: u64,
     duration_ms: u64,
+    #[serde(default)]
+    listened_at: u64,
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 /// Dev hook: `YTM_SCREENSHOT=out.png` saves the app's own framebuffer after

@@ -35,6 +35,8 @@ pub enum Req {
     Uploads,
     /// The signed-in account's name and photo.
     Account,
+    /// The queue another device left off with (YouTube Music's own cross-device queue).
+    ServerQueue,
     /// Upload audio files to the account's library.
     Upload(Vec<PathBuf>),
     /// Save a song's audio to the downloads folder.
@@ -65,6 +67,9 @@ pub enum Req {
     /// `(videoId, setVideoId)` entries to take out of the playlist.
     RemoveFromPlaylist { playlist_id: String, items: Vec<(String, String)> },
     DeletePlaylist(String),
+    /// A playlist's collaboration settings and invite link.
+    Collaboration(String),
+    SetCollaboration { info: ytm::Collaboration, change: ytm::CollabChange },
     SaveCollection { id: String, save: bool },
     SetCookie(String),
     Logout,
@@ -85,6 +90,7 @@ impl Req {
             Req::History => "Loading history",
             Req::Uploads => "Loading uploads",
             Req::Account => "Account",
+            Req::ServerQueue => "Queue from other devices",
             Req::Upload(_) => "Upload",
             Req::Download(_) => "Download",
             Req::Lyrics(_) => "Lyrics",
@@ -102,6 +108,8 @@ impl Req {
             Req::AddToPlaylist { .. } => "Add to playlist",
             Req::RemoveFromPlaylist { .. } => "Remove from playlist",
             Req::DeletePlaylist(_) => "Delete playlist",
+            Req::Collaboration(_) => "Loading collaboration",
+            Req::SetCollaboration { .. } => "Collaboration",
             Req::SaveCollection { .. } => "Save to library",
             Req::SetCookie(_) => "Sign in",
             Req::Logout => "Sign out",
@@ -110,7 +118,7 @@ impl Req {
 
     /// Background requests fail quietly (logged, no toast).
     fn quiet(&self) -> bool {
-        matches!(self, Req::Suggest(_) | Req::Account | Req::Art { .. } | Req::Prefetch(_) | Req::HomeMore(_) | Req::Lyrics(_) | Req::Segments { .. } | Req::LyricsExtras { .. })
+        matches!(self, Req::Suggest(_) | Req::Account | Req::ServerQueue | Req::Art { .. } | Req::Prefetch(_) | Req::HomeMore(_) | Req::Lyrics(_) | Req::Segments { .. } | Req::LyricsExtras { .. })
     }
 }
 
@@ -180,6 +188,7 @@ pub enum Resp {
     History(Vec<Track>),
     Uploads(Vec<Track>),
     Account { name: Option<String>, photo: Option<String> },
+    ServerQueue(ytm::ServerQueue),
     /// Upload finished: how many files went up, and which failed.
     Uploaded { done: usize, failed: Vec<String> },
     Downloaded { title: String, path: PathBuf },
@@ -195,6 +204,7 @@ pub enum Resp {
     LikedMany { count: usize, like: bool },
     PlaylistCreated { id: String, songs: usize },
     PlaylistChanged { id: Option<String>, message: &'static str },
+    Collaboration(ytm::Collaboration),
     /// Playback for `generation` failed before reaching the audio engine.
     PlayError { generation: u64, msg: String },
     LoggedIn(bool),
@@ -366,6 +376,10 @@ impl Backend {
                     let (name, photo) = ytm::account(api).await?;
                     Resp::Account { name, photo }
                 }
+                Req::ServerQueue => match ytm::server_queue(api).await? {
+                    Some(q) => Resp::ServerQueue(q),
+                    None => return Ok(None),
+                },
                 Req::Upload(files) => {
                     let session = api.account().ok_or_else(|| anyhow::anyhow!("sign in to upload music"))?;
                     let (mut done, mut failed) = (0, Vec::new());
@@ -495,6 +509,11 @@ impl Backend {
                 Req::DeletePlaylist(id) => {
                     ytm::delete_playlist(api, &id).await?;
                     Resp::PlaylistChanged { id: None, message: "Playlist deleted" }
+                }
+                Req::Collaboration(id) => Resp::Collaboration(ytm::collaboration(api, &id).await?),
+                Req::SetCollaboration { info, change } => {
+                    ytm::set_collaboration(api, &info, change).await?;
+                    Resp::Collaboration(ytm::collaboration(api, &info.playlist_id).await?)
                 }
                 Req::SaveCollection { id, save } => {
                     ytm::save_collection(api, &id, save).await?;
@@ -637,9 +656,13 @@ impl Backend {
                 audio.send(AudioCmd::Start { generation, decoder, shared: shared2, at });
                 // Skipped past before it started: that one doesn't count.
                 if let Some((this, id)) = report.filter(|_| audio.status.wanted_gen.load(Ordering::Relaxed) == generation) {
-                    this.rt.spawn(async move {
+                    let rt = this.rt.clone();
+                    rt.spawn(async move {
                         match ytm::report_play(&this.api, &id).await {
-                            Ok(()) => log::debug!("reported play of {id}"),
+                            Ok(w) => {
+                                log::debug!("reported play of {id}");
+                                this.report_watchtime(&id, generation, w).await;
+                            }
                             Err(e) => log::warn!("couldn't report play of {id}: {e:#}"),
                         }
                     });
@@ -651,6 +674,46 @@ impl Backend {
             }
         });
         Ok(())
+    }
+
+    /// Report how much of play `generation` is heard, on the web player's schedule
+    /// (10, 20 and 30 s in, then every 40 s), with a last report once it ends or is left.
+    /// Each covers the stretch played since the one before; time paused doesn't count.
+    async fn report_watchtime(&self, id: &str, generation: u64, w: ytm::Watchtime) {
+        let status = &self.audio.status;
+        let started = std::time::Instant::now();
+        let mut flush = w.flush_at.iter().copied();
+        let mut due = flush.next().unwrap_or(w.flush_every);
+        // The stretch not yet reported, and where the song was at the last check.
+        let pos = || status.position().as_secs_f64();
+        let (mut from, mut at) = (pos(), pos());
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let gone = status.wanted_gen.load(Ordering::Relaxed) != generation;
+            if !gone {
+                let now = pos();
+                // A seek starts a new stretch.
+                if now < at || now > at + 5.0 {
+                    from = now;
+                }
+                at = now;
+            }
+            let elapsed = started.elapsed().as_secs();
+            if !gone && elapsed < due {
+                continue;
+            }
+            if at > from || gone {
+                if let Err(e) = ytm::report_watchtime(&self.api, &w, from, at, started.elapsed().as_secs_f64(), gone).await {
+                    log::warn!("couldn't report listening time of {id}: {e:#}");
+                }
+                from = at;
+            }
+            if gone {
+                log::debug!("reported listening time of {id}");
+                return;
+            }
+            due = flush.next().unwrap_or(due + w.flush_every);
+        }
     }
 
     /// Resolve a stream URL and start downloading it into a new buffer (just its start,

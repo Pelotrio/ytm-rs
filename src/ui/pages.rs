@@ -552,6 +552,7 @@ fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
                     // Only your own playlists can be edited or deleted (mixes and others' playlists can't).
                     if !is_album && c.owned {
                         if pill(ui, "Edit", None, false).clicked() { acts.push(Action::EditPlaylist); }
+                        if pill(ui, "Collaborate", None, false).clicked() { acts.push(Action::Collaborate); }
                         if pill(ui, "Delete", None, false).clicked() { acts.push(Action::DeletePlaylist); }
                     }
                 }

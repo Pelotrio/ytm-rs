@@ -340,6 +340,39 @@ pub async fn radio(api: &Api, video_id: &str, auth: bool, limit: usize) -> anyho
     Ok(tracks)
 }
 
+/// The queue YouTube Music keeps for the account across devices: what the phone (or
+/// the web player) last played, the way music.youtube.com picks it up when it opens.
+/// Only Premium accounts have one; others get `None`.
+pub async fn server_queue(api: &Api) -> anyhow::Result<Option<ServerQueue>> {
+    let body = json!({"watchNextType": "WATCH_NEXT_TYPE_GET_QUEUE", "queueContextParams": "", "enablePersistentPlaylistPanel": true, "isAudioOnly": true});
+    let v = api.call_signed_in("next", body).await?;
+    Ok(parse_server_queue(&v))
+}
+
+pub struct ServerQueue {
+    pub tracks: Vec<Track>,
+    /// The song that was playing.
+    pub index: usize,
+    /// When it was last listened to, in unix seconds (0 if YouTube didn't say).
+    pub watched_at: u64,
+}
+
+fn parse_server_queue(v: &Value) -> Option<ServerQueue> {
+    let queue = &v["contents"]["singleColumnMusicWatchNextResultsRenderer"]["tabbedRenderer"]["watchNextTabbedResultsRenderer"]["tabs"][0]["tabRenderer"]["content"]["musicQueueRenderer"];
+    let (mut tracks, mut index) = (Vec::new(), None);
+    for i in arr(&queue["content"]["playlistPanelRenderer"]["contents"]) {
+        let wrapped = &i["playlistPanelVideoWrapperRenderer"]["primaryRenderer"]["playlistPanelVideoRenderer"];
+        let r = if wrapped.is_null() { &i["playlistPanelVideoRenderer"] } else { wrapped };
+        let Some(t) = panel_item(r) else { continue };
+        if r["selected"].as_bool() == Some(true) {
+            index = Some(tracks.len());
+        }
+        tracks.push(t);
+    }
+    let watched_at = queue["musicQueueConfig"]["musicQueueRestorationInfo"]["lastWatchTimestamp"]["seconds"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+    Some(ServerQueue { index: index?, tracks, watched_at })
+}
+
 fn panel_page(panel: &Value) -> (Vec<Track>, Option<String>) {
     let tracks = arr(&panel["contents"])
         .iter()
@@ -544,14 +577,43 @@ pub async fn dislike(api: &Api, video_id: &str) -> anyhow::Result<()> {
 /// there in Recap, recommendations and "Listen again"), the way music.youtube.com does:
 /// the signed-in player response carries a stats URL that the web player pings once
 /// playback starts. Streams come from other clients, so this asks for the player
-/// response only to get that URL.
-pub async fn report_play(api: &Api, video_id: &str) -> anyhow::Result<()> {
+/// response only to get that URL. What it returns then reports how much of the song
+/// was heard ([`report_watchtime`]), as the web player does while it plays.
+pub async fn report_play(api: &Api, video_id: &str) -> anyhow::Result<Watchtime> {
     let player = api.call_signed_in("player", json!({"videoId": video_id, "contentCheckOk": true, "racyCheckOk": true})).await?;
-    let url = player["playbackTracking"]["videostatsPlaybackUrl"]["baseUrl"]
+    let tracking = &player["playbackTracking"];
+    let url = tracking["videostatsPlaybackUrl"]["baseUrl"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("no playback tracking URL ({})", player["playabilityStatus"]["status"].as_str().unwrap_or("?")))?;
     let cpn = cpn();
-    api.get_signed_in(url, &[("ver", "2"), ("c", "WEB_REMIX"), ("cpn", &cpn)]).await
+    api.get_signed_in(url, &[("ver", "2"), ("c", "WEB_REMIX"), ("cpn", &cpn)]).await?;
+    Ok(Watchtime {
+        url: tracking["videostatsWatchtimeUrl"]["baseUrl"].as_str().map(str::to_owned),
+        cpn,
+        flush_at: arr(&tracking["videostatsScheduledFlushWalltimeSeconds"]).iter().filter_map(Value::as_u64).collect(),
+        flush_every: tracking["videostatsDefaultFlushIntervalSeconds"].as_u64().filter(|&s| s > 0).unwrap_or(40),
+    })
+}
+
+/// One play's listening-time reports: where they go and when the web player sends them.
+pub struct Watchtime {
+    url: Option<String>,
+    cpn: String,
+    /// Seconds after the start for the first reports (10, 20, 30), then one every `flush_every`.
+    pub flush_at: Vec<u64>,
+    pub flush_every: u64,
+}
+
+/// Report the stretch of the song played since the last report, `from`..`to` seconds
+/// in, like the web player's periodic pings; `last` once the song ends or is left.
+pub async fn report_watchtime(api: &Api, w: &Watchtime, from: f64, to: f64, elapsed: f64, last: bool) -> anyhow::Result<()> {
+    let Some(url) = &w.url else { return Ok(()) };
+    let (st, et, rt) = (format!("{from:.3}"), format!("{to:.3}"), format!("{elapsed:.3}"));
+    let mut query = vec![("ver", "2"), ("c", "WEB_REMIX"), ("cpn", w.cpn.as_str()), ("cmt", et.as_str()), ("st", st.as_str()), ("et", et.as_str()), ("rt", rt.as_str()), ("state", if last { "paused" } else { "playing" })];
+    if last {
+        query.push(("final", "1"));
+    }
+    api.get_signed_in(url, &query).await
 }
 
 /// A client playback nonce: 16 characters from the web player's alphabet.
@@ -632,6 +694,112 @@ pub async fn delete_playlist(api: &Api, id: &str) -> anyhow::Result<()> {
 pub async fn save_collection(api: &Api, playlist_id: &str, save: bool) -> anyhow::Result<()> {
     let endpoint = if save { "like/like" } else { "like/removelike" };
     write(api, endpoint, json!({"target": {"playlistId": playlist_id}})).await?;
+    Ok(())
+}
+
+/// A playlist's collaboration settings, as music.youtube.com's Collaborate panel shows
+/// them. YouTube adds collaborators by invite link only: whoever opens the link while
+/// "Allow new collaborators" is on can add songs.
+#[derive(Clone)]
+pub struct Collaboration {
+    pub playlist_id: String,
+    /// Private playlists can't be collaborative.
+    pub private: bool,
+    pub on: bool,
+    pub allow_new: bool,
+    pub invite_link: Option<String>,
+    pub collaborators: Vec<String>,
+    /// The panel's own edits for each switch (`browse/edit_playlist` bodies).
+    turn_on: Option<Value>,
+    turn_off: Option<Value>,
+    allow: Option<Value>,
+    revoke: Option<Value>,
+}
+
+pub enum CollabChange {
+    Collaborate(bool),
+    AllowNew(bool),
+}
+
+pub async fn collaboration(api: &Api, playlist_id: &str) -> anyhow::Result<Collaboration> {
+    let page = api.call_signed_in("browse", json!({"browseId": format!("VL{playlist_id}")})).await?;
+    let header = find_key(&page, "musicPlaylistEditHeaderRenderer").ok_or_else(|| anyhow::anyhow!("only your own playlists can be shared for collaboration"))?;
+    let private = header["privacy"].as_str() == Some("PRIVATE");
+    let Some(params) = header["collaborationSettingsCommand"]["showEngagementPanelEndpoint"]["globalConfiguration"]["params"].as_str() else {
+        // A private playlist has no panel until it's made visible: collaboration is off,
+        // and turning it on goes through the plain edits.
+        anyhow::ensure!(private, "YouTube Music doesn't offer collaboration on this playlist");
+        return Ok(Collaboration { playlist_id: playlist_id.to_owned(), private, on: false, allow_new: false, invite_link: None, collaborators: Vec::new(), turn_on: None, turn_off: None, allow: None, revoke: None });
+    };
+    let panel = api.call_signed_in("get_panel", json!({"panelId": "PAplaylist_collaborate", "params": params})).await?;
+    parse_collaboration(playlist_id, private, &panel).ok_or_else(|| anyhow::anyhow!("couldn't read the playlist's collaboration settings"))
+}
+
+fn parse_collaboration(playlist_id: &str, private: bool, panel: &Value) -> Option<Collaboration> {
+    let vm = find_key(panel, "playlistCollaborationViewModel")?;
+    let values = &vm["playlistCollaborationFormSchema"]["initialValues"];
+    let switch = |key: &str| &vm[key]["switchListItemViewModel"];
+    // A switch's command: the edit itself, or inside a parallel command beside closing the dialog.
+    let edit = |cmd: &Value| find_key(cmd, "playlistEditEndpoint").filter(|e| e["actions"].is_array()).cloned();
+    let collaborate = switch("collaboratePlaylistCollaborationSetting");
+    let allow_new = switch("allowNewCollaboratorsPlaylistCollaborationSetting");
+    let link = find_key(&vm["copyLinkButton"], "copyLinkCommand").and_then(|c| c["shortUrl"].as_str()).filter(|u| !u.is_empty());
+    // Each collaborator is a list item; its title is the name.
+    let mut collaborators = Vec::new();
+    collect_titles(&vm["playlistCollaborators"], &mut collaborators);
+    Some(Collaboration {
+        playlist_id: playlist_id.to_owned(),
+        private,
+        on: values["isCollaborationEnabled"].as_bool().or(collaborate["switchedOnByDefault"].as_bool()).unwrap_or(false),
+        allow_new: values["isAllowNewCollaboratorsEnabled"].as_bool().or(allow_new["switchedOnByDefault"].as_bool()).unwrap_or(false),
+        invite_link: link.map(str::to_owned),
+        collaborators,
+        turn_on: edit(&collaborate["switchOnCommand"]),
+        turn_off: edit(&collaborate["switchOffCommand"]),
+        allow: edit(&allow_new["switchOnCommand"]),
+        revoke: edit(&allow_new["switchOffCommand"]),
+    })
+}
+
+fn collect_titles(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::Object(m) => {
+            if let Some(t) = m.get("title").and_then(|t| t["content"].as_str()) {
+                out.push(t.to_owned());
+                return;
+            }
+            m.values().for_each(|x| collect_titles(x, out));
+        }
+        Value::Array(a) => a.iter().for_each(|x| collect_titles(x, out)),
+        _ => {}
+    }
+}
+
+/// Switch collaboration (or new collaborators) on or off with the panel's own edit.
+/// Turning it on for a private playlist first makes it unlisted, as it must be.
+pub async fn set_collaboration(api: &Api, c: &Collaboration, change: CollabChange) -> anyhow::Result<()> {
+    let id = c.playlist_id.as_str();
+    let fallback = |action: Value| json!({"playlistId": id, "actions": [action]});
+    let body = match change {
+        CollabChange::Collaborate(true) if c.private => {
+            write(api, "browse/edit_playlist", fallback(json!({"action": "ACTION_SET_PLAYLIST_PRIVACY", "playlistPrivacy": "UNLISTED"}))).await?;
+            // For several seconds after that, YouTube still sees it as private and
+            // refuses the invite link ("Precondition check failed").
+            let invite = fallback(json!({"action": "ACTION_CREATE_COLLABORATION_INVITE_LINK"}));
+            for _ in 0..8 {
+                match write(api, "browse/edit_playlist", invite.clone()).await {
+                    Err(e) if e.downcast_ref::<crate::ytmapi::ApiError>().is_some_and(|a| a.status == 400) => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
+                    r => return r.map(drop),
+                }
+            }
+            invite
+        }
+        CollabChange::Collaborate(true) => c.turn_on.clone().unwrap_or_else(|| fallback(json!({"action": "ACTION_CREATE_COLLABORATION_INVITE_LINK"}))),
+        CollabChange::Collaborate(false) => c.turn_off.clone().unwrap_or_else(|| fallback(json!({"action": "ACTION_SET_CLOSED_TO_CONTRIBUTIONS", "closedToContributions": true}))),
+        CollabChange::AllowNew(true) => c.allow.clone().unwrap_or_else(|| fallback(json!({"action": "ACTION_CREATE_COLLABORATION_INVITE_LINK"}))),
+        CollabChange::AllowNew(false) => c.revoke.clone().unwrap_or_else(|| fallback(json!({"action": "ACTION_REVOKE_COLLABORATION_TOKENS"}))),
+    };
+    write(api, "browse/edit_playlist", body).await?;
     Ok(())
 }
 
@@ -1037,5 +1205,42 @@ mod tests {
         assert_eq!(count("1,234 views"), Some(1_234));
         assert_eq!(parse_duration("1:02:03"), Some(3723));
         assert!(!looks_like_duration("Blinding Lights"));
+    }
+
+    #[test]
+    fn server_queue_picks_the_selected_song() {
+        let v: Value = serde_json::from_str(r#"{"contents":{"singleColumnMusicWatchNextResultsRenderer":{"tabbedRenderer":{"watchNextTabbedResultsRenderer":{"tabs":[{"tabRenderer":{"content":{"musicQueueRenderer":{
+            "content":{"playlistPanelRenderer":{"contents":[
+                {"playlistPanelVideoRenderer":{"title":{"runs":[{"text":"Before"}]},"videoId":"aaaaaaaaaaa","lengthText":{"runs":[{"text":"3:00"}]}}},
+                {"playlistPanelVideoRenderer":{"title":{"runs":[{"text":"Spring Lovers"}]},"videoId":"Q-IaNDsZXDE","selected":true,"lengthText":{"runs":[{"text":"2:50"}]}}},
+                {"automixPreviewVideoRenderer":{"content":{}}}]}},
+            "musicQueueConfig":{"musicQueueRestorationInfo":{"lastWatchTimestamp":{"nanos":546492000,"seconds":"1793133616"}}}}}}}]}}}}}"#).unwrap();
+        let q = parse_server_queue(&v).unwrap();
+        assert_eq!(q.tracks.len(), 2);
+        assert_eq!(q.index, 1);
+        assert_eq!(q.tracks[1].id, "Q-IaNDsZXDE");
+        assert_eq!(q.tracks[1].duration, Some(170));
+        assert_eq!(q.watched_at, 1_793_133_616);
+        // Signed out, or no queue: nothing playing anywhere.
+        assert!(parse_server_queue(&json!({})).is_none());
+    }
+
+    #[test]
+    fn collaboration_panel() {
+        // Trimmed from a real Collaborate panel (get_panel), collaboration off.
+        let edit = |action: &str| json!({"innertubeCommand": {"playlistEditEndpoint": {"actions": [{"action": action}], "playlistId": "PLx"}}});
+        let v = json!({"content": {"engagementPanelSectionListRenderer": {"content": {"playlistCollaborationViewModel": {
+            "allowNewCollaboratorsPlaylistCollaborationSetting": {"switchListItemViewModel": {"switchOffCommand": edit("ACTION_REVOKE_COLLABORATION_TOKENS"), "switchOnCommand": edit("ACTION_CREATE_COLLABORATION_INVITE_LINK"), "switchedOnByDefault": false}},
+            "collaboratePlaylistCollaborationSetting": {"switchListItemViewModel": {
+                "switchOffCommand": {"parallelCommand": {"commands": [{"dismissDialogCommand": {"hack": true}}, {"innertubeCommand": {"playlistEditEndpoint": {"actions": [{"action": "ACTION_SET_CLOSED_TO_CONTRIBUTIONS", "closedToContributions": true}], "playlistId": "PLx"}}}]}},
+                "switchOnCommand": edit("ACTION_CREATE_COLLABORATION_INVITE_LINK"), "switchedOnByDefault": false}},
+            "copyLinkButton": {"buttonViewModel": {"onTap": {"innertubeCommand": {"copyLinkCommand": {"id": "PLx", "shortUrl": ""}}}}},
+            "playlistCollaborationFormSchema": {"initialValues": {"isAllowNewCollaboratorsEnabled": false, "isCollaborationEnabled": false}}}}}}});
+        let c = parse_collaboration("PLx", false, &v).unwrap();
+        assert!(!c.on && !c.allow_new);
+        assert_eq!(c.invite_link, None);
+        assert_eq!(c.turn_off.unwrap()["actions"][0]["closedToContributions"], true);
+        assert_eq!(c.revoke.unwrap()["actions"][0]["action"], "ACTION_REVOKE_COLLABORATION_TOKENS");
+        assert!(c.turn_on.is_some() && c.allow.is_some());
     }
 }
