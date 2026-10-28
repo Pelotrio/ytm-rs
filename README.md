@@ -21,7 +21,7 @@
 </div>
 
 <p align="center">
-  <img src="docs/screenshots/hero.jpg" alt="ytm-rs playing Birds of a Feather by Billie Eilish with synced lyrics, with the Spinning Record and reCover themes behind it" width="100%">
+  <img src="docs/readme/hero.jpg" alt="ytm-rs playing Birds of a Feather by Billie Eilish with synced lyrics, with the Spinning Record and reCover themes behind it" width="100%">
 </p>
 
 ## Table of contents
@@ -64,32 +64,32 @@
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/screenshots/home.jpg" alt="Home feed with mood filters, Quick picks and Throwbacks"></td>
-    <td width="50%"><img src="docs/screenshots/artist.jpg" alt="Billie Eilish's artist page with her top songs"></td>
+    <td width="50%"><img src="docs/readme/home.jpg" alt="Home feed with mood filters, Quick picks and Throwbacks"></td>
+    <td width="50%"><img src="docs/readme/artist.jpg" alt="Billie Eilish's artist page with her top songs"></td>
   </tr>
   <tr>
     <td align="center"><b>Home</b></td>
     <td align="center"><b>Artist page</b></td>
   </tr>
   <tr>
-    <td><img src="docs/screenshots/theme-spinning-record.jpg" alt="Spinning Record theme: Pink Pony Club by Chappell Roan on a spinning vinyl beside the lyrics"></td>
-    <td><img src="docs/screenshots/theme-recover.jpg" alt="reCover theme: Abracadabra by Lady Gaga, the cover filling the left side and fading into the lyrics"></td>
+    <td><img src="docs/readme/theme-spinning-record.jpg" alt="Spinning Record theme: Pink Pony Club by Chappell Roan on a spinning vinyl beside the lyrics"></td>
+    <td><img src="docs/readme/theme-recover.jpg" alt="reCover theme: Abracadabra by Lady Gaga, the cover filling the left side and fading into the lyrics"></td>
   </tr>
   <tr>
     <td align="center"><b>Spinning Record theme</b></td>
     <td align="center"><b>reCover theme</b></td>
   </tr>
   <tr>
-    <td><img src="docs/screenshots/search.jpg" alt="Search results for Tyler, The Creator: top result, songs, artists and albums"></td>
-    <td><img src="docs/screenshots/settings-themes.jpg" alt="The theme gallery in Settings"></td>
+    <td><img src="docs/readme/search.jpg" alt="Search results for Tyler, The Creator: top result, songs, artists and albums"></td>
+    <td><img src="docs/readme/settings-themes.jpg" alt="The theme gallery in Settings"></td>
   </tr>
   <tr>
     <td align="center"><b>Search</b></td>
     <td align="center"><b>Theme gallery</b></td>
   </tr>
   <tr>
-    <td><img src="docs/screenshots/listen-together.jpg" alt="Listen together: start a jam or join one with a code"></td>
-    <td><img src="docs/screenshots/spotify-transfer.jpg" alt="Transfer from Spotify: Today's Top Hits pasted in, ready to copy into a new YouTube Music playlist"></td>
+    <td><img src="docs/readme/listen-together.jpg" alt="Listen together: start a jam or join one with a code"></td>
+    <td><img src="docs/readme/spotify-transfer.jpg" alt="Transfer from Spotify: Today's Top Hits pasted in, ready to copy into a new YouTube Music playlist"></td>
   </tr>
   <tr>
     <td align="center"><b>Listen together</b></td>
