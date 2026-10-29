@@ -2007,8 +2007,14 @@ impl App {
             Resp::Collection { load, c, more } => self.collection_in(load, c, more),
             Resp::CollectionMore { id, load, tracks, set_ids, more } => self.collection_more(id, load, tracks, set_ids, more),
             Resp::Artist(a) => {
+                // A slow answer for an artist left meanwhile doesn't replace the one on screen.
+                if matches!(&self.page, Page::Artist(id) if *id != a.id) {
+                    return;
+                }
+                if self.page == Page::Artist(a.id.clone()) {
+                    self.loading = false;
+                }
                 self.artist = Some(a);
-                self.loading = false;
             }
             Resp::Library(l) => {
                 self.library = Some(l);
@@ -2140,9 +2146,15 @@ impl App {
                     if self.queue_fill.as_ref().is_some_and(|f| f.id == id) {
                         self.queue_fill = None;
                     }
-                    if self.page == Page::Playlist(id) {
+                    let gone = Page::Playlist(id);
+                    if self.page == gone {
                         self.go(Page::Library(LibTab::Playlists));
                     }
+                    // Back and Forward skip it.
+                    self.back.retain(|p| *p != gone);
+                    self.back.dedup();
+                    self.forward.retain(|p| *p != gone);
+                    self.forward.dedup();
                 } else if !removed && (self.opened(&id).is_some() || self.running.contains_key(&id)) {
                     // Kept for going back (or playing): reload it.
                     self.load_list(&id, false, true);
