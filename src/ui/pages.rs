@@ -215,7 +215,7 @@ fn selectable<'a>(app: &'a App, page: &Page) -> Option<(&'a [Track], bool)> {
         Page::Album(id) | Page::Playlist(id) => {
             app.opened(id).map(|o| &o.c).map(|c| (c.tracks.as_slice(), app.logged_in && c.owned && !c.is_album))
         }
-        Page::Library(LibTab::Songs) => app.library.as_ref().map(|l| (l.liked.as_slice(), false)),
+        Page::Library(LibTab::Songs) => app.opened(super::LIKED_MUSIC).map(|o| (o.c.tracks.as_slice(), false)),
         Page::Library(LibTab::History) => app.history.as_deref().map(|h| (h, false)),
         Page::Library(LibTab::Uploads) => app.uploads.as_deref().map(|u| (u, false)),
         _ => None,
@@ -719,6 +719,34 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
             }
             list(ui, &rows, &app.liked, up, true, plain, ListCtx { sel: &mut app.selection, page: &app.page, own: false }, &mut app.actions);
         }
+        // Liked Music, kept like any playlist.
+        LibTab::Songs => {
+            if app.opened(super::LIKED_MUSIC).is_none() {
+                placeholder(app, ui, now, 1, 48.0);
+                return;
+            }
+            let more = app.receiving(super::LIKED_MUSIC);
+            let Some(o) = app.opened.iter().find(|o| o.c.id == super::LIKED_MUSIC) else { return };
+            let liked = &o.c.tracks;
+            if !liked.is_empty() {
+                ui.horizontal(|ui| {
+                    if pill(ui, "Play", Some(icon::PLAY), true).clicked() {
+                        app.actions.push(Action::Play(liked.clone(), 0));
+                    }
+                    if pill(ui, "Shuffle", Some(icon::SHUFFLE), false).clicked() {
+                        let mut t = liked.clone();
+                        super::shuffle(&mut t);
+                        app.actions.push(Action::Play(t, 0));
+                    }
+                    select_pill(ui, &mut app.selection, &app.page);
+                });
+                ui.add_space(10.0);
+            }
+            list(ui, &rows, &app.liked, liked, true, plain, ListCtx { sel: &mut app.selection, page: &app.page, own: false }, &mut app.actions);
+            if more {
+                widgets::skeleton_rows(ui, now, 3);
+            }
+        }
         _ => {
             if app.library.is_none() {
                 placeholder(app, ui, now, 2, CARD);
@@ -734,25 +762,7 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibTab, now: f64) {
                     grid(ui, &lib.playlists, &mut app.actions)
                 }
                 LibTab::Albums => grid(ui, &lib.albums, &mut app.actions),
-                LibTab::Songs => {
-                    let liked = &lib.liked;
-                    if !liked.is_empty() {
-                        ui.horizontal(|ui| {
-                            if pill(ui, "Play", Some(icon::PLAY), true).clicked() {
-                                app.actions.push(Action::Play(liked.clone(), 0));
-                            }
-                            if pill(ui, "Shuffle", Some(icon::SHUFFLE), false).clicked() {
-                                let mut t = liked.clone();
-                                super::shuffle(&mut t);
-                                app.actions.push(Action::Play(t, 0));
-                            }
-                            select_pill(ui, &mut app.selection, &app.page);
-                        });
-                        ui.add_space(10.0);
-                    }
-                    list(ui, &rows, &app.liked, liked, true, plain, ListCtx { sel: &mut app.selection, page: &app.page, own: false }, &mut app.actions);
-                }
-                LibTab::History | LibTab::Uploads => unreachable!(),
+                LibTab::Songs | LibTab::History | LibTab::Uploads => unreachable!(),
             }
         }
     }

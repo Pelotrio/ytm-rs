@@ -438,6 +438,7 @@ fn apply_state(app: &mut App, state: RoomState, at: Instant) {
     app.jam.owner = state.owner;
     app.queue_source = None;
     app.queue_fill = None;
+    app.play_pending = None;
     if state.queue.is_empty() {
         app.queue.clear();
         app.index = None;

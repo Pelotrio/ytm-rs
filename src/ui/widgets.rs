@@ -425,10 +425,10 @@ pub fn song_menu(ui: &mut Ui, t: &Track, liked: bool, remove: Option<usize>, act
 /// The song menu's items, for menus that add their own (now playing's options).
 pub fn song_actions(ui: &mut Ui, t: &Track, liked: bool, remove: Option<usize>, acts: &mut Vec<Action>) {
     if menu_action(ui, Some(icon::HEART), if liked { "Remove like" } else { "Like song" }) {
-        acts.push(Action::Like(t.id.clone(), !liked));
+        acts.push(Action::Like(t.clone(), !liked));
     }
     if menu_action(ui, Some(icon::THUMBS_DOWN), "Dislike song") {
-        acts.push(Action::Dislike(t.id.clone()));
+        acts.push(Action::Dislike(t.clone()));
     }
     if menu_action(ui, Some(icon::LIST_PLUS), "Add to playlist") {
         acts.push(Action::AddToPlaylist(vec![t.clone()]));

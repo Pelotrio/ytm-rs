@@ -86,10 +86,10 @@ pub enum Action {
     QueueJump(usize),
     QueueRemove(usize),
     Seek(f32),
-    Like(String, bool),
+    Like(Track, bool),
     /// Like (or unlike) a selection of songs.
     LikeMany(Vec<Track>, bool),
-    Dislike(String),
+    Dislike(Track),
     Share(Target),
     AddToPlaylist(Vec<Track>),
     /// Rows (indices into the open playlist) to take out of it.
@@ -189,8 +189,11 @@ struct ListLoad {
     stale: bool,
 }
 
-/// How many albums and playlists stay loaded. The page on screen, what's playing and
-/// one still loading aren't the ones dropped.
+/// Liked Music's playlist id.
+const LIKED_MUSIC: &str = "LM";
+
+/// How many albums and playlists stay loaded. The page on screen, what's playing, one
+/// still loading and Liked Music aren't the ones dropped.
 const KEEP_OPENED: usize = 8;
 
 /// A playlist's load whose next pages also go to the queue, and whether that queue
@@ -235,8 +238,9 @@ pub struct App {
     was_focused: bool,
     /// Album / playlist / artist the queue was started from, so its card shows pause.
     queue_source: Option<Target>,
-    /// Source of a PlayCollection request until its tracks arrive.
-    pending_source: Option<Target>,
+    /// Asked to play (shuffled?) before its songs are here: a playlist's first page, or
+    /// an album's or artist's songs (`Req::PlayCollection`).
+    play_pending: Option<(Target, bool)>,
     /// The queue is a playlist played while its songs were still coming in: the rest
     /// join the queue as they arrive.
     queue_fill: Option<QueueFill>,
@@ -497,7 +501,7 @@ impl App {
             queue_checked: None,
             was_focused: false,
             queue_source: None,
-            pending_source: None,
+            play_pending: None,
             queue_fill: None,
             bg,
             page: Page::Home,
@@ -628,6 +632,7 @@ impl App {
             share_pending: None,
             smoke: None,
         };
+        app.request_liked(false);
         // Dev hooks: YTM_SMOKE="query" searches and plays the first song ("id:<videoId>[,<videoId>…]"
         // plays that video); YTM_SEARCH
         // only searches; YTM_PAGE opens a page; YTM_NOWPLAYING opens the overlay.
@@ -767,6 +772,10 @@ impl App {
             Page::Artist(id) => Some(Req::Artist(id.clone())),
             Page::Library(LibTab::History) if self.logged_in => Some(Req::History),
             Page::Library(LibTab::Uploads) if self.logged_in => Some(Req::Uploads),
+            Page::Library(LibTab::Songs) => {
+                self.request_liked(false);
+                None
+            }
             Page::Library(_) if self.logged_in => Some(Req::Library),
             _ => None,
         };
@@ -778,6 +787,7 @@ impl App {
             Page::Artist(id) => self.artist.as_ref().is_some_and(|a| &a.id == id),
             Page::Library(LibTab::History) => self.history.is_some(),
             Page::Library(LibTab::Uploads) => self.uploads.is_some(),
+            Page::Library(LibTab::Songs) => self.opened(LIKED_MUSIC).is_some(),
             Page::Library(_) => self.library.is_some(),
             _ => false,
         };
@@ -820,12 +830,59 @@ impl App {
         self.running.get(id).is_some_and(|l| self.opened(id).is_some_and(|o| o.load == l.load))
     }
 
-    /// The album or playlist the page shows.
+    /// The album or playlist the page shows (the Library's liked songs are Liked Music).
     fn page_list(&self) -> Option<&str> {
         match &self.page {
             Page::Album(id) | Page::Playlist(id) => Some(id),
+            Page::Library(LibTab::Songs) => Some(LIKED_MUSIC),
             _ => None,
         }
+    }
+
+    /// Liked Music: kept like any playlist, and also the Library's liked songs and the
+    /// hearts everywhere. `changed`: load it again even if a load is under way.
+    fn request_liked(&mut self, changed: bool) {
+        if self.logged_in {
+            self.load_list(LIKED_MUSIC, false, changed);
+        }
+    }
+
+    /// Likes made here show at once, in the hearts and in Liked Music as kept. (A whole
+    /// reload asked for just before can still come back without them.)
+    fn set_liked(&mut self, tracks: &[Track], like: bool) {
+        let mut lm = self.opened.iter_mut().find(|o| o.c.id == LIKED_MUSIC).map(|o| &mut o.c);
+        for t in tracks.iter().rev() {
+            if like {
+                self.liked.insert(t.id.clone());
+            } else {
+                self.liked.remove(&t.id);
+            }
+            let Some(c) = lm.as_deref_mut() else { continue };
+            match (like, c.tracks.iter().position(|x| x.id == t.id)) {
+                (true, None) => {
+                    c.tracks.insert(0, t.clone());
+                    c.set_ids.insert(0, None);
+                }
+                (false, Some(i)) => {
+                    c.tracks.remove(i);
+                    c.set_ids.remove(i);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Play a kept album or playlist from the start; one still coming in fills the queue
+    /// as the rest arrives.
+    fn play_opened(&mut self, id: String, shuffled: bool) {
+        let Some(o) = self.opened(&id).filter(|o| !o.c.tracks.is_empty()) else { return };
+        let mut tracks = o.c.tracks.clone();
+        if shuffled {
+            shuffle(&mut tracks);
+        }
+        let fill = self.receiving(&id).then(|| QueueFill { id: id.clone(), load: o.load, shuffled, ran_out: false });
+        self.queue_source = Some(if o.c.is_album { Target::Album(id) } else { Target::Playlist(id) });
+        self.play_list_filling(tracks, 0, fill);
     }
 
     /// The album or playlist on screen.
@@ -844,19 +901,37 @@ impl App {
         if self.page_list() == Some(id.as_str()) {
             self.loading = false;
         }
+        if id == LIKED_MUSIC {
+            self.liked = c.tracks.iter().map(|t| t.id.clone()).collect();
+        }
         self.keep(load, c);
         if !more {
             self.load_done(&id);
+        }
+        // Its card's play button was pressed before it was here (in someone else's jam the host plays).
+        if let Some((Target::Playlist(p), shuffled)) = &self.play_pending
+            && *p == id
+        {
+            let shuffled = *shuffled;
+            self.play_pending = None;
+            if !self.jam.guest() {
+                self.play_opened(id, shuffled);
+            }
         }
     }
 
     /// A playlist's next page: onto the kept copy, and onto the queue when that was played
     /// before all of it was in. An empty last one also ends a load that failed.
-    fn collection_more(&mut self, id: String, load: u64, tracks: Vec<Track>, set_ids: Vec<Option<String>>, more: bool) {
+    fn collection_more(&mut self, id: String, load: u64, mut tracks: Vec<Track>, mut set_ids: Vec<Option<String>>, more: bool) {
         if self.running.get(&id).is_none_or(|l| l.load != load) {
             return;
         }
         if let Some(o) = self.opened.iter_mut().find(|o| o.c.id == id && o.load == load) {
+            // Liked Music has each song once; one liked here meanwhile is at its top already.
+            if id == LIKED_MUSIC {
+                (tracks, set_ids) = tracks.into_iter().zip(set_ids).filter(|(t, _)| !o.c.tracks.iter().any(|x| x.id == t.id)).unzip();
+                self.liked.extend(tracks.iter().map(|t| t.id.clone()));
+            }
             o.c.tracks.extend(tracks.iter().cloned());
             o.c.set_ids.extend(set_ids);
         }
@@ -875,9 +950,15 @@ impl App {
             if l.stale {
                 self.load_list(id, l.album, false);
             }
-        } else if self.page_list() == Some(id) {
-            self.loading = false;
-            self.load_failed = true;
+        } else {
+            // It failed before anything came.
+            if matches!(&self.play_pending, Some((Target::Playlist(p), _)) if p == id) {
+                self.play_pending = None;
+            }
+            if self.page_list() == Some(id) {
+                self.loading = false;
+                self.load_failed = true;
+            }
         }
     }
 
@@ -900,7 +981,7 @@ impl App {
         while self.opened.len() > KEEP_OPENED && i > 0 {
             i -= 1;
             let id = self.opened[i].c.id.as_str();
-            if Some(id) != page.as_deref() && Some(id) != playing.as_deref() && !self.running.contains_key(id) {
+            if Some(id) != page.as_deref() && Some(id) != playing.as_deref() && id != LIKED_MUSIC && !self.running.contains_key(id) {
                 self.opened.remove(i);
             }
         }
@@ -1172,7 +1253,9 @@ impl App {
         if tracks.is_empty() {
             return;
         }
+        // Whatever was about to play doesn't.
         self.queue_fill = fill;
+        self.play_pending = None;
         self.queue = tracks;
         self.index = Some(start.min(self.queue.len() - 1));
         self.play_current();
@@ -1588,27 +1671,28 @@ impl App {
                 self.queue_source = match &self.page {
                     Page::Album(id) => Some(Target::Album(id.clone())),
                     Page::Playlist(id) => Some(Target::Playlist(id.clone())),
+                    Page::Library(LibTab::Songs) => Some(Target::Playlist(LIKED_MUSIC.into())),
                     Page::Artist(id) => Some(Target::Artist(id.clone())),
                     _ => None,
                 };
                 // All of a playlist that's still coming in, in order or shuffled: the rest follows.
-                let fill = match &self.page {
-                    Page::Playlist(id) if self.receiving(id) => self.opened(id).filter(|o| o.c.tracks.len() == tracks.len()).map(|o| QueueFill {
-                        id: id.clone(),
-                        load: o.load,
-                        shuffled: o.c.tracks.iter().zip(&tracks).any(|(a, b)| a.id != b.id),
-                        ran_out: false,
-                    }),
-                    _ => None,
-                };
+                let fill = self.page_list().filter(|id| self.receiving(id)).and_then(|id| {
+                    let o = self.opened(id).filter(|o| o.c.tracks.len() == tracks.len())?;
+                    Some(QueueFill { id: id.to_owned(), load: o.load, shuffled: o.c.tracks.iter().zip(&tracks).any(|(a, b)| a.id != b.id), ran_out: false })
+                });
                 self.play_list_filling(tracks, i, fill);
             }
             Action::TogglePlay => self.toggle(),
             Action::TransferPick(t) => transfer::use_pick(self, t),
+            // Kept already: at once. A playlist that isn't starts with its first page.
+            Action::PlayCollection(Target::Album(id) | Target::Playlist(id), shuffle) if self.opened(&id).is_some() => self.play_opened(id, shuffle),
             Action::PlayCollection(target, shuffle) => {
                 self.toast("Starting playback…");
-                self.pending_source = Some(target.clone());
-                self.backend.request(Req::PlayCollection { target, shuffle });
+                self.play_pending = Some((target.clone(), shuffle));
+                match target {
+                    Target::Playlist(id) => self.load_list(&id, false, false),
+                    target => self.backend.request(Req::PlayCollection { target }),
+                }
             }
             Action::Open(Target::Song(t)) | Action::Radio(t) => {
                 self.queue_source = None;
@@ -1642,6 +1726,7 @@ impl App {
             }
             Action::Go(p) => self.go(p),
             Action::QueueJump(i) => {
+                self.play_pending = None;
                 self.index = Some(i);
                 self.play_current();
             }
@@ -1657,27 +1742,14 @@ impl App {
                 self.seek_to(Duration::from_secs_f32(secs.max(0.0)));
                 self.lyric_view.resume();
             }
-            Action::Like(id, like) => {
+            Action::Like(t, like) => {
                 if !self.logged_in {
                     self.toast("Sign in to like songs");
                     return;
                 }
                 // Optimistic: update the like state and the cached Liked songs list now.
-                if like {
-                    self.liked.insert(id.clone());
-                    let track = self.queue.iter().find(|t| t.id == id).cloned();
-                    if let (Some(lib), Some(t)) = (&mut self.library, track) {
-                        if !lib.liked.iter().any(|x| x.id == id) {
-                            lib.liked.insert(0, t);
-                        }
-                    }
-                } else {
-                    self.liked.remove(&id);
-                    if let Some(lib) = &mut self.library {
-                        lib.liked.retain(|t| t.id != id);
-                    }
-                }
-                self.backend.request(Req::Like { video_id: id, like });
+                self.set_liked(std::slice::from_ref(&t), like);
+                self.backend.request(Req::Like { video_id: t.id, like });
             }
             Action::LikeMany(tracks, like) => {
                 if !self.logged_in {
@@ -1686,23 +1758,13 @@ impl App {
                 }
                 let tracks: Vec<Track> = tracks.into_iter().filter(|t| self.liked.contains(&t.id) != like).collect();
                 if tracks.is_empty() { return; }
-                for t in &tracks {
-                    if like { self.liked.insert(t.id.clone()); } else { self.liked.remove(&t.id); }
-                }
-                if let Some(lib) = &mut self.library {
-                    if like {
-                        for t in tracks.iter().rev() { lib.liked.insert(0, t.clone()); }
-                    } else {
-                        lib.liked.retain(|t| !tracks.iter().any(|x| x.id == t.id));
-                    }
-                }
+                self.set_liked(&tracks, like);
                 self.backend.request(Req::LikeMany { video_ids: tracks.into_iter().map(|t| t.id).collect(), like });
             }
-            Action::Dislike(id) => {
+            Action::Dislike(t) => {
                 if !self.logged_in { self.toast("Sign in to rate songs"); return; }
-                self.liked.remove(&id);
-                if let Some(lib) = &mut self.library { lib.liked.retain(|t| t.id != id); }
-                self.backend.request(Req::Dislike(id));
+                self.set_liked(std::slice::from_ref(&t), false);
+                self.backend.request(Req::Dislike(t.id));
             }
             Action::Share(target) => {
                 self.share_pending = Some(share_url(&target));
@@ -1949,7 +2011,6 @@ impl App {
                 self.loading = false;
             }
             Resp::Library(l) => {
-                self.liked = l.liked.iter().map(|t| t.id.clone()).collect();
                 self.library = Some(l);
                 self.loading = false;
             }
@@ -2024,9 +2085,17 @@ impl App {
                     self.prefetch_next();
                 }
             }
-            Resp::PlayQueue { tracks } => {
-                self.queue_source = self.pending_source.take();
-                self.play_list(tracks, 0);
+            // Unless something else was asked to play meanwhile; shuffled as last asked.
+            Resp::PlayQueue { target, mut tracks } => {
+                if let Some((p, shuffled)) = &self.play_pending
+                    && *p == target
+                {
+                    if *shuffled {
+                        shuffle(&mut tracks);
+                    }
+                    self.queue_source = Some(target);
+                    self.play_list(tracks, 0);
+                }
             }
             Resp::Liked { video_id, like } => {
                 if like {
@@ -2138,6 +2207,7 @@ impl App {
                 self.opened.clear();
                 self.running.clear();
                 self.queue_fill = None;
+                self.play_pending = None;
                 if self.page_list().is_some() {
                     self.refresh();
                 }
@@ -2146,6 +2216,7 @@ impl App {
                 self.backend.request(Req::Home(None));
                 if v {
                     self.request_library();
+                    self.request_liked(false);
                     self.backend.request(Req::Account);
                 } else {
                     self.liked.clear();

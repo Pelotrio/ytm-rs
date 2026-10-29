@@ -57,7 +57,7 @@ pub enum Req {
     /// Radio seeded from a track; appended to the queue.
     Radio(String),
     /// Fetch an album/playlist and play it from the start.
-    PlayCollection { target: Target, shuffle: bool },
+    PlayCollection { target: Target },
     /// `at`: start position (non-zero when resuming last session's song). `report`: tell
     /// YouTube about the play (not when picking up a song already counted).
     Play { video_id: String, generation: u64, at: std::time::Duration, report: bool },
@@ -177,7 +177,6 @@ pub struct ArtistPage {
 }
 
 pub struct Library {
-    pub liked: Vec<Track>,
     pub playlists: Vec<Card>,
     pub albums: Vec<Card>,
 }
@@ -209,7 +208,8 @@ pub enum Resp {
     LyricsExtras { video_id: String, source: String, target: String, extras: crate::translate::Extras },
     Art { key: String, art: Art },
     Radio { seed: String, tracks: Vec<Track> },
-    PlayQueue { tracks: Vec<Track> },
+    /// What was asked to play (a `Req::PlayCollection`), and its songs.
+    PlayQueue { target: Target, tracks: Vec<Track> },
     Liked { video_id: String, like: bool },
     LikedMany { count: usize, like: bool },
     PlaylistCreated { id: String, songs: usize },
@@ -444,14 +444,18 @@ impl Backend {
                     Resp::SearchForgotten
                 }
                 Req::Album { id, load } => Resp::Collection { load, c: ytm::album(api, &id).await?, more: false },
-                Req::Playlist { id, load, stream: false } => Resp::Collection { load, c: ytm::playlist(api, &id, me, 500).await?, more: false },
+                Req::Playlist { id, load, stream: false } => Resp::Collection { load, c: ytm::playlist(api, &id, me, None).await?, more: false },
                 Req::Playlist { id, load, stream: true } => self.stream_playlist(id, load, me).await?,
                 Req::Artist(id) => Resp::Artist(ytm::artist(api, &id).await?),
                 Req::Library => {
-                    let (liked, pls, albums) =
-                        tokio::join!(ytm::playlist(api, "LM", true, 1000), ytm::saved_playlists(api), ytm::saved_albums(api));
+                    // Liked songs are Liked Music, loaded like any playlist. Each half shows
+                    // without the other; it only fails when both do.
+                    let (pls, albums) = tokio::join!(ytm::saved_playlists(api), ytm::saved_albums(api));
+                    let pls = match (pls, &albums) {
+                        (Err(e), Err(_)) => return Err(e),
+                        (pls, _) => pls,
+                    };
                     Resp::Library(Library {
-                        liked: liked?.tracks,
                         playlists: pls.map(|p| p.into_iter().filter(saved_playlist_visible).collect()).unwrap_or_default(),
                         albums: albums.unwrap_or_default(),
                     })
@@ -518,17 +522,14 @@ impl Backend {
                     let tracks = ytm::radio(api, &seed, false, 50).await?;
                     Resp::Radio { seed, tracks }
                 }
-                Req::PlayCollection { target, shuffle } => {
-                    let mut tracks = match target {
-                        Target::Album(id) => ytm::album(api, &id).await?.tracks,
-                        Target::Playlist(id) => ytm::playlist(api, &id, me, 500).await?.tracks,
-                        Target::Artist(id) => ytm::artist(api, &id).await?.top,
-                        Target::Song(t) => vec![t],
+                Req::PlayCollection { target } => {
+                    let tracks = match &target {
+                        Target::Album(id) => ytm::album(api, id).await?.tracks,
+                        Target::Playlist(id) => ytm::playlist(api, id, me, None).await?.tracks,
+                        Target::Artist(id) => ytm::artist(api, id).await?.top,
+                        Target::Song(t) => vec![t.clone()],
                     };
-                    if shuffle {
-                        crate::ui::shuffle(&mut tracks);
-                    }
-                    Resp::PlayQueue { tracks }
+                    Resp::PlayQueue { target, tracks }
                 }
                 Req::Download(t) => {
                     let path = self.download(&t).await?;
@@ -986,7 +987,7 @@ impl Backend {
     /// Send a playlist's first page right away, then each next page as it arrives
     /// (YouTube takes about half a second per page of 100). The last one is returned.
     async fn stream_playlist(&self, id: String, load: u64, me: bool) -> anyhow::Result<Resp> {
-        let (c, mut token, limit) = ytm::playlist_start(&self.api, &id, me, 500).await?;
+        let (c, mut token, limit) = ytm::playlist_start(&self.api, &id, me, None).await?;
         let mut have = c.tracks.len();
         let mut resp = Resp::Collection { load, c, more: token.is_some() && have < limit };
         while let Some(t) = token.take().filter(|_| have < limit) {
