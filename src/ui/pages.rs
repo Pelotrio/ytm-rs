@@ -213,7 +213,7 @@ fn select_pill(ui: &mut Ui, sel: &mut Selection, page: &Page) {
 fn selectable<'a>(app: &'a App, page: &Page) -> Option<(&'a [Track], bool)> {
     match page {
         Page::Album(id) | Page::Playlist(id) => {
-            app.collection.as_ref().filter(|c| &c.id == id).map(|c| (c.tracks.as_slice(), app.logged_in && c.owned && !c.is_album))
+            app.opened(id).map(|o| &o.c).map(|c| (c.tracks.as_slice(), app.logged_in && c.owned && !c.is_album))
         }
         Page::Library(LibTab::Songs) => app.library.as_ref().map(|l| (l.liked.as_slice(), false)),
         Page::Library(LibTab::History) => app.history.as_deref().map(|h| (h, false)),
@@ -478,12 +478,13 @@ fn top_result(ui: &mut Ui, c: &Card, pick: bool, acts: &mut Vec<Action>) {
 // ------------------------------------------------------------------ album / playlist
 
 fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
-    if app.collection.as_ref().is_none_or(|c| c.id != id) {
+    if app.opened(id).is_none() {
         placeholder(app, ui, now, 1, 232.0);
         return;
     }
     let rows = Rows::new(app, now);
-    let Some(c) = &app.collection else { return };
+    let Some(o) = app.opened.iter().find(|o| o.c.id == id) else { return };
+    let (c, more) = (&o.c, app.receiving(id));
     let acts = &mut app.actions;
     let tracks = &c.tracks;
     let is_album = c.is_album;
@@ -563,6 +564,9 @@ fn collection(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
     let number = |i: usize, t: &Track| is_album.then(|| t.track_nr.map_or(i + 1, |n| n as usize));
     let own = app.logged_in && c.owned && !is_album;
     list(ui, &rows, &app.liked, tracks, !is_album, number, ListCtx { sel: &mut app.selection, page: &app.page, own }, acts);
+    if more {
+        widgets::skeleton_rows(ui, now, 3);
+    }
 }
 
 // ------------------------------------------------------------------ artist

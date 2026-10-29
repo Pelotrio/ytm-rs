@@ -13,7 +13,7 @@ mod karaoke;
 mod lyric_prefs;
 mod widgets;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -173,6 +173,36 @@ pub struct HomeState {
     pub picks_expanded: bool,
 }
 
+/// An album or playlist page kept for going back to.
+pub struct Opened {
+    pub c: Collection,
+    /// The load it came from; only that load's next pages are added.
+    load: u64,
+}
+
+/// An album or playlist load under way (one each at a time). A playlist not kept yet
+/// comes in page by page; a kept one is swapped for the new copy once all of it is in.
+struct ListLoad {
+    load: u64,
+    album: bool,
+    /// It changed meanwhile, so it's loaded again afterwards.
+    stale: bool,
+}
+
+/// How many albums and playlists stay loaded. The page on screen, what's playing and
+/// one still loading aren't the ones dropped.
+const KEEP_OPENED: usize = 8;
+
+/// A playlist's load whose next pages also go to the queue, and whether that queue
+/// is shuffled (they're then mixed into what's still to come). `ran_out`: playback
+/// reached the end of what had come, and carries on when more does (or the load ends).
+struct QueueFill {
+    id: String,
+    load: u64,
+    shuffled: bool,
+    ran_out: bool,
+}
+
 pub struct Channels {
     pub resp_rx: Receiver<Resp>,
     pub audio_rx: Receiver<AudioEvent>,
@@ -207,6 +237,9 @@ pub struct App {
     queue_source: Option<Target>,
     /// Source of a PlayCollection request until its tracks arrive.
     pending_source: Option<Target>,
+    /// The queue is a playlist played while its songs were still coming in: the rest
+    /// join the queue as they arrive.
+    queue_fill: Option<QueueFill>,
     bg: Option<Background>,
 
     // navigation
@@ -233,7 +266,13 @@ pub struct App {
     home_loading: bool,
     explore: Option<Explore>,
     search: Option<SearchResults>,
-    collection: Option<Collection>,
+    /// Albums and playlists opened lately, most recent first, so going back to one
+    /// shows it at once (and refreshes it quietly).
+    opened: Vec<Opened>,
+    /// Numbers album and playlist loads.
+    loads: u64,
+    /// Album and playlist loads under way: only their answers are taken.
+    running: HashMap<String, ListLoad>,
     artist: Option<ArtistPage>,
     library: Option<Library>,
     /// When the library was last requested; the sidebar spinner gives up after a while.
@@ -459,6 +498,7 @@ impl App {
             was_focused: false,
             queue_source: None,
             pending_source: None,
+            queue_fill: None,
             bg,
             page: Page::Home,
             back: Vec::new(),
@@ -476,7 +516,9 @@ impl App {
             home_loading: true,
             explore: None,
             search: None,
-            collection: None,
+            opened: Vec::new(),
+            loads: 0,
+            running: HashMap::new(),
             artist: None,
             library: None,
             library_requested: std::time::Instant::now(),
@@ -705,15 +747,23 @@ impl App {
         if !matches!(self.page, Page::Search(_)) {
             self.xfer.picking = None;
         }
-        let req = match &self.page {
+        if let Some(id) = self.page_list()
+            && let Some(i) = self.opened.iter().position(|o| o.c.id == id)
+        {
+            let o = self.opened.remove(i);
+            self.opened.insert(0, o);
+        }
+        let req = match &self.page.clone() {
             Page::Home if !self.home_loading => {
                 self.home_loading = true;
                 Some(Req::Home(None))
             }
             Page::Explore => Some(Req::Explore(self.preferred_artist_ids())),
             Page::Search(q) if self.search.as_ref().is_none_or(|s| &s.query != q) => Some(Req::Search(q.clone())),
-            Page::Album(id) => Some(Req::Album(id.clone())),
-            Page::Playlist(id) => Some(Req::Playlist(id.clone())),
+            Page::Album(id) | Page::Playlist(id) => {
+                self.load_list(id, matches!(self.page, Page::Album(_)), false);
+                None
+            }
             Page::Artist(id) => Some(Req::Artist(id.clone())),
             Page::Library(LibTab::History) if self.logged_in => Some(Req::History),
             Page::Library(LibTab::Uploads) if self.logged_in => Some(Req::Uploads),
@@ -724,20 +774,161 @@ impl App {
         let cached = match &self.page {
             Page::Home => self.home.is_some(),
             Page::Explore => self.explore.is_some(),
-            Page::Album(id) | Page::Playlist(id) => self.collection.as_ref().is_some_and(|c| &c.id == id),
+            Page::Album(id) | Page::Playlist(id) => self.opened(id).is_some(),
             Page::Artist(id) => self.artist.as_ref().is_some_and(|a| &a.id == id),
             Page::Library(LibTab::History) => self.history.is_some(),
             Page::Library(LibTab::Uploads) => self.uploads.is_some(),
             Page::Library(_) => self.library.is_some(),
             _ => false,
         };
-        self.loading = req.is_some() && !cached;
+        let coming = self.page_list().is_some_and(|id| self.running.contains_key(id));
+        self.loading = (req.is_some() || coming) && !cached;
         self.load_failed = false;
         match req {
             Some(Req::Library) => self.request_library(),
             Some(r) => self.backend.request(r),
             None => {}
         }
+    }
+
+    fn next_load(&mut self) -> u64 {
+        self.loads += 1;
+        self.loads
+    }
+
+    /// Load an album or playlist, unless a load of it is under way. `changed`: if one is,
+    /// it's loaded once more afterwards.
+    fn load_list(&mut self, id: &str, album: bool, changed: bool) {
+        if let Some(l) = self.running.get_mut(id) {
+            l.stale |= changed;
+            return;
+        }
+        let load = self.next_load();
+        self.running.insert(id.to_owned(), ListLoad { load, album, stale: false });
+        self.backend.request(match album {
+            true => Req::Album { id: id.to_owned(), load },
+            false => Req::Playlist { id: id.to_owned(), load, stream: self.opened(id).is_none() },
+        });
+    }
+
+    fn opened(&self, id: &str) -> Option<&Opened> {
+        self.opened.iter().find(|o| o.c.id == id)
+    }
+
+    /// More of the kept copy is still coming in, page by page.
+    fn receiving(&self, id: &str) -> bool {
+        self.running.get(id).is_some_and(|l| self.opened(id).is_some_and(|o| o.load == l.load))
+    }
+
+    /// The album or playlist the page shows.
+    fn page_list(&self) -> Option<&str> {
+        match &self.page {
+            Page::Album(id) | Page::Playlist(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The album or playlist on screen.
+    fn current_collection(&mut self) -> Option<&mut Collection> {
+        let id = self.page_list()?.to_owned();
+        self.opened.iter_mut().find(|o| o.c.id == id).map(|o| &mut o.c)
+    }
+
+    /// An album or playlist (or a playlist's first page) came in. Only the load under way
+    /// counts: one from before a sign-in change or a deletion is dropped.
+    fn collection_in(&mut self, load: u64, c: Collection, more: bool) {
+        if self.running.get(&c.id).is_none_or(|l| l.load != load) {
+            return;
+        }
+        let id = c.id.clone();
+        if self.page_list() == Some(id.as_str()) {
+            self.loading = false;
+        }
+        self.keep(load, c);
+        if !more {
+            self.load_done(&id);
+        }
+    }
+
+    /// A playlist's next page: onto the kept copy, and onto the queue when that was played
+    /// before all of it was in. An empty last one also ends a load that failed.
+    fn collection_more(&mut self, id: String, load: u64, tracks: Vec<Track>, set_ids: Vec<Option<String>>, more: bool) {
+        if self.running.get(&id).is_none_or(|l| l.load != load) {
+            return;
+        }
+        if let Some(o) = self.opened.iter_mut().find(|o| o.c.id == id && o.load == load) {
+            o.c.tracks.extend(tracks.iter().cloned());
+            o.c.set_ids.extend(set_ids);
+        }
+        self.fill_queue(&id, load, tracks, more);
+        if !more {
+            self.load_done(&id);
+        }
+    }
+
+    /// An album or playlist load ended: load it again if it changed meanwhile. One that
+    /// failed before anything came leaves its page with the retry.
+    fn load_done(&mut self, id: &str) {
+        let Some(l) = self.running.remove(id) else { return };
+        self.trim();
+        if self.opened(id).is_some() {
+            if l.stale {
+                self.load_list(id, l.album, false);
+            }
+        } else if self.page_list() == Some(id) {
+            self.loading = false;
+            self.load_failed = true;
+        }
+    }
+
+    fn keep(&mut self, load: u64, c: Collection) {
+        match self.opened.iter_mut().find(|o| o.c.id == c.id) {
+            Some(o) => *o = Opened { c, load },
+            None => self.opened.insert(0, Opened { c, load }),
+        }
+        self.trim();
+    }
+
+    /// Drop the oldest kept albums and playlists beyond `KEEP_OPENED`.
+    fn trim(&mut self) {
+        let page = self.page_list().map(str::to_owned);
+        let playing = match &self.queue_source {
+            Some(Target::Album(id) | Target::Playlist(id)) => Some(id.clone()),
+            _ => None,
+        };
+        let mut i = self.opened.len();
+        while self.opened.len() > KEEP_OPENED && i > 0 {
+            i -= 1;
+            let id = self.opened[i].c.id.as_str();
+            if Some(id) != page.as_deref() && Some(id) != playing.as_deref() && !self.running.contains_key(id) {
+                self.opened.remove(i);
+            }
+        }
+    }
+
+    /// The next songs of a playlist played before all of it was in join the queue.
+    fn fill_queue(&mut self, id: &str, load: u64, tracks: Vec<Track>, more: bool) {
+        let Some(fill) = self.queue_fill.as_mut().filter(|f| f.id == id && f.load == load) else { return };
+        let (shuffled, ran_out) = (fill.shuffled, std::mem::take(&mut fill.ran_out));
+        if !more {
+            self.queue_fill = None;
+        }
+        if self.queue_source != Some(Target::Playlist(id.to_owned())) {
+            return;
+        }
+        let was_at_end = self.index.is_some_and(|i| i + 1 >= self.queue.len());
+        self.queue.extend(tracks);
+        if shuffled {
+            // Mixed into what's still to come, past the next song (it may be loading already).
+            let from = self.index.map_or(0, |i| i + if was_at_end { 1 } else { 2 }).min(self.queue.len());
+            shuffle(&mut self.queue[from..]);
+        }
+        if ran_out {
+            self.next();
+        } else if was_at_end && !self.buffering {
+            self.prefetch_next();
+        }
+        self.top_up();
     }
 
     fn request_library(&mut self) {
@@ -973,9 +1164,15 @@ impl App {
     }
 
     fn play_list(&mut self, tracks: Vec<Track>, start: usize) {
+        self.play_list_filling(tracks, start, None);
+    }
+
+    /// `fill`: the queue is a playlist still coming in, and its other songs follow.
+    fn play_list_filling(&mut self, tracks: Vec<Track>, start: usize, fill: Option<QueueFill>) {
         if tracks.is_empty() {
             return;
         }
+        self.queue_fill = fill;
         self.queue = tracks;
         self.index = Some(start.min(self.queue.len() - 1));
         self.play_current();
@@ -1026,6 +1223,7 @@ impl App {
         self.queue = q.tracks;
         self.index = Some(q.index);
         self.queue_source = None;
+        self.queue_fill = None;
         self.listened_at = q.watched_at;
         self.audio.send(AudioCmd::Stop);
         self.audio.status.duration_ms.store(track.duration.map_or(0, |d| d as u64 * 1000), Ordering::Relaxed);
@@ -1098,6 +1296,10 @@ impl App {
     /// `report`: a new play for the account's history (not picking up last session's song).
     fn play_current_at(&mut self, at: Duration, report: bool) {
         let Some(track) = self.current().cloned() else { return };
+        // Something plays: it no longer waits for a playlist's next songs.
+        if let Some(fill) = &mut self.queue_fill {
+            fill.ran_out = false;
+        }
         self.resume_at = None;
         self.resume_counts = false;
         self.generation += 1;
@@ -1128,10 +1330,17 @@ impl App {
         self.backend.request(Req::Lyrics(track.clone()));
         self.segments = None;
         self.request_segments();
-        // Keep the queue topped up so autoplay never stalls at the end.
-        if self.autoplay && !self.radio_pending && !self.jam.guest() && self.index.is_some_and(|i| i + 1 >= self.queue.len()) {
+        self.top_up();
+    }
+
+    /// Keep the queue topped up so autoplay never stalls at the end; a playlist still
+    /// coming in goes first.
+    fn top_up(&mut self) {
+        if self.autoplay && !self.radio_pending && !self.jam.guest() && self.queue_fill.is_none() && self.index.is_some_and(|i| i + 1 >= self.queue.len())
+            && let Some(id) = self.current().map(|t| t.id.clone())
+        {
             self.radio_pending = true;
-            self.backend.request(Req::Radio(track.id));
+            self.backend.request(Req::Radio(id));
         }
     }
 
@@ -1199,6 +1408,9 @@ impl App {
         let Some(i) = self.index else { return };
         if i + 1 < self.queue.len() {
             self.index = Some(i + 1);
+        } else if let Some(fill) = &mut self.queue_fill {
+            fill.ran_out = true;
+            return;
         } else if self.repeat == Repeat::All && !self.queue.is_empty() {
             self.index = Some(0);
         } else {
@@ -1260,6 +1472,9 @@ impl App {
         let start = self.index.map_or(0, |i| i + 1);
         if start < self.queue.len() {
             shuffle(&mut self.queue[start..]);
+            if let Some(fill) = &mut self.queue_fill {
+                fill.shuffled = true;
+            }
             self.toast("Shuffled up next");
             self.prefetch_next();
         }
@@ -1376,7 +1591,17 @@ impl App {
                     Page::Artist(id) => Some(Target::Artist(id.clone())),
                     _ => None,
                 };
-                self.play_list(tracks, i);
+                // All of a playlist that's still coming in, in order or shuffled: the rest follows.
+                let fill = match &self.page {
+                    Page::Playlist(id) if self.receiving(id) => self.opened(id).filter(|o| o.c.tracks.len() == tracks.len()).map(|o| QueueFill {
+                        id: id.clone(),
+                        load: o.load,
+                        shuffled: o.c.tracks.iter().zip(&tracks).any(|(a, b)| a.id != b.id),
+                        ran_out: false,
+                    }),
+                    _ => None,
+                };
+                self.play_list_filling(tracks, i, fill);
             }
             Action::TogglePlay => self.toggle(),
             Action::TransferPick(t) => transfer::use_pick(self, t),
@@ -1492,7 +1717,7 @@ impl App {
                 else { self.toast("Sign in to edit playlists"); }
             }
             Action::RemoveFromPlaylist(mut rows) => {
-                let Some(c) = self.collection.as_mut().filter(|c| c.owned && !c.is_album) else { return };
+                let Some(c) = self.current_collection().filter(|c| c.owned && !c.is_album) else { return };
                 rows.sort_unstable();
                 rows.dedup();
                 rows.retain(|&i| c.set_ids.get(i).is_some_and(Option::is_some));
@@ -1501,33 +1726,35 @@ impl App {
                     return;
                 }
                 let items = rows.iter().map(|&i| (c.tracks[i].id.clone(), c.set_ids[i].clone().unwrap_or_default())).collect();
-                // Optimistic: drop the rows now; the playlist reloads once YouTube confirms.
+                // Optimistic: drop the rows now. YouTube Music still lists them for a moment,
+                // so no reload follows.
                 for &i in rows.iter().rev() {
                     c.tracks.remove(i);
                     c.set_ids.remove(i);
                 }
+                let playlist_id = c.id.clone();
                 self.selection.clear();
-                self.backend.request(Req::RemoveFromPlaylist { playlist_id: c.id.clone(), items });
+                self.backend.request(Req::RemoveFromPlaylist { playlist_id, items });
             }
             Action::NewPlaylist(tracks) => {
                 if self.logged_in { self.dialog = Some(Dialog::NewPlaylist { title: String::new(), tracks }); }
                 else { self.toast("Sign in to create playlists"); }
             }
             Action::EditPlaylist => {
-                if let Some(c) = self.collection.as_ref().filter(|c| !c.is_album) {
+                if let Some(c) = self.current_collection().filter(|c| !c.is_album) {
                     self.dialog = Some(Dialog::EditPlaylist {
                         id: c.id.clone(), title: c.title.clone(), description: c.description.clone().unwrap_or_default(), privacy: None,
                     });
                 }
             }
             Action::Collaborate => {
-                if let Some(c) = self.collection.as_ref().filter(|c| !c.is_album && c.owned) {
-                    self.backend.request(Req::Collaboration(c.id.clone()));
-                    self.dialog = Some(Dialog::Collaborate { id: c.id.clone(), info: None, busy: true, confirm_off: false });
+                if let Some(id) = self.current_collection().filter(|c| !c.is_album && c.owned).map(|c| c.id.clone()) {
+                    self.backend.request(Req::Collaboration(id.clone()));
+                    self.dialog = Some(Dialog::Collaborate { id, info: None, busy: true, confirm_off: false });
                 }
             }
             Action::DeletePlaylist => {
-                if let Some(c) = self.collection.as_ref().filter(|c| !c.is_album) {
+                if let Some(c) = self.current_collection().filter(|c| !c.is_album) {
                     self.dialog = Some(Dialog::ConfirmDelete { id: c.id.clone(), title: c.title.clone() });
                 }
             }
@@ -1715,10 +1942,8 @@ impl App {
                     self.suggest_sel = None;
                 }
             }
-            Resp::Collection(c) => {
-                self.collection = Some(c);
-                self.loading = false;
-            }
+            Resp::Collection { load, c, more } => self.collection_in(load, c, more),
+            Resp::CollectionMore { id, load, tracks, set_ids, more } => self.collection_more(id, load, tracks, set_ids, more),
             Resp::Artist(a) => {
                 self.artist = Some(a);
                 self.loading = false;
@@ -1839,10 +2064,19 @@ impl App {
                 // A removal already shows (the rows went right away), and a reload this soon
                 // still gets the songs back from YouTube Music.
                 let removed = message == "Removed from playlist";
-                if let Some(id) = id {
-                    if self.page == Page::Playlist(id.clone()) && !removed { self.backend.request(Req::Playlist(id)); }
-                } else if matches!(self.page, Page::Playlist(_)) {
-                    self.go(Page::Library(LibTab::Playlists));
+                if message == "Playlist deleted" {
+                    // Its load is dropped too, and the queue stops waiting for it.
+                    self.opened.retain(|o| o.c.id != id);
+                    self.running.remove(&id);
+                    if self.queue_fill.as_ref().is_some_and(|f| f.id == id) {
+                        self.queue_fill = None;
+                    }
+                    if self.page == Page::Playlist(id) {
+                        self.go(Page::Library(LibTab::Playlists));
+                    }
+                } else if !removed && (self.opened(&id).is_some() || self.running.contains_key(&id)) {
+                    // Kept for going back (or playing): reload it.
+                    self.load_list(&id, false, true);
                 }
                 self.toast(message);
             }
@@ -1900,6 +2134,13 @@ impl App {
                 self.library = None;
                 self.history = None;
                 self.uploads = None;
+                // Your own playlists show differently (and private ones not at all) to another account.
+                self.opened.clear();
+                self.running.clear();
+                self.queue_fill = None;
+                if self.page_list().is_some() {
+                    self.refresh();
+                }
                 self.home = None;
                 self.home_loading = true;
                 self.backend.request(Req::Home(None));
