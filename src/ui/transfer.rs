@@ -312,7 +312,7 @@ fn setup(app: &mut App, ui: &mut Ui) {
                         .hint_text(RichText::new("https://open.spotify.com/playlist/…").color(theme::TEXT_FAINT))
                         .font(theme::regular(14.0))
                         .frame(egui::Frame::NONE)
-                        .vertical_align(egui::Align::Center)
+                        .align(egui::Align2::LEFT_CENTER)
                         .desired_width(inner.width()),
                 );
                 if edit.changed() {
@@ -546,7 +546,7 @@ fn destination(app: &mut App, ui: &mut Ui, chosen: Option<&Entry>, accent: Color
             .hint_text(RichText::new("Same as on Spotify").color(theme::TEXT_FAINT))
             .font(theme::regular(14.0))
             .frame(egui::Frame::NONE)
-            .vertical_align(egui::Align::Center)
+            .align(egui::Align2::LEFT_CENTER)
             .desired_width(inner.width()),
     );
     ui.add_space(10.0);
@@ -828,7 +828,7 @@ fn song_row(ui: &mut Ui, i: usize, sp: &Track, result: &Search, accent: Color32,
         Some(t) => {
             let img = Rect::from_min_size(pos2(ytx, rect.center().y - 19.0), vec2(38.0, 38.0));
             paint_cover(ui, img, &t.thumbs, theme::thumb_radius(), 1.0);
-            let r = ui.interact(img, ui.id().with(("prev", i)), Sense::click());
+            let r = ui.interact(img, ui.scope_id().with(("prev", i)), Sense::click());
             if named(r.clone(), "Play this match").on_hover_text("Play").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 acts.push(Action::Play(vec![t.clone()], 0));
             }

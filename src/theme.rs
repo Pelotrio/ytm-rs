@@ -87,11 +87,11 @@ pub const SPEED: f32 = 0.65;
 
 /// Animate toward `target` (eased), keyed by `id`. Requests repaints while moving.
 pub fn anim(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug, target: f32, secs: f32) -> f32 {
-    ctx.animate_value_with_time(egui::Id::new(id), target, secs * SPEED)
+    ctx.animate_value_with_time(egui::Id::unique(id), target, secs * SPEED)
 }
 
 pub fn anim_bool(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug, on: bool, secs: f32) -> f32 {
-    ease_out(ctx.animate_bool_with_time(egui::Id::new(id), on, secs * SPEED))
+    ease_out(ctx.animate_bool_with_time(egui::Id::unique(id), on, secs * SPEED))
 }
 
 // ------------------------------------------------------------------ type
@@ -615,7 +615,28 @@ pub fn install_fonts(ctx: &egui::Context, ui_font: &str) {
             defs.families.insert(FontFamily::Name(format!("choice-{w}").into()), inter);
         }
     }
+    // The same bytes get the same `Arc` on every install, so comparing these definitions
+    // with the installed ones is a pointer check per font instead of reading every file.
+    for data in defs.font_data.values_mut() {
+        let font = shared_bytes(&data.font);
+        if !Arc::ptr_eq(&font, &data.font) {
+            *data = Arc::new(FontData { font, ..(**data).clone() });
+        }
+    }
     ctx.set_fonts(defs);
+}
+
+/// The first `Blob` seen for these bytes. Font bytes here are all `'static` (bundled, or
+/// mapped for the rest of the process), so the address identifies them for good.
+fn shared_bytes(blob: &egui::epaint::text::Blob) -> egui::epaint::text::Blob {
+    static SEEN: std::sync::Mutex<Vec<egui::epaint::text::Blob>> = std::sync::Mutex::new(Vec::new());
+    let bytes = (**blob).as_ref();
+    let mut seen = SEEN.lock().unwrap();
+    if let Some(b) = seen.iter().find(|b| std::ptr::eq((***b).as_ref(), bytes)) {
+        return b.clone();
+    }
+    seen.push(blob.clone());
+    blob.clone()
 }
 
 /// Map a font file for the rest of the process. Kept by canonical path, so a file is

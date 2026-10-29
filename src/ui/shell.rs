@@ -167,7 +167,7 @@ pub const RAIL_W: f32 = 76.0;
 
 /// How collapsed the sidebar is, 0 (full) to 1 (icon rail), eased over the toggle.
 pub fn sidebar_collapse(app: &App, ctx: &egui::Context) -> f32 {
-    let t = ctx.animate_bool_with_time(egui::Id::new("sidebar-collapse"), app.sidebar_collapsed, 0.28 * theme::SPEED);
+    let t = ctx.animate_bool_with_time(egui::Id::unique("sidebar-collapse"), app.sidebar_collapsed, 0.28 * theme::SPEED);
     // Ease in-out: starts and lands gently in both directions.
     t * t * (3.0 - 2.0 * t)
 }
@@ -398,7 +398,7 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
                 .hint_text(egui::RichText::new("Search songs, albums, artists, podcasts").color(theme::TEXT_FAINT))
                 .font(theme::regular(15.0))
                 .frame(egui::Frame::NONE)
-                .vertical_align(egui::Align::Center)
+                .align(egui::Align2::LEFT_CENTER)
                 .desired_width(inner.width()),
         );
         app.search_rect = Some(rect);
@@ -411,7 +411,7 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
         }
         if clearable {
             let x = Rect::from_center_size(pos2(rect.right() - 25.0, rect.center().y), Vec2::splat(30.0));
-            let resp = named(ui.interact(x, ui.id().with("search-clear"), Sense::click()), "Clear search").on_hover_cursor(egui::CursorIcon::PointingHand);
+            let resp = named(ui.interact(x, ui.scope_id().with("search-clear"), Sense::click()), "Clear search").on_hover_cursor(egui::CursorIcon::PointingHand);
             let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
             if h > 0.0 {
                 ui.painter().circle_filled(x.center(), 15.0, theme::glass(0.10 * h));
@@ -481,7 +481,7 @@ pub fn suggestions(app: &mut App, ctx: &egui::Context) {
     if t <= 0.0 {
         return;
     }
-    egui::Area::new("suggestions".into())
+    egui::Area::new(egui::Id::unique("suggestions"))
         .order(egui::Order::Foreground)
         .fixed_pos(rect.left_bottom() + vec2(0.0, 6.0 - 6.0 * (1.0 - t)))
         .show(ctx, |ui| {
@@ -589,7 +589,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
 
     // Progress line along the top edge; thickens with a knob on hover.
     let bar_hit = Rect::from_min_size(track_rect.min - vec2(0.0, 6.0), vec2(track_rect.width(), 14.0));
-    let resp = ui.interact(bar_hit, ui.id().with("progress"), Sense::click_and_drag());
+    let resp = ui.interact(bar_hit, ui.scope_id().with("progress"), Sense::click_and_drag());
     let resp = if total > 0.0 { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
     resp.widget_info(|| egui::WidgetInfo::slider(total > 0.0, pos as f64, "Seek"));
     let h = theme::anim_bool(ui.ctx(), "progress-h", resp.hovered() || resp.dragged(), 0.15);
@@ -602,7 +602,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
     if h > 0.0 && total > 0.0 {
         // The knob and the time tip stick out above the bar, over now playing (a higher
         // layer than the bar), so they go on a layer above both and outside the bar's clip.
-        let over = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, ui.id().with("seek-over")));
+        let over = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, ui.scope_id().with("seek-over")));
         over.circle_filled(pos2(filled.right(), line.center().y), 7.0 * h, app.accent_color());
         if let Some(p) = resp.hover_pos() {
             let t = ((p.x - full.left()) / full.width()).clamp(0.0, 1.0) * total;
@@ -648,7 +648,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
     // Left: now playing
     if let Some(t) = &track {
         let art = Rect::from_center_size(pos2(row.left() + 30.0, cy), Vec2::splat(56.0));
-        let ar = ui.interact(art, ui.id().with("np-art"), Sense::click());
+        let ar = ui.interact(art, ui.scope_id().with("np-art"), Sense::click());
         let ar = named(ar, "Open now playing").on_hover_cursor(egui::CursorIcon::PointingHand);
         let ah = theme::anim_bool(ui.ctx(), ar.id.with("h"), ar.hovered(), 0.15);
         paint_cover(ui, art, &t.thumbs, theme::thumb_radius() + 1.0, 1.0);
@@ -664,7 +664,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
         let room = row.center().x - half - 18.0 - 14.0 - 48.0 - x;
         let w = (row.width() * 0.3 - 110.0).max(80.0).min(room).max(40.0);
         let tr = text_at(ui, pos2(x, cy - 19.0), &t.title, theme::semibold(15.0), theme::TEXT, w);
-        let tresp = ui.interact(tr, ui.id().with("np-title"), Sense::click());
+        let tresp = ui.interact(tr, ui.scope_id().with("np-title"), Sense::click());
         if named(tresp, &t.title).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
             app.actions.push(Action::OpenNowPlaying(true));
         }
@@ -673,7 +673,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
             let s = if i + 1 < t.artists.len() { format!("{}, ", a.name) } else { a.name.clone() };
             let r = text_at(ui, pos2(ax, cy + 2.0), &s, theme::regular(13.5), theme::text_dim(), (x + w - ax).max(10.0));
             if let Some(id) = &a.id {
-                let resp = ui.interact(r, ui.id().with(("artist", i)), Sense::click());
+                let resp = ui.interact(r, ui.scope_id().with(("artist", i)), Sense::click());
                 let resp = named(resp, &a.name).on_hover_cursor(egui::CursorIcon::PointingHand);
                 if resp.hovered() {
                     ui.painter().hline(r.x_range(), r.bottom(), egui::Stroke::new(1.0, theme::text_dim()));
@@ -692,7 +692,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
         let text_end = tr.right().max(ax).min(x + w);
         let lpos = pos2(text_end + 24.0, cy);
         let lr = Rect::from_center_size(lpos, Vec2::splat(36.0));
-        let lresp = ui.interact(lr, ui.id().with("like"), Sense::click());
+        let lresp = ui.interact(lr, ui.scope_id().with("like"), Sense::click());
         let lresp = named(lresp, if liked { "Remove like" } else { "Like" }).on_hover_text(if liked { "Remove like" } else { "Like" }).on_hover_cursor(egui::CursorIcon::PointingHand);
         let lh = theme::anim_bool(ui.ctx(), lresp.id.with("h"), lresp.hovered(), 0.15);
         let pop = theme::anim_bool(ui.ctx(), ("liked", &t.id), liked, 0.3);
@@ -741,7 +741,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
         };
     }
     let pr = Rect::from_center_size(center, Vec2::splat(46.0));
-    let presp = ui.interact(pr, ui.id().with("play"), Sense::click());
+    let presp = ui.interact(pr, ui.scope_id().with("play"), Sense::click());
     let presp = named(presp, if playing { "Pause" } else { "Play" }).on_hover_cursor(egui::CursorIcon::PointingHand);
     let ph = theme::anim_bool(ui.ctx(), presp.id.with("h"), presp.hovered(), 0.15);
     let scale = if presp.is_pointer_button_down_on() { 0.92 } else { 1.0 + 0.05 * ph };
@@ -812,10 +812,10 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
         Rect::from_center_size(pos2(slider.left() - 18.0, cy), Vec2::splat(32.0))
     };
     let vglyph = if vol == 0.0 { icon::VOLUME_X } else if vol < 0.5 { icon::VOLUME_1 } else { icon::VOLUME_2 };
-    let mresp = named(ui.interact(vi, ui.id().with("mute"), Sense::click()), "Mute").on_hover_cursor(egui::CursorIcon::PointingHand);
+    let mresp = named(ui.interact(vi, ui.scope_id().with("mute"), Sense::click()), "Mute").on_hover_cursor(egui::CursorIcon::PointingHand);
     icon_at(ui, vi.center(), vglyph, 18.0, if mresp.hovered() { theme::TEXT } else { theme::text_dim() });
     if compact_vol {
-        let pop_id = ui.id().with("vol-pop");
+        let pop_id = ui.scope_id().with("vol-pop");
         let pop = Rect::from_center_size(pos2(vi.center().x, full.top() - 30.0), vec2(140.0, 40.0));
         // Stays open across the gap between icon and popup, and while dragging.
         let keep = ui.ctx().pointer_hover_pos().is_some_and(|p| pop.union(vi).expand(4.0).contains(p))
@@ -839,7 +839,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
         }
     }
     if mresp.clicked() {
-        let stash = ui.id().with("unmute");
+        let stash = ui.scope_id().with("unmute");
         if vol > 0.0 {
             ui.data_mut(|d| d.insert_temp(stash, vol));
             app.audio.set_volume(0.0);
@@ -857,9 +857,9 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
 /// The volume track: click or drag to set, scroll over it to nudge.
 fn volume_slider(app: &mut App, ui: &mut Ui, slider: Rect, salt: &str) {
     let vol = app.audio.volume();
-    let vresp = ui.interact(slider, ui.id().with(salt), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let vresp = ui.interact(slider, ui.scope_id().with(salt), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::PointingHand);
     vresp.widget_info(|| egui::WidgetInfo::slider(true, vol as f64, "Volume"));
-    let vh = theme::anim_bool(ui.ctx(), ui.id().with((salt, "h")), vresp.hovered() || vresp.dragged(), 0.15);
+    let vh = theme::anim_bool(ui.ctx(), ui.scope_id().with((salt, "h")), vresp.hovered() || vresp.dragged(), 0.15);
     let track_r = Rect::from_center_size(slider.center(), vec2(slider.width(), 4.0));
     ui.painter().rect_filled(track_r, 2.0, theme::glass(0.15));
     let fill = Rect::from_min_size(track_r.min, vec2(track_r.width() * vol, 4.0));
@@ -940,7 +940,7 @@ pub fn toast(app: &mut App, ctx: &egui::Context, now: f64) {
     let age = (now - shown) as f32;
     let t = theme::ease_out(age / 0.25) * (1.0 - ((age - 4.1) / 0.4).clamp(0.0, 1.0));
     let screen = ctx.content_rect();
-    egui::Area::new("toast".into())
+    egui::Area::new(egui::Id::unique("toast"))
         .order(egui::Order::Tooltip)
         .pivot(Align2::CENTER_BOTTOM)
         .fixed_pos(Pos2::new(screen.center().x, screen.bottom() - 104.0 + 14.0 * (1.0 - t)))

@@ -15,7 +15,7 @@ mod widgets;
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::Receiver;
@@ -2073,7 +2073,7 @@ impl App {
             Dialog::Collaborate { .. } => "Collaborate",
         };
         // The same modal card as "Delete playlist?" and the update dialog.
-        let modal = egui::Modal::new("playlist-dialog".into()).frame(notes::surface()).backdrop_color(theme::shade(0.55)).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("playlist-dialog")).frame(notes::surface()).backdrop_color(theme::shade(0.55)).show(ctx, |ui| {
             ui.set_width(440.0_f32.min(ctx.content_rect().width() - 48.0));
             egui::Frame::new().inner_margin(egui::Margin { left: 26, right: 26, top: 24, bottom: 22 }).show(ui, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
@@ -2231,7 +2231,7 @@ fn text_field(ui: &mut Ui, label: &str, text: &mut String, multiline: bool, hint
     // Painted first, so the text box draws over it.
     let bg = ui.painter().add(egui::Shape::Noop);
     let inner = rect.shrink2(vec2(14.0, if multiline { 10.0 } else { 4.0 }));
-    let edit = if multiline { egui::TextEdit::multiline(text).desired_rows(4) } else { egui::TextEdit::singleline(text).vertical_align(egui::Align::Center) };
+    let edit = if multiline { egui::TextEdit::multiline(text).desired_rows(4) } else { egui::TextEdit::singleline(text).align(egui::Align2::LEFT_CENTER) };
     let resp = ui.put(
         inner,
         edit.hint_text(egui::RichText::new(hint).color(theme::TEXT_FAINT)).font(theme::regular(14.0)).frame(egui::Frame::NONE).desired_width(inner.width()),
@@ -2253,7 +2253,7 @@ fn privacy_picker(ui: &mut Ui, privacy: &mut Option<String>) {
     let w = (track.width() - 6.0) / options.len() as f32;
     for (i, (value, label)) in options.into_iter().enumerate() {
         let r = egui::Rect::from_min_size(track.min + vec2(3.0 + w * i as f32, 3.0), vec2(w, track.height() - 6.0));
-        let resp = widgets::named(ui.interact(r, ui.id().with(("privacy", value)), Sense::click()), label).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let resp = widgets::named(ui.interact(r, ui.scope_id().with(("privacy", value)), Sense::click()), label).on_hover_cursor(egui::CursorIcon::PointingHand);
         let on = privacy.as_deref() == Some(value);
         let s = theme::anim_bool(ui.ctx(), resp.id.with("s"), on, 0.15);
         let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.12);
@@ -2321,7 +2321,7 @@ fn dialog_row(ui: &mut Ui, thumbs: Option<&[crate::model::Thumb]>, glyph: Option
 /// "Delete playlist?" as a modal card: Some(true) delete, Some(false) cancel, None still open.
 fn confirm_delete(ctx: &egui::Context, title: &str, _accent: Color32) -> Option<bool> {
     let mut answer = None;
-    let modal = egui::Modal::new("confirm-delete".into()).frame(notes::surface()).backdrop_color(theme::shade(0.55)).show(ctx, |ui| {
+    let modal = egui::Modal::new(egui::Id::unique("confirm-delete")).frame(notes::surface()).backdrop_color(theme::shade(0.55)).show(ctx, |ui| {
         ui.set_width(400.0_f32.min(ctx.content_rect().width() - 48.0));
         egui::Frame::new().inner_margin(egui::Margin { left: 26, right: 26, top: 24, bottom: 22 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
@@ -2391,7 +2391,7 @@ impl eframe::App for App {
         // Dev hook: YTM_NP_TOGGLE_AT=<secs>[,<secs>…] clicks the Lyrics chip at those times.
         if let Some(v) = dev_var("YTM_NP_TOGGLE_AT") {
             let times: Vec<f64> = v.split(',').filter_map(|t| t.parse().ok()).collect();
-            let id = egui::Id::new("dev-np-toggles");
+            let id = egui::Id::unique("dev-np-toggles");
             let done: usize = ctx.data(|d| d.get_temp(id)).unwrap_or(0);
             if let Some(&t) = times.get(done) {
                 if now >= t {
@@ -2454,7 +2454,7 @@ impl eframe::App for App {
         self.sync_look();
         let look = self.look();
         let accent = self.accent_color();
-        ctx.data_mut(|d| d.insert_temp(egui::Id::new("accent"), accent));
+        ctx.data_mut(|d| d.insert_temp(egui::Id::unique("accent"), accent));
         if self.chrome_applied.as_deref() != Some(look.id.as_str()) {
             if self.chrome_applied.is_none() {
                 ctx.add_texture_loader(Arc::new(crate::images::Textures::default()));
@@ -2555,7 +2555,7 @@ impl eframe::App for App {
             let (a, n) = v.split_once(',')?;
             Some((a.parse::<f64>().ok()?, n.parse::<f32>().ok()?))
         }) {
-            let fired = egui::Id::new("dev-wheel-fired");
+            let fired = egui::Id::unique("dev-wheel-fired");
             let t = raw.time.unwrap_or(0.0);
             if t >= at && !ctx.data(|d| d.get_temp::<bool>(fired).unwrap_or(false)) {
                 ctx.data_mut(|d| d.insert_temp(fired, true));
@@ -2564,6 +2564,7 @@ impl eframe::App for App {
                     delta: egui::vec2(0.0, -n),
                     phase: egui::TouchPhase::Move,
                     modifiers: egui::Modifiers::NONE,
+                    source: egui::MouseWheelSource::Wheel,
                 });
             } else if t < at {
                 ctx.request_repaint_after(Duration::from_millis(100));
@@ -2721,25 +2722,24 @@ fn dev_screenshot(ctx: &egui::Context, now: f64) {
     let at: f64 = dev_var("YTM_SCREENSHOT_AT").and_then(|v| v.parse().ok()).unwrap_or(8.0);
     if let Some(n) = dev_var("YTM_SCREENSHOT_BURST").and_then(|v| v.parse::<usize>().ok()) {
         static FRAMES: std::sync::Mutex<Vec<(f64, Arc<egui::ColorImage>)>> = std::sync::Mutex::new(Vec::new());
+        static REQUESTED: AtomicUsize = AtomicUsize::new(0);
         static DONE: AtomicBool = AtomicBool::new(false);
         if DONE.load(Ordering::Relaxed) {
             return;
         }
-        let mut frames = FRAMES.lock().unwrap();
-        if let Some(img) = ctx.input(|i| i.events.iter().find_map(|e| match e {
-            egui::Event::Screenshot { image, .. } => Some(image.clone()),
-            _ => None,
-        })) {
-            frames.push((now, img));
-        }
-        if now >= at && frames.len() < n {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+        if now >= at && REQUESTED.load(Ordering::Relaxed) < n {
+            REQUESTED.fetch_add(1, Ordering::Relaxed);
+            let c = ctx.clone();
+            ctx.request_screenshot(move |img| {
+                FRAMES.lock().unwrap().push((now, img));
+                c.request_repaint();
+            });
             ctx.request_repaint();
         } else if now < at {
             ctx.request_repaint_after(Duration::from_secs_f64(at - now));
-        } else if frames.len() == n {
+        } else if FRAMES.lock().unwrap().len() == n {
             let path = std::path::PathBuf::from(path);
-            let shots = std::mem::take(&mut *frames);
+            let shots = std::mem::take(&mut *FRAMES.lock().unwrap());
             DONE.store(true, Ordering::Relaxed);
             std::thread::spawn(move || {
                 let t0 = shots[0].0;
@@ -2756,26 +2756,19 @@ fn dev_screenshot(ctx: &egui::Context, now: f64) {
         }
         return;
     }
-    let requested = egui::Id::new("dev-shot-requested");
+    let requested = egui::Id::unique("dev-shot-requested");
     if now >= at && !ctx.data(|d| d.get_temp::<bool>(requested).unwrap_or(false)) {
         ctx.data_mut(|d| d.insert_temp(requested, true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+        ctx.request_screenshot(move |img| {
+            let [w, h] = img.size;
+            let bytes: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+            match image::RgbaImage::from_raw(w as u32, h as u32, bytes).map(|i| i.save(&path)) {
+                Some(Ok(())) => log::info!("screenshot saved"),
+                other => log::warn!("screenshot failed: {other:?}"),
+            }
+        });
     } else if now < at {
         ctx.request_repaint_after(Duration::from_secs_f64(at - now));
-    }
-    let shot = ctx.input(|i| {
-        i.events.iter().find_map(|e| match e {
-            egui::Event::Screenshot { image, .. } => Some(image.clone()),
-            _ => None,
-        })
-    });
-    if let Some(img) = shot {
-        let [w, h] = img.size;
-        let bytes: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
-        match image::RgbaImage::from_raw(w as u32, h as u32, bytes).map(|i| i.save(&path)) {
-            Some(Ok(())) => log::info!("screenshot saved"),
-            other => log::warn!("screenshot failed: {other:?}"),
-        }
     }
 }
 
@@ -2803,28 +2796,22 @@ impl App {
             self.theme_id = all[n].id.clone();
             self.default_theme = false;
         }
-        let shot_id = egui::Id::new("tour-shot");
+        let shot_id = egui::Id::unique("tour-shot");
         let requested: usize = ctx.data(|d| d.get_temp(shot_id)).unwrap_or(usize::MAX);
         let in_slot = (now - at) - n as f64 * step;
         if n < all.len() && requested != n && in_slot > step * 0.8 {
             ctx.data_mut(|d| d.insert_temp(shot_id, n));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(n)));
-        }
-        let shot = ctx.input(|i| {
-            i.events.iter().find_map(|e| match e {
-                egui::Event::Screenshot { image, user_data, .. } => Some((image.clone(), user_data.data.as_ref().and_then(|d| d.downcast_ref::<usize>().copied()))),
-                _ => None,
-            })
-        });
-        if let Some((img, Some(i))) = shot {
-            let [w, h] = img.size;
-            let bytes: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+            let id = all[n].id.clone();
             let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            let out = path.with_file_name(format!("{stem}_{:02}_{}.png", i, all[i].id));
-            match image::RgbaImage::from_raw(w as u32, h as u32, bytes).map(|im| im.save(&out)) {
-                Some(Ok(())) => log::info!("tour screenshot saved: {}", all[i].id),
-                other => log::warn!("tour screenshot failed: {other:?}"),
-            }
+            let out = path.with_file_name(format!("{stem}_{n:02}_{id}.png"));
+            ctx.request_screenshot(move |img| {
+                let [w, h] = img.size;
+                let bytes: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+                match image::RgbaImage::from_raw(w as u32, h as u32, bytes).map(|im| im.save(&out)) {
+                    Some(Ok(())) => log::info!("tour screenshot saved: {id}"),
+                    other => log::warn!("tour screenshot failed: {other:?}"),
+                }
+            });
         }
     }
 }
@@ -2832,7 +2819,7 @@ impl App {
 /// A restored window size can exceed the monitor (e.g. saved after maximizing),
 /// leaving the player bar partly off-screen. Once at startup, maximize instead.
 fn fit_window_to_monitor(ctx: &egui::Context) {
-    let done = egui::Id::new("fit-window-checked");
+    let done = egui::Id::unique("fit-window-checked");
     if ctx.data(|d| d.get_temp::<bool>(done).unwrap_or(false)) {
         return;
     }
@@ -2908,6 +2895,7 @@ fn smooth_wheel(app: &mut App, ctx: &egui::Context, raw: &mut egui::RawInput) {
         delta: step,
         phase: egui::TouchPhase::Move,
         modifiers: app.wheel_mods,
+        source: egui::MouseWheelSource::Wheel,
     });
     ctx.request_repaint();
 }

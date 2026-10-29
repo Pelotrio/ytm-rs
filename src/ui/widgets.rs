@@ -8,7 +8,7 @@ use crate::model::{Card, Link, Target, Thumb, Track, pick_thumb, sized};
 use crate::theme::{self, icon};
 
 pub fn named(resp: Response, name: &str) -> Response {
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
     resp
 }
 
@@ -71,7 +71,7 @@ pub fn linked_text(
             continue; // truncated away
         }
         let r = Rect::from_min_max(pos2(pos.x + x0, rect.top()), pos2(pos.x + x1, rect.bottom()));
-        let resp = ui.interact(r, ui.id().with(("artist-link", text, i, pos.x as i32, pos.y as i32)), Sense::click());
+        let resp = ui.interact(r, ui.scope_id().with(("artist-link", text, i, pos.x as i32, pos.y as i32)), Sense::click());
         let resp = named(resp, &l.name).on_hover_cursor(egui::CursorIcon::PointingHand);
         if resp.hovered() {
             ui.painter().hline(r.x_range(), r.bottom() - 1.0, egui::Stroke::new(1.0, color));
@@ -187,7 +187,7 @@ pub fn chip(ui: &mut Ui, label: &str, selected: bool) -> Response {
     let radius = (crate::preset::active().chrome.radius * 0.55).clamp(4.0, 17.0);
     let (on_fill, on_fg) = match style {
         ChipStyle::Accent => {
-            let a = ui.ctx().data(|d| d.get_temp::<Color32>(egui::Id::new("accent"))).unwrap_or(theme::RED);
+            let a = ui.ctx().data(|d| d.get_temp::<Color32>(egui::Id::unique("accent"))).unwrap_or(theme::RED);
             (a, if a.r() as u32 + a.g() as u32 + a.b() as u32 > 480 { Color32::from_gray(15) } else { Color32::WHITE })
         }
         _ => (Color32::from_gray(245), Color32::from_gray(15)),
@@ -217,7 +217,7 @@ fn fetch_px(px: u32) -> u32 {
 /// if that download fails.
 fn steady_url(ctx: &egui::Context, base: &str, px: u32) -> String {
     let want = sized(base, px);
-    let id = egui::Id::new(("cover-shown", base));
+    let id = egui::Id::unique(("cover-shown", base));
     let ready = matches!(egui::Image::new(want.as_str()).load_for_size(ctx, Vec2::splat(px as f32)), Ok(egui::load::TexturePoll::Ready { .. }));
     if ready {
         ctx.data_mut(|d| d.insert_temp(id, px));
@@ -495,7 +495,7 @@ pub struct NowPlaying {
 
 impl NowPlaying {
     pub fn id() -> egui::Id {
-        egui::Id::new("now-playing")
+        egui::Id::unique("now-playing")
     }
 }
 
@@ -543,7 +543,7 @@ pub fn pause_bars(ui: &Ui, center: Pos2, r: f32, color: Color32) {
 /// they move at a steady rate instead of the page's slower one.
 pub fn equalizer(ui: &Ui, rect: Rect, time: f64, playing: bool, color: Color32) {
     let ctx = ui.ctx();
-    let on = theme::anim_bool(ctx, ui.id().with("eq"), playing, 0.35);
+    let on = theme::anim_bool(ctx, ui.scope_id().with("eq"), playing, 0.35);
     if on > 0.0 {
         let frame = ctx.cumulative_frame_nr();
         ctx.data_mut(|d| d.insert_temp(equalizer_id(), frame));
@@ -572,7 +572,7 @@ pub fn equalizer(ui: &Ui, rect: Rect, time: f64, playing: bool, color: Color32) 
 
 /// Last frame the playing bars were drawn on (frame pacing reads it).
 pub fn equalizer_id() -> egui::Id {
-    egui::Id::new("equalizer_frame")
+    egui::Id::unique("equalizer_frame")
 }
 
 /// Whether the playing bars were on screen last frame.
@@ -807,12 +807,12 @@ fn shelf_page_target(starts: &[usize], step: f32, from: f32, nudge: i32) -> f32 
 
 /// Horizontal scroller that animates between aligned pages of cards or song columns.
 pub fn h_scroll<R>(ui: &mut Ui, id: &str, nudge: i32, count: usize, item_width: f32, gap: f32, add: impl FnOnce(&mut Ui) -> R) -> (R, bool) {
-    let sid = egui::Id::new(("hscroll", id));
+    let sid = egui::Id::unique(("hscroll", id));
     let anim_id = sid.with("anim");
     // ScrollArea hashes its id_salt once more. Read that same ID, or left clicks
     // always appear to start from zero.
     let state_id = ui.make_persistent_id(egui::IdSalt::new(sid));
-    let current = egui::scroll_area::State::load(ui.ctx(), state_id).map_or(0.0, |s| s.offset.x);
+    let current = egui::scroll_area::State::load(ui.ctx(), state_id).map_or(0.0, |s| s.clamped_offset().x);
     let target_id = sid.with("target");
     let viewport_id = sid.with("viewport");
     let viewport = ui.ctx().data(|d| d.get_temp::<f32>(viewport_id)).unwrap_or_else(|| ui.available_width());
@@ -890,7 +890,7 @@ pub fn paint_remote(ui: &Ui, url: &str, rect: Rect, radius: f32, uv: Rect, tint:
     const FADE: f64 = 0.22;
     let ctx = ui.ctx();
     let now = ctx.input(|i| i.time);
-    let id = egui::Id::new(("img-fade", url));
+    let id = egui::Id::unique(("img-fade", url));
     match egui::Image::new(url).load_for_size(ctx, rect.size()) {
         Ok(egui::load::TexturePoll::Ready { texture }) => {
             // Fade only what was seen loading; Some(None) = waiting, Some(Some(t)) = fading since t.

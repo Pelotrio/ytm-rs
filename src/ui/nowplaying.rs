@@ -21,7 +21,7 @@ pub fn overlay(app: &mut App, ctx: &egui::Context, now: f64) {
     let rect = full.translate(vec2(0.0, full.height() * (1.0 - t)));
     let look = app.look();
     let b = &look.background;
-    egui::Area::new("now-playing".into())
+    egui::Area::new(egui::Id::unique("now-playing"))
         .order(egui::Order::Middle)
         .fixed_pos(rect.min)
         .show(ctx, |ui| {
@@ -120,7 +120,7 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
     let content = Rect::from_min_max(pos2(area.left(), header.bottom() + 12.0), area.max);
     // The side panel (lyrics / up next) slides in and out when its chip is toggled.
     // A song without lyrics shows just the artwork, with no transition.
-    let last_id = egui::Id::new("np-last-panel");
+    let last_id = egui::Id::unique("np-last-panel");
     let panel_tab = if app.np_tab == NpTab::Art {
         ui.ctx().data(|d| d.get_temp(last_id)).unwrap_or(NpTab::Lyrics)
     } else {
@@ -128,7 +128,7 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
         app.np_tab
     };
     // Linear 0..1 over the transition; each part eases its own slice of it.
-    let shown = ui.ctx().animate_bool_with_time(egui::Id::new("np-panel"), app.np_tab != NpTab::Art, 0.6 * theme::SPEED);
+    let shown = ui.ctx().animate_bool_with_time(egui::Id::unique("np-panel"), app.np_tab != NpTab::Art, 0.6 * theme::SPEED);
     if shown > 0.0 && shown < 1.0 {
         // Every frame while sliding, not the now-playing view's usual 30 fps.
         ui.ctx().request_repaint();
@@ -192,7 +192,7 @@ fn body(app: &mut App, ui: &mut Ui, now: f64) {
     // Switching between Lyrics and Up next: the old one fades out over the first 55%,
     // the new one fades in and rises into place from a third of the way.
     for (tab, key) in [(NpTab::Lyrics, "np-tab-lyrics"), (NpTab::UpNext, "np-tab-upnext")] {
-        let w = ui.ctx().animate_bool_with_time(egui::Id::new(key), panel_tab == tab, 0.45 * theme::SPEED);
+        let w = ui.ctx().animate_bool_with_time(egui::Id::unique(key), panel_tab == tab, 0.45 * theme::SPEED);
         if w > 0.0 && w < 1.0 {
             ui.ctx().request_repaint();
         }
@@ -264,7 +264,7 @@ fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Tra
             ui.painter().rect_filled(art, cr, theme::shade(1.0 - cs.brightness));
         }
     }
-    let cover = named(ui.interact(art, ui.id().with(("cover-playback", &track.id)), Sense::click()), if app.playing() { "Pause" } else { "Play" })
+    let cover = named(ui.interact(art, ui.scope_id().with(("cover-playback", &track.id)), Sense::click()), if app.playing() { "Pause" } else { "Play" })
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     let hover = theme::anim_bool(ui.ctx(), ("cover-playback-hover", &track.id), cover.hovered(), 0.16);
     if hover > 0.0 {
@@ -281,7 +281,7 @@ fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Tra
     widgets::linked_text(ui, pos2(art.left(), title_y + 40.0), &line, &track.artists, theme::regular(17.0), theme::text_dim(), w, &mut app.actions);
     if no_lyrics && app.np_tab == NpTab::Lyrics {
         // A brief note, faded out after a few seconds.
-        let since = ui.ctx().memory_mut(|m| *m.data.get_temp_mut_or_insert_with(egui::Id::new(("no-lyrics", &track.id)), || now));
+        let since = ui.ctx().memory_mut(|m| *m.data.get_temp_mut_or_insert_with(egui::Id::unique(("no-lyrics", &track.id)), || now));
         let a = (1.0 - ((now - since - 3.0) / 1.0) as f32).clamp(0.0, 1.0);
         if a > 0.0 {
             let c = theme::with_alpha(theme::text_dim(), a * 0.8);
@@ -414,7 +414,7 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, id: &str, lyrics: &Lyrics, now
         let em = 17.5;
         let y = rect.top() + 8.0 + egui::lerp(-3.0 * em..=0.5 * em, theme::ease_out(shown));
         let r = Rect::from_min_size(pos2(rect.center().x - size.x / 2.0, y), size);
-        let resp = ui.interact(r, ui.id().with("lyr-resume-btn"), if out.user_scrolling { Sense::click() } else { Sense::hover() });
+        let resp = ui.interact(r, ui.scope_id().with("lyr-resume-btn"), if out.user_scrolling { Sense::click() } else { Sense::hover() });
         let resp = named(resp, "Resume Autoscroll").on_hover_cursor(egui::CursorIcon::PointingHand);
         let hover = theme::anim_bool(ui.ctx(), "lyr-resume-h", resp.hovered() && out.user_scrolling, 0.25);
         let p = ui.painter().with_clip_rect(rect.expand2(vec2(0.0, 4.0)));
@@ -582,7 +582,7 @@ fn switch_row(ui: &mut Ui, label: &str, on: &mut bool) {
     ui.painter().text(pos2(rect.left() + 12.0, rect.center().y), egui::Align2::LEFT_CENTER, label, theme::regular(14.0), theme::TEXT);
     let t = theme::anim_bool(ui.ctx(), resp.id.with("t"), *on, 0.16);
     let track = Rect::from_center_size(pos2(rect.right() - 30.0, rect.center().y), vec2(36.0, 20.0));
-    let accent = ui.ctx().data(|d| d.get_temp::<Color32>(egui::Id::new("accent"))).unwrap_or(theme::RED);
+    let accent = ui.ctx().data(|d| d.get_temp::<Color32>(egui::Id::unique("accent"))).unwrap_or(theme::RED);
     ui.painter().rect_filled(track, 10.0, theme::lerp_color(theme::glass(0.16 + 0.06 * h), accent, t));
     let knob = pos2(egui::lerp(track.left() + 10.0..=track.right() - 10.0, t), track.center().y);
     ui.painter().circle_filled(knob, 8.0, Color32::WHITE);
