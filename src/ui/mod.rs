@@ -219,6 +219,8 @@ pub struct App {
     load_failed: bool,
     search_text: String,
     suggestions: (String, Vec<String>),
+    /// The suggestion picked with the arrow keys, which Enter searches.
+    suggest_sel: Option<usize>,
     suggest_due: Option<f64>,
 
     // page data
@@ -454,6 +456,7 @@ impl App {
             load_failed: false,
             search_text: String::new(),
             suggestions: Default::default(),
+            suggest_sel: None,
             suggest_due: None,
             home: None,
             home_loading: true,
@@ -578,16 +581,10 @@ impl App {
             let track = |id: &str| Track { id: id.to_owned(), title: id.to_owned(), artists: vec![], album: None, duration: None, thumbs: vec![], track_nr: None, plays: None };
             app.play_list(ids.split(',').map(track).collect(), 0);
         } else if let Some(q) = smoke {
-            app.search_text = q.clone();
             app.go(Page::Search(q.clone()));
             app.smoke = Some(q);
         } else if let Some(q) = std::env::var("YTM_SEARCH").ok().filter(|q| !q.is_empty()) {
-            app.search_text = q.clone();
             app.go(Page::Search(q));
-        }
-        // An explicit page replaces the smoke search, so its query shouldn't linger.
-        if matches!(std::env::var("YTM_PAGE").as_deref(), Ok("home" | "explore" | "library" | "uploads" | "liked" | "history" | "settings" | "transfer")) {
-            app.search_text.clear();
         }
         match std::env::var("YTM_PAGE").as_deref() {
             Ok("home") => app.go(Page::Home),
@@ -680,6 +677,13 @@ impl App {
     /// showing the cached copy meanwhile.
     fn page_loaded(&mut self) {
         self.page_changed = -1.0; // stamped with the frame time on the next pass
+        // The search box holds the query of the search page you're on, and is empty elsewhere.
+        self.search_text = match &self.page {
+            Page::Search(q) => q.clone(),
+            _ => String::new(),
+        };
+        self.suggestions = Default::default();
+        self.suggest_sel = None;
         // Choosing a transfer match lasts while searching; any other page ends it.
         if !matches!(self.page, Page::Search(_)) {
             self.xfer.picking = None;
@@ -1683,6 +1687,7 @@ impl App {
             Resp::Suggest { query, terms } => {
                 if self.search_text.trim() == query {
                     self.suggestions = (query, terms);
+                    self.suggest_sel = None;
                 }
             }
             Resp::Collection(c) => {

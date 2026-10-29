@@ -356,14 +356,40 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
         ui.add_space(12.0);
 
         let width = (ui.available_width() - 70.0).clamp(240.0, 560.0);
-        let (rect, _) = ui.allocate_exact_size(vec2(width, 42.0), Sense::hover());
+        // Anywhere on the pill focuses the box, not just on the text area inside it.
+        let (rect, field) = ui.allocate_exact_size(vec2(width, 42.0), Sense::click());
+        let field = field.on_hover_cursor(egui::CursorIcon::Text);
         let focus = theme::anim_bool(ui.ctx(), "search-focus", app.search_focused, 0.2);
         ui.painter().rect_filled(rect, 21.0, theme::glass(0.09 + 0.05 * focus));
         if focus > 0.0 {
             ui.painter().rect_stroke(rect, 21.0, egui::Stroke::new(1.0, theme::glass(0.25 * focus)), egui::StrokeKind::Inside);
         }
         icon_at(ui, pos2(rect.left() + 22.0, rect.center().y), icon::SEARCH, 17.0, theme::text_dim());
-        let inner = Rect::from_min_max(pos2(rect.left() + 42.0, rect.top() + 4.0), pos2(rect.right() - 16.0, rect.bottom() - 4.0));
+        let clearable = !app.search_text.is_empty();
+        let inner = Rect::from_min_max(pos2(rect.left() + 42.0, rect.top() + 4.0), pos2(rect.right() - if clearable { 46.0 } else { 16.0 }, rect.bottom() - 4.0));
+        // Up and Down walk the suggestions (past either end back to what was typed). Taken
+        // before the box sees them, where they'd move the caret. Only bare arrows (Shift
+        // selects text), and only suggestions for what's typed now, not ones still being replaced.
+        let fresh = app.suggestions.0 == app.search_text.trim();
+        let n = if fresh { app.suggestions.1.len() } else { 0 };
+        if app.search_focused && n > 0 && ui.input(|i| i.modifiers.is_none()) {
+            ui.input_mut(|i| {
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                    app.suggest_sel = match app.suggest_sel {
+                        None => Some(0),
+                        Some(s) if s + 1 < n => Some(s + 1),
+                        Some(_) => None,
+                    };
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                    app.suggest_sel = match app.suggest_sel {
+                        None => Some(n - 1),
+                        Some(0) => None,
+                        Some(s) => Some(s - 1),
+                    };
+                }
+            });
+        }
         let edit = ui.put(
             inner,
             egui::TextEdit::singleline(&mut app.search_text)
@@ -375,10 +401,27 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
         );
         app.search_rect = Some(rect);
         app.search_focused = edit.has_focus();
-        if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
+        if clearable {
+            let x = Rect::from_center_size(pos2(rect.right() - 25.0, rect.center().y), Vec2::splat(30.0));
+            let resp = named(ui.interact(x, ui.id().with("search-clear"), Sense::click()), "Clear search").on_hover_cursor(egui::CursorIcon::PointingHand);
+            let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
+            if h > 0.0 {
+                ui.painter().circle_filled(x.center(), 15.0, theme::glass(0.10 * h));
+            }
+            icon_at(ui, x.center(), icon::X, 16.0, theme::lerp_color(theme::text_dim(), theme::TEXT, h));
+            if resp.clicked() {
+                app.search_text.clear();
+                app.suggestions = Default::default();
+                app.suggest_sel = None;
+                app.suggest_due = None;
+                edit.request_focus();
+            }
+        }
+        if field.clicked() || ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
             edit.request_focus();
         }
         if edit.changed() {
+            app.suggest_sel = None;
             let now = ui.input(|i| i.time);
             app.suggest_due = Some(now + 0.22);
             if app.search_text.trim().is_empty() {
@@ -386,7 +429,8 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
             }
         }
         if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            let q = app.search_text.trim().to_owned();
+            let picked = app.suggest_sel.filter(|_| fresh).and_then(|s| app.suggestions.1.get(s)).cloned();
+            let q = picked.unwrap_or_else(|| app.search_text.trim().to_owned());
             if !q.is_empty() {
                 app.suggestions = Default::default();
                 app.actions.push(Action::Go(Page::Search(q)));
@@ -440,16 +484,15 @@ pub fn suggestions(app: &mut App, ctx: &egui::Context) {
                 .shadow(egui::epaint::Shadow { offset: [0, 10], blur: 30, spread: 0, color: theme::shade(0.5) })
                 .show(ui, |ui| {
                     ui.set_width(rect.width() - 12.0);
-                    for term in app.suggestions.1.clone() {
+                    for (i, term) in app.suggestions.1.clone().into_iter().enumerate() {
                         let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
-                        let resp = named(resp, &term);
-                        let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.1);
+                        let resp = named(resp, &term).on_hover_cursor(egui::CursorIcon::PointingHand);
+                        let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered() || app.suggest_sel == Some(i), 0.1);
                         ui.painter().rect_filled(r, 8.0, theme::glass(0.08 * h));
                         icon_at(ui, pos2(r.left() + 20.0, r.center().y), icon::SEARCH, 15.0, theme::text_dim());
                         text_at(ui, pos2(r.left() + 42.0, r.center().y - 9.0), &term, theme::regular(15.0), theme::TEXT, r.width() - 52.0);
                         // Pointer-down, not click: the text box loses focus (hiding this) first.
                         if resp.is_pointer_button_down_on() || resp.clicked() {
-                            app.search_text = term.clone();
                             app.suggestions = Default::default();
                             app.search_focused = false;
                             app.actions.push(Action::Go(Page::Search(term)));
