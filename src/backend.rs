@@ -25,7 +25,10 @@ pub enum Req {
     MoreQuickPicks(String),
     Explore(Vec<String>),
     Search(String),
-    Suggest(String),
+    /// Suggestions for a query; `round` comes back with them, so stale ones can be dropped.
+    Suggest { query: String, round: u64 },
+    /// Remove a past search from the account's history, by its token.
+    RemoveSearch(String),
     Album(String),
     Artist(String),
     Playlist(String),
@@ -82,7 +85,8 @@ impl Req {
             Req::MoreQuickPicks(_) => "Loading more picks",
             Req::Explore(_) => "Loading explore",
             Req::Search(_) => "Search",
-            Req::Suggest(_) => "Suggest",
+            Req::Suggest { .. } => "Suggest",
+            Req::RemoveSearch(_) => "Remove from search history",
             Req::Album(_) => "Loading album",
             Req::Artist(_) => "Loading artist",
             Req::Playlist(_) => "Loading playlist",
@@ -118,7 +122,7 @@ impl Req {
 
     /// Background requests fail quietly (logged, no toast).
     fn quiet(&self) -> bool {
-        matches!(self, Req::Suggest(_) | Req::Account | Req::ServerQueue | Req::Art { .. } | Req::Prefetch(_) | Req::HomeMore(_) | Req::Lyrics(_) | Req::Segments { .. } | Req::LyricsExtras { .. })
+        matches!(self, Req::Suggest { .. } | Req::Account | Req::ServerQueue | Req::Art { .. } | Req::Prefetch(_) | Req::HomeMore(_) | Req::Lyrics(_) | Req::Segments { .. } | Req::LyricsExtras { .. })
     }
 }
 
@@ -181,7 +185,7 @@ pub enum Resp {
     QuickPicksMore { seed: String, tracks: Vec<Track> },
     Explore(Explore),
     Search(SearchResults),
-    Suggest { query: String, terms: Vec<String> },
+    Suggest { query: String, round: u64, terms: Vec<ytm::Suggestion> },
     Collection(Collection),
     Artist(ArtistPage),
     Library(Library),
@@ -405,9 +409,13 @@ impl Backend {
                         query,
                     })
                 }
-                Req::Suggest(query) => {
+                Req::Suggest { query, round } => {
                     let terms = ytm::suggestions(api, &query).await?.into_iter().take(8).collect();
-                    Resp::Suggest { query, terms }
+                    Resp::Suggest { query, round, terms }
+                }
+                Req::RemoveSearch(token) => {
+                    ytm::remove_search(api, &token).await?;
+                    return Ok(None);
                 }
                 Req::Album(id) => Resp::Collection(ytm::album(api, &id).await?),
                 Req::Playlist(id) => Resp::Collection(ytm::playlist(api, &id, me, 500).await?),

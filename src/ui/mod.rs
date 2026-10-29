@@ -218,9 +218,12 @@ pub struct App {
     /// The current page's request failed with nothing cached: show a retry, not a skeleton.
     load_failed: bool,
     search_text: String,
-    suggestions: (String, Vec<String>),
+    suggestions: (String, Vec<crate::ytm::Suggestion>),
     /// The suggestion picked with the arrow keys, which Enter searches.
     suggest_sel: Option<usize>,
+    /// Bumped when a past search is removed or the account changes: suggestions
+    /// requested before that are dropped when they arrive, rather than bring it back.
+    suggest_round: u64,
     suggest_due: Option<f64>,
 
     // page data
@@ -295,6 +298,8 @@ pub struct App {
     bg_time: f64,
     last_frame: f64,
     search_rect: Option<egui::Rect>,
+    /// The search box's id, so the suggestions can keep it focused while you remove one.
+    search_edit: Option<egui::Id>,
     search_focused: bool,
     /// Mouse-wheel distance still to be scrolled (smooth scrolling).
     wheel_pending: egui::Vec2,
@@ -457,6 +462,7 @@ impl App {
             search_text: String::new(),
             suggestions: Default::default(),
             suggest_sel: None,
+            suggest_round: 0,
             suggest_due: None,
             home: None,
             home_loading: true,
@@ -542,6 +548,7 @@ impl App {
             bg_time: 0.0,
             last_frame: 0.0,
             search_rect: None,
+            search_edit: None,
             search_focused: false,
             wheel_pending: egui::Vec2::ZERO,
             wheel_mods: egui::Modifiers::NONE,
@@ -1631,8 +1638,9 @@ impl App {
         if self.suggest_due.is_some_and(|d| now >= d) {
             self.suggest_due = None;
             let q = self.search_text.trim().to_owned();
-            if !q.is_empty() {
-                self.backend.request(Req::Suggest(q));
+            // An empty box asks for the account's recent searches.
+            if !q.is_empty() || self.logged_in {
+                self.backend.request(Req::Suggest { query: q, round: self.suggest_round });
             }
         }
     }
@@ -1684,8 +1692,8 @@ impl App {
                 self.search = Some(r);
                 self.loading = false;
             }
-            Resp::Suggest { query, terms } => {
-                if self.search_text.trim() == query {
+            Resp::Suggest { query, round, terms } => {
+                if round == self.suggest_round && self.search_text.trim() == query {
                     self.suggestions = (query, terms);
                     self.suggest_sel = None;
                 }
@@ -1862,6 +1870,10 @@ impl App {
             }
             Resp::LoggedIn(v) => {
                 self.logged_in = v;
+                // Recent searches belong to the account.
+                self.suggestions = Default::default();
+                self.suggest_sel = None;
+                self.suggest_round += 1;
                 self.account_name = None;
                 self.account_avatar = None;
                 self.sidebar_cache = None;

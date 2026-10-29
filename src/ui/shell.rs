@@ -402,7 +402,12 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
                 .desired_width(inner.width()),
         );
         app.search_rect = Some(rect);
+        app.search_edit = Some(edit.id);
         app.search_focused = edit.has_focus();
+        // Focusing the box shows suggestions for what's in it: recent searches when empty.
+        if edit.gained_focus() && (app.suggestions.0 != app.search_text.trim() || app.suggestions.1.is_empty()) {
+            app.suggest_due = Some(ui.input(|i| i.time));
+        }
         if clearable {
             let x = Rect::from_center_size(pos2(rect.right() - 25.0, rect.center().y), Vec2::splat(30.0));
             let resp = named(ui.interact(x, ui.id().with("search-clear"), Sense::click()), "Clear search").on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -415,7 +420,7 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
                 app.search_text.clear();
                 app.suggestions = Default::default();
                 app.suggest_sel = None;
-                app.suggest_due = None;
+                app.suggest_due = Some(ui.input(|i| i.time));
                 edit.request_focus();
             }
         }
@@ -431,7 +436,7 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
             }
         }
         if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            let picked = app.suggest_sel.filter(|_| fresh).and_then(|s| app.suggestions.1.get(s)).cloned();
+            let picked = app.suggest_sel.filter(|_| fresh).and_then(|s| app.suggestions.1.get(s)).map(|s| s.text.clone());
             let q = picked.unwrap_or_else(|| app.search_text.trim().to_owned());
             if !q.is_empty() {
                 app.suggestions = Default::default();
@@ -486,19 +491,65 @@ pub fn suggestions(app: &mut App, ctx: &egui::Context) {
                 .shadow(egui::epaint::Shadow { offset: [0, 10], blur: 30, spread: 0, color: theme::shade(0.5) })
                 .show(ui, |ui| {
                     ui.set_width(rect.width() - 12.0);
-                    for (i, term) in app.suggestions.1.clone().into_iter().enumerate() {
+                    let mut removed = None;
+                    for (i, s) in app.suggestions.1.clone().iter().enumerate() {
                         let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
-                        let resp = named(resp, &term).on_hover_cursor(egui::CursorIcon::PointingHand);
-                        let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered() || app.suggest_sel == Some(i), 0.1);
+                        let resp = named(resp, &s.text).on_hover_cursor(egui::CursorIcon::PointingHand);
+                        let picked = app.suggest_sel == Some(i);
+                        let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.contains_pointer() || picked, 0.1);
                         ui.painter().rect_filled(r, 8.0, theme::glass(0.08 * h));
-                        icon_at(ui, pos2(r.left() + 20.0, r.center().y), icon::SEARCH, 15.0, theme::text_dim());
-                        text_at(ui, pos2(r.left() + 42.0, r.center().y - 9.0), &term, theme::regular(15.0), theme::TEXT, r.width() - 52.0);
+                        let glyph = if s.remove.is_some() { icon::HISTORY } else { icon::SEARCH };
+                        icon_at(ui, pos2(r.left() + 20.0, r.center().y), glyph, 15.0, theme::text_dim());
+                        let text_w = r.width() - if s.remove.is_some() { 88.0 } else { 52.0 };
+                        // What's typed in bold, the rest dimmed, as on music.youtube.com.
+                        let typed = app.suggestions.0.as_str();
+                        let n = s.text.chars().zip(typed.chars()).take_while(|(a, b)| a.to_lowercase().eq(b.to_lowercase())).count();
+                        let split = if n == typed.chars().count() { s.text.char_indices().nth(n).map_or(s.text.len(), |(i, _)| i) } else { 0 };
+                        let (bold, rest) = s.text.split_at(split);
+                        let mut job = egui::text::LayoutJob::default();
+                        job.append(bold, 0.0, egui::TextFormat { font_id: theme::semibold(15.0), color: theme::TEXT, ..Default::default() });
+                        job.append(rest, 0.0, egui::TextFormat { font_id: theme::regular(15.0), color: theme::text_dim(), ..Default::default() });
+                        job.wrap = egui::text::TextWrapping::truncate_at_width(text_w.max(10.0));
+                        let g = ui.fonts_mut(|f| f.layout_job(job));
+                        ui.painter().galley(pos2(r.left() + 42.0, r.center().y - 9.0), g, theme::TEXT);
+                        // A past search can be removed from the account's history.
+                        let mut x_down = false;
+                        if let Some(token) = &s.remove {
+                            let x = Rect::from_center_size(pos2(r.right() - 22.0, r.center().y), Vec2::splat(28.0));
+                            let xr = named(ui.interact(x, resp.id.with("remove"), Sense::click()), &format!("Remove {} from search history", s.text))
+                                .on_hover_text("Remove from search history")
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            let xh = theme::anim_bool(ui.ctx(), xr.id.with("h"), xr.hovered(), 0.1);
+                            if xh > 0.0 {
+                                ui.painter().circle_filled(x.center(), 14.0, theme::glass(0.10 * xh));
+                            }
+                            icon_at(ui, x.center(), icon::TRASH_2, 15.0, theme::lerp_color(theme::text_dim(), theme::TEXT, xh));
+                            // Pressed or just released: either way the box must keep focus.
+                            x_down = xr.is_pointer_button_down_on() || xr.clicked();
+                            if xr.clicked() {
+                                removed = Some((i, token.clone()));
+                            }
+                        }
                         // Pointer-down, not click: the text box loses focus (hiding this) first.
-                        if resp.is_pointer_button_down_on() || resp.clicked() {
+                        if !x_down && (resp.is_pointer_button_down_on() || resp.clicked()) {
+                            let term = s.text.clone();
                             app.suggestions = Default::default();
                             app.search_focused = false;
                             app.actions.push(Action::Go(Page::Search(term)));
+                            break;
                         }
+                        if x_down {
+                            // Keep the box focused, and this list open, through the click.
+                            if let Some(id) = app.search_edit {
+                                ui.memory_mut(|m| m.request_focus(id));
+                            }
+                        }
+                    }
+                    if let Some((i, token)) = removed {
+                        app.suggestions.1.remove(i);
+                        app.suggest_sel = None;
+                        app.suggest_round += 1;
+                        app.backend.request(crate::backend::Req::RemoveSearch(token));
                     }
                 });
         });

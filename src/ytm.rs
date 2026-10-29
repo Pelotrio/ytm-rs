@@ -67,8 +67,10 @@ impl Filter {
     }
 }
 
+/// As the signed-in account when there is one: signed-out searches miss some releases,
+/// and signed in, the search lands in the account's search history like in the app.
 async fn search(api: &Api, query: &str, filter: Filter) -> anyhow::Result<Vec<Value>> {
-    search_as(api, query, filter, false).await
+    search_as(api, query, filter, true).await
 }
 
 async fn search_as(api: &Api, query: &str, filter: Filter, auth: bool) -> anyhow::Result<Vec<Value>> {
@@ -91,10 +93,29 @@ pub async fn search_cards(api: &Api, query: &str, filter: Filter) -> anyhow::Res
     Ok(search(api, query, filter).await?.iter().filter_map(|i| list_card(&i["musicResponsiveListItemRenderer"])).collect())
 }
 
-pub async fn suggestions(api: &Api, input: &str) -> anyhow::Result<Vec<String>> {
-    let v = api.call("music/get_search_suggestions", json!({ "input": input }), false).await?;
-    let items = &v["contents"][0]["searchSuggestionsSectionRenderer"]["contents"];
-    Ok(arr(items).iter().filter_map(|i| text(&i["searchSuggestionRenderer"]["suggestion"])).collect())
+/// A search suggestion. Signed in, the account's past searches come first (all of them
+/// for an empty box); those carry the token that removes them from the search history.
+#[derive(Clone)]
+pub struct Suggestion {
+    pub text: String,
+    pub remove: Option<String>,
+}
+
+pub async fn suggestions(api: &Api, input: &str) -> anyhow::Result<Vec<Suggestion>> {
+    let v = api.call("music/get_search_suggestions", json!({ "input": input }), true).await?;
+    let items = arr(&v["contents"]).iter().flat_map(|s| arr(&s["searchSuggestionsSectionRenderer"]["contents"]));
+    Ok(items
+        .filter_map(|i| match &i["historySuggestionRenderer"] {
+            Value::Null => Some(Suggestion { text: text(&i["searchSuggestionRenderer"]["suggestion"])?, remove: None }),
+            h => Some(Suggestion { text: text(&h["suggestion"])?, remove: h["serviceEndpoint"]["feedbackEndpoint"]["feedbackToken"].as_str().map(str::to_owned) }),
+        })
+        .collect())
+}
+
+/// Remove a past search from the account's search history.
+pub async fn remove_search(api: &Api, token: &str) -> anyhow::Result<()> {
+    api.call_signed_in("feedback", json!({ "feedbackTokens": [token] })).await?;
+    Ok(())
 }
 
 // ------------------------------------------------------------- albums, playlists
