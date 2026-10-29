@@ -419,7 +419,6 @@ fn scan_fonts() -> Vec<SysFamily> {
 /// The closest face to each of the three weights the app draws: regular, semibold, and
 /// bold, leaning to 700 over 900 where a family has both.
 fn choose_faces(family: &SysFamily) -> Option<[Face; 3]> {
-    static MAPPED: std::sync::Mutex<Vec<(std::path::PathBuf, &'static [u8])>> = std::sync::Mutex::new(Vec::new());
     let mut faces = Vec::new();
     for target in [400.0, 600.0, 750.0] {
         let best = family.faces.iter().min_by_key(|f| match f.wght {
@@ -427,15 +426,7 @@ fn choose_faces(family: &SysFamily) -> Option<[Face; 3]> {
             Some((lo, hi)) => (target - target.clamp(lo, hi)).abs() as i32,
             None => (f.weight - target).abs() as i32,
         })?;
-        let mut mapped = MAPPED.lock().unwrap();
-        let bytes = match mapped.iter().find(|(p, _)| *p == best.path) {
-            Some((_, b)) => *b,
-            None => {
-                let b = map(best.path.to_str()?)?;
-                mapped.push((best.path.clone(), b));
-                b
-            }
-        };
+        let bytes = map(&best.path)?;
         faces.push(Face { bytes, index: best.index, wght: best.wght.map(|(lo, hi)| target.clamp(lo, hi)) });
     }
     faces.try_into().ok()
@@ -577,12 +568,11 @@ pub fn install_fonts(ctx: &egui::Context, ui_font: &str) {
                 .collect()
         })
     });
-    // Primary fonts: Inter, each lyric font, and the installed font picked in Settings
-    // (Inter again when there's none, so the "choice" families always exist).
+    // Primary fonts: Inter, each lyric font, and the installed font picked in Settings.
     let choice = CHOICE.read().unwrap().as_ref().map(|c| c.faces);
     let mut groups: Vec<(&str, [Face; 3])> = vec![("inter", INTER.map(Face::of))];
     groups.extend(LYRIC_FONTS.iter().map(|(k, w)| (*k, w.map(Face::of))));
-    groups.push(("choice", choice.unwrap_or(INTER.map(Face::of))));
+    groups.extend(choice.map(|faces| ("choice", faces)));
     for (key, faces) in &groups {
         let (asc_p, h_p) = em_metrics(faces[0].bytes, faces[0].index).unwrap_or((0.97, 1.21));
         for (w, face) in faces.iter().enumerate() {
@@ -617,15 +607,34 @@ pub fn install_fonts(ctx: &egui::Context, ui_font: &str) {
             }
         }
     }
+    // With no installed font picked, the "choice" families are Inter's, so they always
+    // exist without a second copy of Inter and its fallbacks.
+    if choice.is_none() {
+        for w in 0..3 {
+            let inter = defs.families[&FontFamily::Name(format!("inter-{w}").into())].clone();
+            defs.families.insert(FontFamily::Name(format!("choice-{w}").into()), inter);
+        }
+    }
     ctx.set_fonts(defs);
 }
 
-fn map(path: &str) -> Option<&'static [u8]> {
-    let file = std::fs::File::open(path).ok()?;
+/// Map a font file for the rest of the process. Kept by canonical path, so a file is
+/// mapped once however many weights, faces or installed-font picks use it, and whichever
+/// spelling names it (the installed-font scan's C:\WINDOWS, the fallback list's C:\Windows).
+fn map(path: impl AsRef<std::path::Path>) -> Option<&'static [u8]> {
+    static MAPPED: std::sync::Mutex<Vec<(std::path::PathBuf, &'static [u8])>> = std::sync::Mutex::new(Vec::new());
+    let path = std::fs::canonicalize(path).ok()?;
+    let mut mapped = MAPPED.lock().unwrap();
+    if let Some((_, bytes)) = mapped.iter().find(|(p, _)| *p == path) {
+        return Some(bytes);
+    }
+    let file = std::fs::File::open(&path).ok()?;
     // SAFETY: system font files aren't modified while in use; the mapping is
     // read-only and intentionally lives for the rest of the process.
     let mmap = unsafe { memmap2::Mmap::map(&file) }.ok()?;
-    Some(Box::leak(Box::new(mmap)))
+    let bytes: &'static [u8] = Box::leak(Box::new(mmap));
+    mapped.push((path, bytes));
+    Some(bytes)
 }
 
 /// Apply a theme preset's chrome: how strong glass surfaces are and how round
