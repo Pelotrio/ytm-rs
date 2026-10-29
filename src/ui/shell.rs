@@ -517,8 +517,8 @@ pub fn suggestions(app: &mut App, ctx: &egui::Context) {
                                 ui.set_clip_rect(r.intersect(ui.clip_rect()));
                                 ui.set_opacity(1.0 - e);
                                 let cy = r.top() + 20.0;
-                                icon_at(ui, pos2(r.left() + 20.0, cy), icon::SEARCH, 15.0, theme::text_dim());
-                                text_at(ui, pos2(r.left() + 42.0, cy - 9.0), &term, theme::regular(15.0), theme::TEXT, r.width() - 88.0);
+                                icon_at(ui, pos2(r.left() + 20.0, cy), icon::HISTORY, 15.0, theme::text_dim());
+                                suggestion_text(ui, pos2(r.left() + 42.0, cy - 9.0), &term, &app.suggestions.0, r.width() - 88.0);
                             });
                             ui.ctx().request_repaint();
                             continue;
@@ -527,9 +527,10 @@ pub fn suggestions(app: &mut App, ctx: &egui::Context) {
                         let resp = named(resp, &term).on_hover_cursor(egui::CursorIcon::PointingHand);
                         let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.contains_pointer() || app.suggest_sel == Some(i), 0.1);
                         ui.painter().rect_filled(r, 8.0, theme::glass(0.08 * h));
-                        icon_at(ui, pos2(r.left() + 20.0, r.center().y), icon::SEARCH, 15.0, theme::text_dim());
+                        let glyph = if s.forget.is_some() { icon::HISTORY } else { icon::SEARCH };
+                        icon_at(ui, pos2(r.left() + 20.0, r.center().y), glyph, 15.0, theme::text_dim());
                         let room = if s.forget.is_some() { 88.0 } else { 52.0 };
-                        text_at(ui, pos2(r.left() + 42.0, r.center().y - 9.0), &term, theme::regular(15.0), theme::TEXT, r.width() - room);
+                        suggestion_text(ui, pos2(r.left() + 42.0, r.center().y - 9.0), &term, &app.suggestions.0, r.width() - room);
                         // A past search can be removed from the account's history.
                         if let Some(token) = s.forget {
                             let x = Rect::from_center_size(pos2(r.right() - 22.0, r.center().y), Vec2::splat(30.0));
@@ -540,7 +541,7 @@ pub fn suggestions(app: &mut App, ctx: &egui::Context) {
                             if xh > 0.0 {
                                 ui.painter().circle_filled(x.center(), 15.0, theme::glass(0.12 * xh));
                             }
-                            icon_at(ui, x.center(), icon::X, 15.0, theme::lerp_color(theme::text_dim(), theme::TEXT, xh));
+                            icon_at(ui, x.center(), icon::TRASH_2, 15.0, theme::lerp_color(theme::text_dim(), theme::TEXT, xh));
                             // On the press, and one per press: the next row's button slides
                             // under the held pointer.
                             if (xr.is_pointer_button_down_on() || xr.clicked()) && !app.forget_held {
@@ -551,6 +552,8 @@ pub fn suggestions(app: &mut App, ctx: &egui::Context) {
                                 }
                                 app.forgetting = Some((token.clone(), now));
                                 app.suggest_sel = None;
+                                app.suggest_round += 1;
+                                app.forgets_pending += 1;
                                 app.search_refocus = true;
                                 app.backend.request(crate::backend::Req::ForgetSearch(token));
                             }
@@ -568,6 +571,19 @@ pub fn suggestions(app: &mut App, ctx: &egui::Context) {
                     }
                 });
         });
+}
+
+/// A suggestion with what's typed in bold and the rest dimmed, as on music.youtube.com.
+fn suggestion_text(ui: &Ui, pos: Pos2, text: &str, typed: &str, width: f32) {
+    let n = text.chars().zip(typed.chars()).take_while(|(a, b)| a.to_lowercase().eq(b.to_lowercase())).count();
+    let split = if n == typed.chars().count() { text.char_indices().nth(n).map_or(text.len(), |(i, _)| i) } else { 0 };
+    let (bold, rest) = text.split_at(split);
+    let mut job = egui::text::LayoutJob::default();
+    job.append(bold, 0.0, egui::TextFormat { font_id: theme::semibold(15.0), color: theme::TEXT, ..Default::default() });
+    job.append(rest, 0.0, egui::TextFormat { font_id: theme::regular(15.0), color: theme::text_dim(), ..Default::default() });
+    job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(10.0));
+    let g = ui.fonts_mut(|f| f.layout_job(job));
+    ui.painter().galley(pos, g, theme::TEXT);
 }
 
 // ------------------------------------------------------------------ player bar

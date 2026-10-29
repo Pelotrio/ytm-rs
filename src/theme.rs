@@ -140,6 +140,8 @@ pub mod icon {
     pub const LIST_MUSIC: char = '\u{e2e0}';
     pub const MIC_VOCAL: char = '\u{e349}';
     pub const X: char = '\u{e1b2}';
+    pub const HISTORY: char = '\u{e1f5}';
+    pub const TRASH_2: char = '\u{e18e}';
     pub const ELLIPSIS_VERTICAL: char = '\u{e0b7}';
     pub const LIST_PLUS: char = '\u{e23f}';
     pub const LIST_MINUS: char = '\u{e23e}';
