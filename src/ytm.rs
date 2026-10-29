@@ -67,18 +67,15 @@ impl Filter {
     }
 }
 
-async fn search(api: &Api, query: &str, filter: Filter) -> anyhow::Result<Vec<Value>> {
-    search_as(api, query, filter, false).await
-}
-
 async fn search_as(api: &Api, query: &str, filter: Filter, auth: bool) -> anyhow::Result<Vec<Value>> {
     let v = api.call("search", json!({ "query": query, "params": filter.params() }), auth).await?;
     let sections = &v["contents"]["tabbedSearchResultsRenderer"]["tabs"][0]["tabRenderer"]["content"]["sectionListRenderer"]["contents"];
     Ok(arr(sections).iter().flat_map(|s| arr(&s["musicShelfRenderer"]["contents"]).iter().cloned()).collect())
 }
 
-pub async fn search_songs(api: &Api, query: &str) -> anyhow::Result<Vec<Track>> {
-    Ok(search(api, query, Filter::Songs).await?.iter().filter_map(|i| list_item(&i["musicResponsiveListItemRenderer"])).collect())
+/// `auth`: as the signed-in account, which adds the query to its search history.
+pub async fn search_songs(api: &Api, query: &str, auth: bool) -> anyhow::Result<Vec<Track>> {
+    Ok(search_as(api, query, Filter::Songs, auth).await?.iter().filter_map(|i| list_item(&i["musicResponsiveListItemRenderer"])).collect())
 }
 
 /// Song or video rows, searched as the signed-in account: signed-out searches miss
@@ -87,14 +84,46 @@ pub async fn search_tracks_signed_in(api: &Api, query: &str, filter: Filter) -> 
     Ok(search_as(api, query, filter, true).await?.iter().filter_map(|i| list_item(&i["musicResponsiveListItemRenderer"])).collect())
 }
 
-pub async fn search_cards(api: &Api, query: &str, filter: Filter) -> anyhow::Result<Vec<Card>> {
-    Ok(search(api, query, filter).await?.iter().filter_map(|i| list_card(&i["musicResponsiveListItemRenderer"])).collect())
+pub async fn search_cards(api: &Api, query: &str, filter: Filter, auth: bool) -> anyhow::Result<Vec<Card>> {
+    Ok(search_as(api, query, filter, auth).await?.iter().filter_map(|i| list_card(&i["musicResponsiveListItemRenderer"])).collect())
 }
 
-pub async fn suggestions(api: &Api, input: &str) -> anyhow::Result<Vec<String>> {
-    let v = api.call("music/get_search_suggestions", json!({ "input": input }), false).await?;
+#[derive(Clone, Debug, PartialEq)]
+pub struct Suggestion {
+    pub text: String,
+    /// A past search of the signed-in account: the token that removes it from the
+    /// account's search history.
+    pub forget: Option<String>,
+}
+
+/// Search terms for `input`. Signed in, the account's matching past searches come
+/// first, and an empty `input` gives just those (its recent searches).
+pub async fn suggestions(api: &Api, input: &str, auth: bool) -> anyhow::Result<Vec<Suggestion>> {
+    let v = api.call("music/get_search_suggestions", json!({ "input": input }), auth).await?;
+    Ok(parse_suggestions(&v))
+}
+
+fn parse_suggestions(v: &Value) -> Vec<Suggestion> {
+    // A second section holds songs and artists, which the dropdown doesn't show.
     let items = &v["contents"][0]["searchSuggestionsSectionRenderer"]["contents"];
-    Ok(arr(items).iter().filter_map(|i| text(&i["searchSuggestionRenderer"]["suggestion"])).collect())
+    arr(items)
+        .iter()
+        .filter_map(|i| {
+            let past = &i["historySuggestionRenderer"];
+            let r = if past.is_null() { &i["searchSuggestionRenderer"] } else { past };
+            Some(Suggestion {
+                text: text(&r["suggestion"])?,
+                forget: past["serviceEndpoint"]["feedbackEndpoint"]["feedbackToken"].as_str().map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
+/// Remove a past search from the account's search history.
+pub async fn forget_search(api: &Api, token: &str) -> anyhow::Result<()> {
+    let v = api.call_signed_in("feedback", json!({ "feedbackTokens": [token] })).await?;
+    anyhow::ensure!(v["feedbackResponses"][0]["isProcessed"] == true, "YouTube Music didn't remove it");
+    Ok(())
 }
 
 // ------------------------------------------------------------- albums, playlists
@@ -1071,6 +1100,27 @@ fn browse_id(run: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn past_searches_come_with_their_remove_token() {
+        // Trimmed from a signed-in get_search_suggestions answer (October 2026).
+        let v = json!({"contents": [
+            {"searchSuggestionsSectionRenderer": {"contents": [
+                {"historySuggestionRenderer": {"suggestion": {"runs": [{"text": "lo", "bold": true}, {"text": "fi beats"}]},
+                    "serviceEndpoint": {"feedbackEndpoint": {"feedbackToken": "tok"}},
+                    "navigationEndpoint": {"searchEndpoint": {"query": "lofi beats"}}}},
+                {"searchSuggestionRenderer": {"suggestion": {"runs": [{"text": "lo"}, {"text": "ve songs"}]}}}
+            ]}},
+            {"searchSuggestionsSectionRenderer": {"contents": [{"musicResponsiveListItemRenderer": {}}]}}
+        ]});
+        assert_eq!(
+            parse_suggestions(&v),
+            [
+                Suggestion { text: "lofi beats".into(), forget: Some("tok".into()) },
+                Suggestion { text: "love songs".into(), forget: None },
+            ]
+        );
+    }
 
     #[test]
     fn revoked_session_reads_as_logged_out() {

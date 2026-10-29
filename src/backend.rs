@@ -26,6 +26,8 @@ pub enum Req {
     Explore(Vec<String>),
     Search(String),
     Suggest(String),
+    /// Remove a past search (its token) from the account's history.
+    ForgetSearch(String),
     Album(String),
     Artist(String),
     Playlist(String),
@@ -83,6 +85,7 @@ impl Req {
             Req::Explore(_) => "Loading explore",
             Req::Search(_) => "Search",
             Req::Suggest(_) => "Suggest",
+            Req::ForgetSearch(_) => "Removing the search",
             Req::Album(_) => "Loading album",
             Req::Artist(_) => "Loading artist",
             Req::Playlist(_) => "Loading playlist",
@@ -181,7 +184,7 @@ pub enum Resp {
     QuickPicksMore { seed: String, tracks: Vec<Track> },
     Explore(Explore),
     Search(SearchResults),
-    Suggest { query: String, terms: Vec<String> },
+    Suggest { query: String, terms: Vec<ytm::Suggestion> },
     Collection(Collection),
     Artist(ArtistPage),
     Library(Library),
@@ -208,6 +211,8 @@ pub enum Resp {
     /// Playback for `generation` failed before reaching the audio engine.
     PlayError { generation: u64, msg: String },
     LoggedIn(bool),
+    /// A past search left the account's history; the list already shows it gone.
+    SearchForgotten,
     Error(String),
 }
 
@@ -392,10 +397,10 @@ impl Backend {
                 }
                 Req::Search(query) => {
                     let (t, al, ar, pl) = tokio::join!(
-                        ytm::search_songs(api, &query),
-                        ytm::search_cards(api, &query, ytm::Filter::Albums),
-                        ytm::search_cards(api, &query, ytm::Filter::Artists),
-                        ytm::search_cards(api, &query, ytm::Filter::Playlists),
+                        ytm::search_songs(api, &query, me),
+                        ytm::search_cards(api, &query, ytm::Filter::Albums, me),
+                        ytm::search_cards(api, &query, ytm::Filter::Artists, me),
+                        ytm::search_cards(api, &query, ytm::Filter::Playlists, me),
                     );
                     Resp::Search(SearchResults {
                         tracks: t?,
@@ -406,8 +411,12 @@ impl Backend {
                     })
                 }
                 Req::Suggest(query) => {
-                    let terms = ytm::suggestions(api, &query).await?.into_iter().take(8).collect();
+                    let terms = ytm::suggestions(api, &query, me).await?.into_iter().take(8).collect();
                     Resp::Suggest { query, terms }
+                }
+                Req::ForgetSearch(token) => {
+                    ytm::forget_search(api, &token).await?;
+                    Resp::SearchForgotten
                 }
                 Req::Album(id) => Resp::Collection(ytm::album(api, &id).await?),
                 Req::Playlist(id) => Resp::Collection(ytm::playlist(api, &id, me, 500).await?),

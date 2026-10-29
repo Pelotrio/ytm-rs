@@ -218,7 +218,7 @@ pub struct App {
     /// The current page's request failed with nothing cached: show a retry, not a skeleton.
     load_failed: bool,
     search_text: String,
-    suggestions: (String, Vec<String>),
+    suggestions: (String, Vec<crate::ytm::Suggestion>),
     /// The suggestion picked with the arrow keys, which Enter searches.
     suggest_sel: Option<usize>,
     suggest_due: Option<f64>,
@@ -296,6 +296,13 @@ pub struct App {
     last_frame: f64,
     search_rect: Option<egui::Rect>,
     search_focused: bool,
+    /// Give the search box its focus back (removing a past search takes it away).
+    search_refocus: bool,
+    /// A past search was removed during the current press: the rows below slide up
+    /// under the held pointer, and must not go too.
+    forget_held: bool,
+    /// The past search being removed (its token) and when: it folds away first.
+    forgetting: Option<(String, f64)>,
     /// Mouse-wheel distance still to be scrolled (smooth scrolling).
     wheel_pending: egui::Vec2,
     wheel_mods: egui::Modifiers,
@@ -543,6 +550,9 @@ impl App {
             last_frame: 0.0,
             search_rect: None,
             search_focused: false,
+            search_refocus: false,
+            forget_held: false,
+            forgetting: None,
             wheel_pending: egui::Vec2::ZERO,
             wheel_mods: egui::Modifiers::NONE,
             np_open: false,
@@ -1631,7 +1641,8 @@ impl App {
         if self.suggest_due.is_some_and(|d| now >= d) {
             self.suggest_due = None;
             let q = self.search_text.trim().to_owned();
-            if !q.is_empty() {
+            // An empty box signed in shows the account's recent searches.
+            if !q.is_empty() || self.logged_in {
                 self.backend.request(Req::Suggest(q));
             }
         }
@@ -1684,6 +1695,7 @@ impl App {
                 self.search = Some(r);
                 self.loading = false;
             }
+            Resp::SearchForgotten => {}
             Resp::Suggest { query, terms } => {
                 if self.search_text.trim() == query {
                     self.suggestions = (query, terms);

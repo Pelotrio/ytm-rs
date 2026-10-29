@@ -402,7 +402,13 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
                 .desired_width(inner.width()),
         );
         app.search_rect = Some(rect);
+        if std::mem::take(&mut app.search_refocus) {
+            edit.request_focus();
+        }
         app.search_focused = edit.has_focus();
+        if edit.gained_focus() && app.search_text.trim().is_empty() && app.logged_in {
+            app.suggest_due = Some(ui.input(|i| i.time));
+        }
         if clearable {
             let x = Rect::from_center_size(pos2(rect.right() - 25.0, rect.center().y), Vec2::splat(30.0));
             let resp = named(ui.interact(x, ui.id().with("search-clear"), Sense::click()), "Clear search").on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -415,7 +421,7 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
                 app.search_text.clear();
                 app.suggestions = Default::default();
                 app.suggest_sel = None;
-                app.suggest_due = None;
+                app.suggest_due = Some(ui.input(|i| i.time));
                 edit.request_focus();
             }
         }
@@ -431,7 +437,7 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
             }
         }
         if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            let picked = app.suggest_sel.filter(|_| fresh).and_then(|s| app.suggestions.1.get(s)).cloned();
+            let picked = app.suggest_sel.filter(|_| fresh).and_then(|s| app.suggestions.1.get(s)).map(|s| s.text.clone());
             let q = picked.unwrap_or_else(|| app.search_text.trim().to_owned());
             if !q.is_empty() {
                 app.suggestions = Default::default();
@@ -469,7 +475,8 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
 /// Search suggestions dropdown under the search box.
 pub fn suggestions(app: &mut App, ctx: &egui::Context) {
     let Some(rect) = app.search_rect else { return };
-    let show = app.search_focused && !app.suggestions.1.is_empty() && !app.np_open;
+    // Through a press on a remove button too: its release briefly takes the box's focus.
+    let show = (app.search_focused || app.forget_held) && !app.suggestions.1.is_empty() && !app.np_open;
     let t = theme::anim_bool(ctx, "suggest-open", show, 0.15);
     if t <= 0.0 {
         return;
@@ -486,19 +493,78 @@ pub fn suggestions(app: &mut App, ctx: &egui::Context) {
                 .shadow(egui::epaint::Shadow { offset: [0, 10], blur: 30, spread: 0, color: theme::shade(0.5) })
                 .show(ui, |ui| {
                     ui.set_width(rect.width() - 12.0);
-                    for (i, term) in app.suggestions.1.clone().into_iter().enumerate() {
+                    if !ui.input(|i| i.pointer.any_down() || i.pointer.any_released()) {
+                        app.forget_held = false;
+                    }
+                    // Releasing that press is a click outside the box, which takes its focus
+                    // (and this list) away: give it back until the press is over.
+                    if app.forget_held {
+                        app.search_refocus = true;
+                    }
+                    let now = ui.input(|i| i.time);
+                    for (i, s) in app.suggestions.1.clone().into_iter().enumerate() {
+                        let term = s.text;
+                        // The removed one folds away, and the rows below slide up into its place.
+                        if let Some((_, at)) = app.forgetting.as_ref().filter(|(t, _)| s.forget.as_deref() == Some(t.as_str())) {
+                            let p = ((now - at) / 0.18).clamp(0.0, 1.0) as f32;
+                            let e = 1.0 - (1.0 - p).powi(3);
+                            let gap = ui.spacing().item_spacing.y;
+                            // Its spacing folds away with it, so nothing jumps at the end.
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), (40.0 + gap) * (1.0 - e)), Sense::hover());
+                            ui.spacing_mut().item_spacing.y = gap;
+                            ui.scope(|ui| {
+                                ui.set_clip_rect(r.intersect(ui.clip_rect()));
+                                ui.set_opacity(1.0 - e);
+                                let cy = r.top() + 20.0;
+                                icon_at(ui, pos2(r.left() + 20.0, cy), icon::SEARCH, 15.0, theme::text_dim());
+                                text_at(ui, pos2(r.left() + 42.0, cy - 9.0), &term, theme::regular(15.0), theme::TEXT, r.width() - 88.0);
+                            });
+                            ui.ctx().request_repaint();
+                            continue;
+                        }
                         let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
                         let resp = named(resp, &term).on_hover_cursor(egui::CursorIcon::PointingHand);
-                        let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered() || app.suggest_sel == Some(i), 0.1);
+                        let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.contains_pointer() || app.suggest_sel == Some(i), 0.1);
                         ui.painter().rect_filled(r, 8.0, theme::glass(0.08 * h));
                         icon_at(ui, pos2(r.left() + 20.0, r.center().y), icon::SEARCH, 15.0, theme::text_dim());
-                        text_at(ui, pos2(r.left() + 42.0, r.center().y - 9.0), &term, theme::regular(15.0), theme::TEXT, r.width() - 52.0);
+                        let room = if s.forget.is_some() { 88.0 } else { 52.0 };
+                        text_at(ui, pos2(r.left() + 42.0, r.center().y - 9.0), &term, theme::regular(15.0), theme::TEXT, r.width() - room);
+                        // A past search can be removed from the account's history.
+                        if let Some(token) = s.forget {
+                            let x = Rect::from_center_size(pos2(r.right() - 22.0, r.center().y), Vec2::splat(30.0));
+                            let xr = named(ui.interact(x, resp.id.with("forget"), Sense::click()), "Remove from recent searches")
+                                .on_hover_text("Remove")
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            let xh = theme::anim_bool(ui.ctx(), xr.id.with("h"), xr.hovered(), 0.1);
+                            if xh > 0.0 {
+                                ui.painter().circle_filled(x.center(), 15.0, theme::glass(0.12 * xh));
+                            }
+                            icon_at(ui, x.center(), icon::X, 15.0, theme::lerp_color(theme::text_dim(), theme::TEXT, xh));
+                            // On the press, and one per press: the next row's button slides
+                            // under the held pointer.
+                            if (xr.is_pointer_button_down_on() || xr.clicked()) && !app.forget_held {
+                                app.forget_held = true;
+                                // One still folding away is done.
+                                if let Some((t, _)) = app.forgetting.take() {
+                                    app.suggestions.1.retain(|s| s.forget.as_deref() != Some(t.as_str()));
+                                }
+                                app.forgetting = Some((token.clone(), now));
+                                app.suggest_sel = None;
+                                app.search_refocus = true;
+                                app.backend.request(crate::backend::Req::ForgetSearch(token));
+                            }
+                        }
                         // Pointer-down, not click: the text box loses focus (hiding this) first.
                         if resp.is_pointer_button_down_on() || resp.clicked() {
                             app.suggestions = Default::default();
                             app.search_focused = false;
                             app.actions.push(Action::Go(Page::Search(term)));
+                            break;
                         }
+                    }
+                    if let Some((t, _)) = app.forgetting.take_if(|(_, at)| now - *at >= 0.18) {
+                        app.suggestions.1.retain(|s| s.forget.as_deref() != Some(t.as_str()));
                     }
                 });
         });
