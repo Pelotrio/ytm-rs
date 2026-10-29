@@ -664,6 +664,7 @@ pub fn install_style(ctx: &egui::Context) {
         v.override_text_color = Some(TEXT);
         v.selection.bg_fill = with_alpha(RED, 0.5);
         v.hyperlink_color = TEXT;
+        v.interact_cursor = Some(egui::CursorIcon::PointingHand);
         v.window_corner_radius = egui::CornerRadius::same(14);
         v.menu_corner_radius = egui::CornerRadius::same(12);
         v.window_stroke = egui::Stroke::new(1.0, glass(0.08));
