@@ -175,7 +175,7 @@ pub fn dialog(app: &mut App, ctx: &egui::Context) {
     let body = app.updater.as_ref().and_then(|u| u.notes(&d.version));
     let (mut close, mut restart) = (false, false);
     let accent = app.accent_color();
-    let modal = egui::Modal::new("release-notes".into()).frame(surface()).backdrop_color(theme::shade(0.55)).show(ctx, |ui| {
+    let modal = egui::Modal::new(egui::Id::unique("release-notes")).frame(surface()).backdrop_color(theme::shade(0.55)).show(ctx, |ui| {
         let w = 540.0_f32.min(ctx.content_rect().width() - 48.0);
         ui.set_width(w);
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
@@ -251,7 +251,7 @@ pub fn card(app: &mut App, ctx: &egui::Context) {
     let at = egui::pos2(screen.right() - 24.0, screen.bottom() - app.bar_height() - 20.0);
     let t = theme::anim_bool(ctx, "whats-new-in", true, 0.35);
     let (mut dismiss, mut all) = (false, false);
-    egui::Area::new("whats-new".into())
+    egui::Area::new(egui::Id::unique("whats-new"))
         .order(egui::Order::Foreground)
         .pivot(egui::Align2::RIGHT_BOTTOM)
         .fixed_pos(at + vec2(0.0, 16.0 * (1.0 - t)))

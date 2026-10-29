@@ -608,7 +608,7 @@ fn lobby(app: &mut App, ui: &mut Ui) {
                     .font(theme::regular(14.0))
                     .char_limit(32)
                     .frame(egui::Frame::NONE)
-                    .vertical_align(egui::Align::Center)
+                    .align(egui::Align2::LEFT_CENTER)
                     .desired_width(inner.width()),
             );
         });
@@ -639,7 +639,7 @@ fn lobby(app: &mut App, ui: &mut Ui) {
                     .font(theme::semibold(16.0))
                     .char_limit(8)
                     .frame(egui::Frame::NONE)
-                    .vertical_align(egui::Align::Center)
+                    .align(egui::Align2::LEFT_CENTER)
                     .desired_width(inner.width()),
             );
             if edit.changed() {

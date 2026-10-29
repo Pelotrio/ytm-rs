@@ -46,7 +46,7 @@ pub fn page(app: &mut App, ui: &mut Ui, now: f64) {
     selection_bar(app, ui.ctx(), &page, out.inner_rect);
     // Infinite scroll on home: fetch the next shelves when nearing the bottom.
     if page == Page::Home {
-        let remaining = out.content_size.y - (out.state.offset.y + out.inner_rect.height());
+        let remaining = out.content_size.y - (out.state.clamped_offset().y + out.inner_rect.height());
         if let Some(h) = &mut app.home {
             // A failed fetch reports nothing (it's a quiet request): allow a retry later.
             if h.loading_more.is_some_and(|t| now - t > 20.0) {
@@ -240,7 +240,7 @@ fn selection_bar(app: &mut App, ctx: &egui::Context, page: &Page, area: Rect) {
     let mut acts = Vec::new();
     let mut toggle_all = false;
     let mut done = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-    egui::Area::new("selection-bar".into())
+    egui::Area::new(egui::Id::unique("selection-bar"))
         .order(egui::Order::Foreground)
         .pivot(Align2::CENTER_BOTTOM)
         .fixed_pos(pos2(area.center().x, area.bottom() - 18.0))
@@ -1142,7 +1142,7 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
         };
         if let Some(md) = app.updater.as_ref().and_then(|u| u.notes(&notes_v)) {
             divider(ui);
-            let id = egui::Id::new(("whats-new-open", &notes_v));
+            let id = egui::Id::unique(("whats-new-open", &notes_v));
             let mut open = ui.data(|d| d.get_temp(id)).unwrap_or(ready);
             ui.add_space(12.0);
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
@@ -1605,11 +1605,11 @@ pub(super) fn toggle(ui: &mut Ui, on: &mut bool, name: &str) -> egui::Response {
         resp.mark_changed();
     }
     let value = *on;
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), value, name));
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), value, name));
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     let t = theme::anim_bool(ui.ctx(), resp.id.with("t"), value, 0.16);
     let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.12);
-    let accent = ui.ctx().data(|d| d.get_temp::<Color32>(egui::Id::new("accent"))).unwrap_or(theme::RED);
+    let accent = ui.ctx().data(|d| d.get_temp::<Color32>(egui::Id::unique("accent"))).unwrap_or(theme::RED);
     let fade = if ui.is_enabled() { 1.0 } else { 0.4 };
     let off = theme::glass(0.16 + 0.06 * h);
     ui.painter().rect_filled(rect, 13.0, theme::with_alpha(theme::lerp_color(off, accent, t), fade));
@@ -1648,7 +1648,7 @@ fn seconds_slider(ui: &mut Ui, v: &mut u32, range: std::ops::RangeInclusive<u32>
     resp.widget_info(|| egui::WidgetInfo::slider(ui.is_enabled(), value as f64, name));
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered() || resp.dragged(), 0.12);
-    let accent = ui.ctx().data(|d| d.get_temp::<Color32>(egui::Id::new("accent"))).unwrap_or(theme::RED);
+    let accent = ui.ctx().data(|d| d.get_temp::<Color32>(egui::Id::unique("accent"))).unwrap_or(theme::RED);
     let t = (value - lo) as f32 / (hi - lo) as f32;
     let knob = pos2(egui::lerp(track.left()..=track.right(), t), track.center().y);
     ui.painter().rect_filled(track, 2.0, theme::glass(0.15));

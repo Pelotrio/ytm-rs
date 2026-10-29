@@ -1108,7 +1108,7 @@ impl View {
             // Click a line to seek to it (the extension seeks to the line's time).
             let hit = block_rect.intersect(rect);
             if hit.is_positive() {
-                let resp = ui.interact(hit, ui.id().with(("lyr-line", f.key, i)), egui::Sense::click());
+                let resp = ui.interact(hit, ui.scope_id().with(("lyr-line", f.key, i)), egui::Sense::click());
                 if resp.clicked() && f.lyrics.sync != Sync::None {
                     seek = Some(f.lyrics.lines[li].start as f64 / 1000.0);
                 }
