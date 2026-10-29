@@ -1086,7 +1086,6 @@ fn review(app: &mut App, ui: &mut Ui) {
         // The search page picks for this song until it's left.
         app.xfer.picking = Some(at);
         app.xfer.pick = None;
-        app.search_text = query.clone();
         app.actions.push(Action::Go(Page::Search(query)));
         return;
     }
@@ -1333,7 +1332,6 @@ fn done(app: &mut App, ui: &mut Ui) {
         app.toast("Copied the list");
     }
     if let Some(q) = search {
-        app.search_text = q.clone();
         app.actions.push(Action::Go(Page::Search(q)));
     }
     if open {
