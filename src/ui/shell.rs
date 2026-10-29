@@ -109,7 +109,7 @@ pub fn background(app: &mut App, ui: &mut Ui, screen: Rect, now: f64, only: Opti
 fn menu_button(app: &mut App, ui: &mut Ui) {
     let (r, resp) = ui.allocate_exact_size(vec2(40.0, 32.0), Sense::click());
     let label = if app.sidebar_collapsed { "Expand sidebar" } else { "Collapse sidebar" };
-    let resp = named(resp, label).on_hover_text(label);
+    let resp = named(resp, label).on_hover_text(label).on_hover_cursor(egui::CursorIcon::PointingHand);
     let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.15);
     ui.painter().circle_filled(r.center(), 18.0, theme::glass(0.08 * h));
     let color = theme::lerp_color(theme::text_dim(), theme::TEXT, h);
@@ -194,7 +194,9 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         ui.painter().circle_filled(r.center(), 16.0, theme::RED);
         ui.painter().circle_stroke(r.center(), 9.5, egui::Stroke::new(1.6, Color32::WHITE));
         widgets::play_triangle(ui, r.center() + vec2(0.8, 0.0), 4.6, Color32::WHITE);
-        if named(resp, "Home").clicked() && !collapsed {
+        let resp = named(resp, "Home");
+        let resp = if collapsed { resp } else { resp.on_hover_cursor(egui::CursorIcon::PointingHand) };
+        if resp.clicked() && !collapsed {
             app.actions.push(Action::Go(Page::Home));
         }
         ui.add_space(8.0);
@@ -206,7 +208,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     let look = NavLook::of(app);
     let nav = |ui: &mut Ui, glyph: char, label: &str, page: Page, selected: bool, go_to: &mut Option<Page>| {
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 42.0), Sense::click());
-        let mut resp = named(resp, label);
+        let mut resp = named(resp, label).on_hover_cursor(egui::CursorIcon::PointingHand);
         if collapsed {
             resp = resp.on_hover_text(label);
         }
@@ -287,7 +289,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 if !ui.is_rect_visible(rect) {
                     continue;
                 }
-                let mut resp = named(resp, &c.title);
+                let mut resp = named(resp, &c.title).on_hover_cursor(egui::CursorIcon::PointingHand);
                 if collapsed {
                     resp = resp.on_hover_text(&c.title);
                 }
@@ -396,7 +398,7 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(20.0);
             let (r, resp) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::click());
-            let resp = named(resp, "Account");
+            let resp = named(resp, "Account").on_hover_cursor(egui::CursorIcon::PointingHand);
             let initial = app.account_name.as_deref().and_then(|n| n.chars().next()).unwrap_or('?');
             if app.logged_in {
                 ui.painter().circle_filled(r.center(), 18.0, theme::lerp_color(app.accent_color(), Color32::BLACK, 0.35));
@@ -479,6 +481,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
     // Progress line along the top edge; thickens with a knob on hover.
     let bar_hit = Rect::from_min_size(track_rect.min - vec2(0.0, 6.0), vec2(track_rect.width(), 14.0));
     let resp = ui.interact(bar_hit, ui.id().with("progress"), Sense::click_and_drag());
+    let resp = if total > 0.0 { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
     resp.widget_info(|| egui::WidgetInfo::slider(total > 0.0, pos as f64, "Seek"));
     let h = theme::anim_bool(ui.ctx(), "progress-h", resp.hovered() || resp.dragged(), 0.15);
     let thick = 3.0 + 2.0 * h;
@@ -537,7 +540,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
     if let Some(t) = &track {
         let art = Rect::from_center_size(pos2(row.left() + 30.0, cy), Vec2::splat(56.0));
         let ar = ui.interact(art, ui.id().with("np-art"), Sense::click());
-        let ar = named(ar, "Open now playing");
+        let ar = named(ar, "Open now playing").on_hover_cursor(egui::CursorIcon::PointingHand);
         let ah = theme::anim_bool(ui.ctx(), ar.id.with("h"), ar.hovered(), 0.15);
         paint_cover(ui, art, &t.thumbs, theme::thumb_radius() + 1.0, 1.0);
         if ah > 0.0 {
@@ -581,7 +584,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
         let lpos = pos2(text_end + 24.0, cy);
         let lr = Rect::from_center_size(lpos, Vec2::splat(36.0));
         let lresp = ui.interact(lr, ui.id().with("like"), Sense::click());
-        let lresp = named(lresp, if liked { "Remove like" } else { "Like" }).on_hover_text(if liked { "Remove like" } else { "Like" });
+        let lresp = named(lresp, if liked { "Remove like" } else { "Like" }).on_hover_text(if liked { "Remove like" } else { "Like" }).on_hover_cursor(egui::CursorIcon::PointingHand);
         let lh = theme::anim_bool(ui.ctx(), lresp.id.with("h"), lresp.hovered(), 0.15);
         let pop = theme::anim_bool(ui.ctx(), ("liked", &t.id), liked, 0.3);
         ui.painter().circle_filled(lpos, 18.0, theme::glass(0.1 * lh));
@@ -630,7 +633,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
     }
     let pr = Rect::from_center_size(center, Vec2::splat(46.0));
     let presp = ui.interact(pr, ui.id().with("play"), Sense::click());
-    let presp = named(presp, if playing { "Pause" } else { "Play" });
+    let presp = named(presp, if playing { "Pause" } else { "Play" }).on_hover_cursor(egui::CursorIcon::PointingHand);
     let ph = theme::anim_bool(ui.ctx(), presp.id.with("h"), presp.hovered(), 0.15);
     let scale = if presp.is_pointer_button_down_on() { 0.92 } else { 1.0 + 0.05 * ph };
     ui.painter().circle_filled(center, 23.0 * scale, Color32::WHITE);
@@ -700,7 +703,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
         Rect::from_center_size(pos2(slider.left() - 18.0, cy), Vec2::splat(32.0))
     };
     let vglyph = if vol == 0.0 { icon::VOLUME_X } else if vol < 0.5 { icon::VOLUME_1 } else { icon::VOLUME_2 };
-    let mresp = named(ui.interact(vi, ui.id().with("mute"), Sense::click()), "Mute");
+    let mresp = named(ui.interact(vi, ui.id().with("mute"), Sense::click()), "Mute").on_hover_cursor(egui::CursorIcon::PointingHand);
     icon_at(ui, vi.center(), vglyph, 18.0, if mresp.hovered() { theme::TEXT } else { theme::text_dim() });
     if compact_vol {
         let pop_id = ui.id().with("vol-pop");
@@ -745,7 +748,7 @@ pub fn player_bar(app: &mut App, ui: &mut Ui, now: f64) {
 /// The volume track: click or drag to set, scroll over it to nudge.
 fn volume_slider(app: &mut App, ui: &mut Ui, slider: Rect, salt: &str) {
     let vol = app.audio.volume();
-    let vresp = ui.interact(slider, ui.id().with(salt), Sense::click_and_drag());
+    let vresp = ui.interact(slider, ui.id().with(salt), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::PointingHand);
     vresp.widget_info(|| egui::WidgetInfo::slider(true, vol as f64, "Volume"));
     let vh = theme::anim_bool(ui.ctx(), ui.id().with((salt, "h")), vresp.hovered() || vresp.dragged(), 0.15);
     let track_r = Rect::from_center_size(slider.center(), vec2(slider.width(), 4.0));
@@ -790,7 +793,7 @@ pub fn queue_list(app: &mut App, ui: &mut Ui, salt: &str) {
             return;
         }
         let start = app.index.unwrap_or(0);
-        ui.checkbox(&mut app.autoplay, egui::RichText::new("Autoplay similar songs").color(theme::text_dim()));
+        ui.checkbox(&mut app.autoplay, egui::RichText::new("Autoplay similar songs").color(theme::text_dim())).on_hover_cursor(egui::CursorIcon::PointingHand);
         ui.add_space(6.0);
         let (queue, liked, acts, has_current, by) = (&app.queue, &app.liked, &mut app.actions, app.index.is_some(), &app.jam.by);
         widgets::visible_rows(ui, queue.len() - start, |ui, k| {
@@ -807,7 +810,7 @@ pub fn queue_list(app: &mut App, ui: &mut Ui, salt: &str) {
             if !current && ui.rect_contains_pointer(Rect::from_min_max(resp.rect.min, pos2(resp.rect.right() + 42.0, resp.rect.bottom()))) {
                 // Remove button over the duration column.
                 let x = Rect::from_center_size(resp.rect.right_center() - vec2(26.0, 0.0), Vec2::splat(28.0));
-                let xr = named(ui.interact(x, resp.id.with("rm"), Sense::click()), "Remove from queue");
+                let xr = named(ui.interact(x, resp.id.with("rm"), Sense::click()), "Remove from queue").on_hover_cursor(egui::CursorIcon::PointingHand);
                 ui.painter().circle_filled(x.center(), 14.0, theme::shade(0.6));
                 icon_at(ui, x.center(), icon::X, 14.0, theme::TEXT);
                 if xr.clicked() {

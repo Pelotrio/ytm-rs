@@ -442,7 +442,7 @@ fn top_result(ui: &mut Ui, c: &Card, pick: bool, acts: &mut Vec<Action>) {
         ui.label(RichText::new("Top result").font(theme::bold(24.0)));
         ui.add_space(8.0);
         let (rect, resp) = ui.allocate_exact_size(vec2(420.0, 236.0), Sense::click());
-        let resp = named(resp, &c.title);
+        let resp = named(resp, &c.title).on_hover_cursor(egui::CursorIcon::PointingHand);
         let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.contains_pointer(), 0.2);
         ui.painter().rect_filled(rect, 14.0, theme::glass(0.07 + 0.05 * h));
         let img = Rect::from_min_size(rect.min + vec2(20.0, 20.0), Vec2::splat(110.0));
@@ -456,7 +456,7 @@ fn top_result(ui: &mut Ui, c: &Card, pick: bool, acts: &mut Vec<Action>) {
         let active = widgets::active_state(ui, &c.target);
         let playing = active == Some(true);
         let label = format!("{} {}", if playing { "Pause" } else { "Play" }, c.title);
-        let p = named(ui.interact(pr, resp.id.with("play"), Sense::click()), &label);
+        let p = named(ui.interact(pr, resp.id.with("play"), Sense::click()), &label).on_hover_cursor(egui::CursorIcon::PointingHand);
         ui.painter().circle_filled(pc, 26.0, theme::with_alpha(Color32::WHITE, 0.4 + 0.6 * h));
         let nudge = if playing { 0.0 } else { 1.5 };
         widgets::play_pause_glyph(ui, pc + vec2(nudge, 0.0), 10.0, Color32::from_gray(15), playing);

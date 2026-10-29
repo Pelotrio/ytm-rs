@@ -116,6 +116,7 @@ fn tag(ui: &Ui, right: egui::Pos2, text: &str, fill: Color32) -> f32 {
 fn big_button(ui: &mut Ui, label: &str, accent: Color32, enabled: bool, width: f32) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 50.0), if enabled { Sense::click() } else { Sense::hover() });
     let resp = named(resp, label);
+    let resp = if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
     let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered() && enabled, 0.15);
     let fill = if enabled { theme::lerp_color(accent, Color32::WHITE, 0.12 * h) } else { theme::glass(0.10) };
     ui.painter().rect_filled(rect, 25.0, fill);
@@ -1196,7 +1197,7 @@ fn candidate_row(ui: &mut Ui, t: &YtTrack, video: bool, current: bool, selected:
         ui.painter().rect_filled(img, theme::thumb_radius(), theme::shade(0.45));
         widgets::play_triangle(ui, img.center(), 8.0, Color32::WHITE);
     }
-    let play = named(play, "Play").on_hover_text("Play");
+    let play = named(play, "Play").on_hover_text("Play").on_hover_cursor(egui::CursorIcon::PointingHand);
     let mut right = rect.right() - 12.0;
     if let Some(d) = t.duration {
         ui.painter().text(pos2(right, rect.center().y), Align2::RIGHT_CENTER, format!("{}:{:02}", d / 60, d % 60), theme::regular(13.0), theme::text_dim());
