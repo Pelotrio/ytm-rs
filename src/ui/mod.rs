@@ -221,6 +221,11 @@ pub struct App {
     suggestions: (String, Vec<crate::ytm::Suggestion>),
     /// The suggestion picked with the arrow keys, which Enter searches.
     suggest_sel: Option<usize>,
+    /// Bumped when a past search is removed or the account changes: suggestions
+    /// requested before that are dropped when they arrive, rather than bring it back.
+    suggest_round: u64,
+    /// Removals sent and not yet confirmed: the list is asked for again once they're done.
+    forgets_pending: u32,
     suggest_due: Option<f64>,
 
     // page data
@@ -464,6 +469,8 @@ impl App {
             search_text: String::new(),
             suggestions: Default::default(),
             suggest_sel: None,
+            suggest_round: 0,
+            forgets_pending: 0,
             suggest_due: None,
             home: None,
             home_loading: true,
@@ -1643,7 +1650,7 @@ impl App {
             let q = self.search_text.trim().to_owned();
             // An empty box signed in shows the account's recent searches.
             if !q.is_empty() || self.logged_in {
-                self.backend.request(Req::Suggest(q));
+                self.backend.request(Req::Suggest { query: q, round: self.suggest_round });
             }
         }
     }
@@ -1695,9 +1702,15 @@ impl App {
                 self.search = Some(r);
                 self.loading = false;
             }
-            Resp::SearchForgotten => {}
-            Resp::Suggest { query, terms } => {
-                if self.search_text.trim() == query {
+            Resp::SearchForgotten => {
+                // Replies dropped meanwhile left the list behind what's typed: ask again.
+                self.forgets_pending = self.forgets_pending.saturating_sub(1);
+                if self.forgets_pending == 0 {
+                    self.suggest_due = Some(now);
+                }
+            }
+            Resp::Suggest { query, round, terms } => {
+                if round == self.suggest_round && self.search_text.trim() == query {
                     self.suggestions = (query, terms);
                     self.suggest_sel = None;
                 }
@@ -1874,6 +1887,13 @@ impl App {
             }
             Resp::LoggedIn(v) => {
                 self.logged_in = v;
+                // Recent searches belong to the account.
+                self.suggestions = Default::default();
+                self.suggest_sel = None;
+                self.forgetting = None;
+                self.suggest_round += 1;
+                self.forgets_pending = 0;
+                self.suggest_due = Some(now);
                 self.account_name = None;
                 self.account_avatar = None;
                 self.sidebar_cache = None;
