@@ -41,6 +41,8 @@ pub struct Api {
     /// When reading the page last failed (unix seconds): offline, every call would
     /// otherwise fetch it again first.
     failed_at: std::sync::atomic::AtomicU64,
+    /// A signed-in request was answered as signed out (see `take_signed_out`).
+    signed_out: std::sync::atomic::AtomicBool,
 }
 
 /// music.youtube.com's "not available in your area" page, served to addresses in a
@@ -68,6 +70,7 @@ impl Api {
             checked: Default::default(),
             unavailable: Default::default(),
             failed_at: Default::default(),
+            signed_out: Default::default(),
         }
     }
 
@@ -77,6 +80,34 @@ impl Api {
 
     pub fn set_account(&self, s: Option<Session>) {
         *self.account.write().unwrap() = s.map(Arc::new);
+    }
+
+    /// Whether a signed-in request came back signed out since the last call: Google
+    /// may have revoked the session.
+    pub fn take_signed_out(&self) -> bool {
+        self.signed_out.swap(false, Relaxed)
+    }
+
+    /// Fetch fresh session cookies, as an open YouTube tab does. Fails with
+    /// [`webmusic::Revoked`] when Google has signed the session out.
+    pub async fn rotate(&self) -> anyhow::Result<()> {
+        let Some(account) = self.account() else { return Ok(()) };
+        let set = account.rotate(&crate::proxy::http()).await?;
+        self.keep(&account, set.iter().map(String::as_str));
+        Ok(())
+    }
+
+    /// Keep the cookies Google replaced while answering a request made as `used`.
+    fn keep<'a>(&self, used: &Session, set_cookies: impl IntoIterator<Item = &'a str>) {
+        let mut slot = self.account.write().unwrap();
+        // Onto the current session: another request may have updated it meanwhile.
+        let Some(new) = slot.as_ref().filter(|s| s.same_account(used)).and_then(|s| s.updated(set_cookies)) else { return };
+        let new = Arc::new(new);
+        *slot = Some(new.clone());
+        drop(slot);
+        if let Some(dir) = self.file.parent() {
+            new.save(dir);
+        }
     }
 
     /// The cached client version and visitor ID, read from music.youtube.com when
@@ -239,13 +270,21 @@ impl Api {
             None => req.header("Cookie", CONSENT),
         };
         let resp = req.json(&payload).send().await?;
+        if let Some(a) = account {
+            self.keep(a, resp.headers().get_all("set-cookie").iter().filter_map(|c| c.to_str().ok()));
+        }
         let status = resp.status();
         let text = resp.text().await?;
         if !status.is_success() {
             let msg = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["error"]["message"].as_str().map(str::to_owned));
             anyhow::bail!(ApiError { status: status.as_u16(), msg: msg.unwrap_or_default() });
         }
-        Ok(serde_json::from_str(&text)?)
+        let v: Value = serde_json::from_str(&text)?;
+        if account.is_some() && logged_out(&v) {
+            log::warn!("{endpoint}: signed-in request answered as signed out");
+            self.signed_out.store(true, Relaxed);
+        }
+        Ok(v)
     }
 
     /// GET `url` as the signed-in account, the way the web player sends its stats pings.
@@ -285,6 +324,16 @@ impl Api {
         let session_index = between(&html, "\"SESSION_INDEX\":\"", "\"").and_then(|s| s.parse().ok()).unwrap_or(0);
         Ok(Session::new(cookie.to_owned(), session_index, page_id))
     }
+}
+
+/// Whether YouTube answered as signed out.
+pub fn logged_out(v: &Value) -> bool {
+    v["responseContext"]["serviceTrackingParams"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|s| s["params"].as_array().into_iter().flatten())
+        .any(|p| p["key"] == "logged_in" && p["value"] == "0")
 }
 
 #[derive(Debug)]

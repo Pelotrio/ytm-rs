@@ -262,7 +262,55 @@ impl Backend {
         {
             log::warn!("proxy relay: {e:#}");
         }
-        Ok(Self { rt: Arc::new(rt), api, tx, audio, wake, prefetched: Default::default(), current: Default::default(), data_dir, lyrics, translate, jsc, premium: Arc::new(tokio::sync::Mutex::new(Err(None))), hq: Default::default() })
+        let backend = Self { rt: Arc::new(rt), api, tx, audio, wake, prefetched: Default::default(), current: Default::default(), data_dir, lyrics, translate, jsc, premium: Arc::new(tokio::sync::Mutex::new(Err(None))), hq: Default::default() };
+        backend.keep_signed_in();
+        Ok(backend)
+    }
+
+    /// Refresh the session's cookies every few minutes, as an open YouTube tab does:
+    /// Google signs out a copy that stops taking new ones.
+    fn keep_signed_in(&self) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+        let this = self.clone();
+        self.rt.spawn(async move {
+            loop {
+                if this.api.account().is_some() {
+                    match this.api.rotate().await {
+                        Ok(()) => log::debug!("session cookies refreshed"),
+                        Err(e) if e.is::<webmusic::Revoked>() => this.check_session().await,
+                        Err(e) => log::info!("refreshing session cookies failed: {e:#}"),
+                    }
+                }
+                tokio::time::sleep(EVERY).await;
+            }
+        });
+    }
+
+    /// Something suggested Google signed the session out. When YouTube confirms it no
+    /// longer knows the session, sign out here too and say so, rather than every
+    /// signed-in page failing on its own.
+    async fn check_session(&self) {
+        // Several requests answered at once ask together; one check is enough.
+        static CHECKING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _one = CHECKING.lock().await;
+        let Some(account) = self.api.account() else { return };
+        match self.api.session_from_cookie(&account.cookie).await {
+            Ok(_) => return,
+            // Offline or similar: nothing learned.
+            Err(e) if e.is::<reqwest::Error>() => return,
+            Err(e) => log::warn!("signed-in session no longer valid: {e:#}"),
+        }
+        self.forget_session().await;
+        let _ = self.tx.send(Resp::LoggedIn(false));
+        let _ = self.tx.send(Resp::Error("Your YouTube sign-in expired. Sign in again to get your library back".into()));
+        self.wake();
+    }
+
+    async fn forget_session(&self) {
+        webmusic::Session::remove(&self.data_dir);
+        self.api.set_account(None);
+        *self.premium.lock().await = Err(None);
+        crate::login::forget(&self.login_profile());
     }
 
     pub fn api(&self) -> Arc<ytmapi::Api> {
@@ -313,6 +361,9 @@ impl Backend {
             if let Some(resp) = resp {
                 let _ = this.tx.send(resp);
                 this.wake();
+            }
+            if this.api.take_signed_out() {
+                this.check_session().await;
             }
         });
     }
@@ -527,10 +578,7 @@ impl Backend {
                     Resp::LoggedIn(true)
                 }
                 Req::Logout => {
-                    webmusic::Session::remove(&self.data_dir);
-                    api.set_account(None);
-                    *self.premium.lock().await = Err(None);
-                    crate::login::forget(&self.login_profile());
+                    self.forget_session().await;
                     Resp::LoggedIn(false)
                 }
             }))
